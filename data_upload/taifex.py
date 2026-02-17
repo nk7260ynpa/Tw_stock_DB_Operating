@@ -1,6 +1,7 @@
 """TAIFEX 資料上傳模組。"""
 
 import logging
+from typing import Optional
 
 from pydantic import BaseModel
 from datetime import datetime
@@ -16,22 +17,22 @@ class UploadType(BaseModel):
     Date: datetime
     Contract: str
     ContractMonth: str
-    Open: float
-    High: float
-    Low: float
-    Last: float
-    Change: float
-    ChangePercent: float
+    Open: Optional[float] = None
+    High: Optional[float] = None
+    Low: Optional[float] = None
+    Last: Optional[float] = None
+    Change: Optional[float] = None
+    ChangePercent: Optional[float] = None
     Volume: int
-    SettlementPrice: float
-    OpenInterest: float
-    BestBid: float
-    BestAsk: float
-    HistoricalHigh: float
-    HistoricalLow: float
-    TradingHalt: float
+    SettlementPrice: Optional[float] = None
+    OpenInterest: Optional[float] = None
+    BestBid: Optional[float] = None
+    BestAsk: Optional[float] = None
+    HistoricalHigh: Optional[float] = None
+    HistoricalLow: Optional[float] = None
+    TradingHalt: Optional[float] = None
     TradingSession: str
-    SpreadOrderVolume: float
+    SpreadOrderVolume: Optional[float] = None
 
 
 class Uploader(DataUploadBase):

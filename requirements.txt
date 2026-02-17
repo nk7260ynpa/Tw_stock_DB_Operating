@@ -3,6 +3,7 @@ mysql-connector-python
 pandas
 pydantic
 pymysql
+pytest
 requests
 schedule
 sqlalchemy

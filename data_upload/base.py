@@ -41,10 +41,11 @@ class DataUploadBase(ABC):
         Returns:
             pd.DataFrame: 包含每日資料的 DataFrame。
         """
-        payload = {"name": self.name, "date": date}
-        response = requests.post(self.url, params=payload)
+        url = f"{self.url}/{self.name}"
+        payload = {"date": date}
+        response = requests.get(url, params=payload)
         json_data = response.json()["data"]
-        df = pd.read_json(json_data, orient="records")
+        df = pd.DataFrame(json_data)
         return df
 
     def check_schema(self, df):
