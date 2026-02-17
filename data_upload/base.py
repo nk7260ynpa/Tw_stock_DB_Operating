@@ -35,6 +35,8 @@ class DataUploadBase(ABC):
     def craw_data(self, date):
         """根據日期從爬蟲服務取得資料。
 
+        若爬蟲服務回傳異常則回傳空 DataFrame。
+
         Args:
             date (str): 日期字串，格式為 YYYY-MM-DD。
 
@@ -43,9 +45,14 @@ class DataUploadBase(ABC):
         """
         url = f"{self.url}/{self.name}"
         payload = {"date": date}
-        response = requests.get(url, params=payload)
-        json_data = response.json()["data"]
-        df = pd.DataFrame(json_data)
+        try:
+            response = requests.get(url, params=payload)
+            response.raise_for_status()
+            json_data = response.json()["data"]
+            df = pd.DataFrame(json_data)
+        except (requests.RequestException, KeyError, ValueError) as e:
+            logger.error(f"日期 {date} 爬取失敗：{e}")
+            df = pd.DataFrame()
         return df
 
     def check_schema(self, df):
@@ -125,6 +132,7 @@ class DataUploadBase(ABC):
             )
         else:
             df = self.craw_data(date)
-            self.upload_df(df)
+            if df.shape[0] > 0:
+                self.upload_df(df)
             self.upload_date(date, df)
             logger.info(f"日期 {date} 的資料已成功上傳至資料庫。")
