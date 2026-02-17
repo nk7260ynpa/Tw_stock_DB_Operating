@@ -7,7 +7,7 @@
 - **DB 存取層**：透過 SQLAlchemy 建立 MySQL 連線（`clients.py`、`routers.py`）
 - **DB 上傳層**：爬蟲資料預處理、schema 驗證與批次上傳（`data_upload/`）
 - **批次上傳**：支援日期範圍批次上傳（`upload.py`）
-- **每日排程**：每日自動排程上傳最近 7 天資料（`DailyUpload.py`）
+- **每日排程**：每日 20:07 自動檢查過去 30 天，補抓缺漏資料（`DailyUpload.py`）
 
 ## 支援的資料來源
 
@@ -66,7 +66,16 @@ bash docker/build.sh
 
 ### 3. 啟動每日排程上傳
 
+每日 20:07 自動執行，檢查過去 30 天所有資料來源是否有缺漏，若有則補抓。
+
 ```bash
+# 背景啟動
+docker run -d --name tw_stock_daily_upload \
+  --network db_network \
+  -v $(pwd)/logs:/workspace/logs \
+  tw_stock_db_operating:1.0.0
+
+# 或透過 run.sh
 ./run.sh
 ```
 
