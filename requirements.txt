@@ -1,0 +1,8 @@
+easydict
+mysql-connector-python
+pandas
+pydantic
+pymysql
+requests
+schedule
+sqlalchemy
