@@ -1,3 +1,5 @@
+"""資料上傳抽象基類模組。"""
+
 import os
 import logging
 import requests
@@ -20,7 +22,7 @@ class DataUploadBase(ABC):
         """初始化資料上傳基類。
 
         Args:
-            conn: 資料庫連線物件。
+            conn (sqlalchemy.engine.Connection): 資料庫連線物件。
         """
         self.name = os.path.basename(type(self).__module__.split('.')[-1])
         self.conn = conn
@@ -34,10 +36,10 @@ class DataUploadBase(ABC):
         """根據日期從爬蟲服務取得資料。
 
         Args:
-            date: 日期字串，格式為 YYYY-MM-DD。
+            date (str): 日期字串，格式為 YYYY-MM-DD。
 
         Returns:
-            包含每日資料的 DataFrame。
+            pd.DataFrame: 包含每日資料的 DataFrame。
         """
         payload = {"name": self.name, "date": date}
         response = requests.post(self.url, params=payload)
@@ -49,10 +51,10 @@ class DataUploadBase(ABC):
         """檢查 DataFrame 的 schema 是否符合 UploadType 模型。
 
         Args:
-            df: 待檢查的 DataFrame。
+            df (pd.DataFrame): 待檢查的 DataFrame。
 
         Returns:
-            經過 schema 驗證與轉換後的 DataFrame。
+            pd.DataFrame: 經過 schema 驗證與轉換後的 DataFrame。
         """
         df_dict = df.to_dict(orient='records')
         df_schema = [self.UploadType(**record).__dict__ for record in df_dict]
@@ -63,10 +65,10 @@ class DataUploadBase(ABC):
         """檢查該日期是否已存在於 UploadDate 資料表中。
 
         Args:
-            date: 日期字串，格式為 YYYY-MM-DD。
+            date (str): 日期字串，格式為 YYYY-MM-DD。
 
         Returns:
-            若日期已存在回傳 True，否則回傳 False。
+            bool: 若日期已存在回傳 True，否則回傳 False。
         """
         if self.conn.execute(
             text(f"SELECT COUNT(*) FROM UploadDate WHERE Date = '{date}'")
@@ -78,7 +80,7 @@ class DataUploadBase(ABC):
         """上傳每日資料至 DailyPrice 資料表。
 
         Args:
-            df: 包含每日資料的 DataFrame。
+            df (pd.DataFrame): 包含每日資料的 DataFrame。
         """
         df_copy = self.preprocess(df.copy())
         df_copy = self.check_schema(df_copy)
@@ -92,8 +94,8 @@ class DataUploadBase(ABC):
         """上傳日期記錄至 UploadDate 資料表。
 
         Args:
-            date: 日期字串，格式為 YYYY-MM-DD。
-            df: 該日期的資料 DataFrame，用於判斷是否為交易日。
+            date (str): 日期字串，格式為 YYYY-MM-DD。
+            df (pd.DataFrame): 該日期的資料 DataFrame，用於判斷是否為交易日。
         """
         if df.shape[0] != 0:
             update = text(
@@ -114,7 +116,7 @@ class DataUploadBase(ABC):
         若該日期資料已存在則跳過，否則爬取資料並上傳至資料庫。
 
         Args:
-            date: 日期字串，格式為 YYYY-MM-DD。
+            date (str): 日期字串，格式為 YYYY-MM-DD。
         """
         if self.check_date(date):
             logger.info(

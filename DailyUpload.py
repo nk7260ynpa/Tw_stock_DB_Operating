@@ -1,3 +1,5 @@
+"""每日排程上傳模組。"""
+
 import os
 import time
 import random
@@ -30,7 +32,7 @@ def daily_craw(db_name):
     自動上傳最近 7 天的資料，確保資料完整性。
 
     Args:
-        db_name: 資料庫名稱，可選 "TWSE"、"TPEX"、"TAIFEX"、"FAOI" 或 "MGTS"。
+        db_name (str): 資料庫名稱，可選 "TWSE"、"TPEX"、"TAIFEX"、"FAOI" 或 "MGTS"。
     """
     HOST = "tw_stock_database:3306"
     USER = "root"

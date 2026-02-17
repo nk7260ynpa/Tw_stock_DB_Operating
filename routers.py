@@ -1,3 +1,5 @@
+"""MySQL 連線路由模組。"""
+
 from clients import mysql_conn, mysql_conn_db
 
 
@@ -8,10 +10,10 @@ class MySQLRouter:
         """初始化 MySQLRouter。
 
         Args:
-            host: MySQL 主機位址。
-            user: MySQL 使用者名稱。
-            password: MySQL 密碼。
-            db_name: 資料庫名稱，預設為 None。
+            host (str): MySQL 主機位址。
+            user (str): MySQL 使用者名稱。
+            password (str): MySQL 密碼。
+            db_name (str | None): 資料庫名稱，預設為 None。
         """
         self.host = host
         self.user = user
@@ -25,7 +27,7 @@ class MySQLRouter:
         若指定 db_name 則連線至該資料庫，否則僅連線至 MySQL 伺服器。
 
         Returns:
-            MySQL 連線物件。
+            sqlalchemy.engine.Connection: MySQL 連線物件。
         """
         if self.db_name:
             conn = mysql_conn_db(self.host, self.user, self.password, self.db_name)
@@ -38,7 +40,7 @@ class MySQLRouter:
         """取得 MySQL 連線物件。
 
         Returns:
-            MySQL 連線物件。
+            sqlalchemy.engine.Connection: MySQL 連線物件。
 
         Example:
             >>> router = MySQLRouter(host, user, password, db_name)

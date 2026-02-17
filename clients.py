@@ -1,3 +1,5 @@
+"""MySQL 連線函式模組。"""
+
 from sqlalchemy import create_engine
 
 
@@ -5,12 +7,12 @@ def mysql_conn(host, user, password):
     """建立不指定資料庫的 MySQL 連線。
 
     Args:
-        host: MySQL 主機位址。
-        user: MySQL 使用者名稱。
-        password: MySQL 密碼。
+        host (str): MySQL 主機位址。
+        user (str): MySQL 使用者名稱。
+        password (str): MySQL 密碼。
 
     Returns:
-        MySQL 連線物件。
+        sqlalchemy.engine.Connection: MySQL 連線物件。
 
     Example:
         >>> conn = mysql_conn("localhost:3306", "root", "password")
@@ -27,13 +29,13 @@ def mysql_conn_db(host, user, password, db_name):
     """建立指定資料庫的 MySQL 連線。
 
     Args:
-        host: MySQL 主機位址。
-        user: MySQL 使用者名稱。
-        password: MySQL 密碼。
-        db_name: 資料庫名稱。
+        host (str): MySQL 主機位址。
+        user (str): MySQL 使用者名稱。
+        password (str): MySQL 密碼。
+        db_name (str): 資料庫名稱。
 
     Returns:
-        MySQL 連線物件。
+        sqlalchemy.engine.Connection: MySQL 連線物件。
 
     Example:
         >>> conn = mysql_conn_db("localhost:3306", "root", "password", "TWSE")

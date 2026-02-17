@@ -18,10 +18,10 @@ bash docker/build.sh
 # 批次上傳指定日期範圍
 ./run.sh python upload.py --start_date 2024-01-02 --end_date 2024-01-31 --dbname TWSE
 
-# 執行單元測試
+# 執行全部單元測試
 docker run --rm tw_stock_db_operating:1.0.0 python -m pytest test/
 
-# 執行單一測試
+# 執行單一測試檔案
 docker run --rm tw_stock_db_operating:1.0.0 python -m pytest test/test_routers.py -v
 
 # 啟動完整服務（含爬蟲）
@@ -60,12 +60,19 @@ clients.py → routers.py → upload.py / DailyUpload.py
 - 每次上傳前以 `check_date()` 檢查 UploadDate 避免重複；爬蟲請求間隨機暫停 3-15 秒
 - 日誌輸出至 `logs/` 資料夾（upload.log、daily_upload.log）
 
+## 程式碼風格
+
+- Python 遵循 Google Python Style Guide，Docstring 使用繁體中文
+- Docstring 的 Args 須標註型別，如 `host (str): MySQL 主機位址。`
+- 每個 Python 檔案須有 module-level docstring
+- Shell 腳本遵循 Google Shell Style Guide
+
 ## Docker 環境
 
 - 基於 `python:3.12.7`，時區 `Asia/Taipei`
 - 需要外部 `db_network` Docker 網路（連接 `tw_stock_database:3306` 和 `tw_stocker_crawler:6738`）
-- 所有 Python 程式在 Docker container 中執行
+- 所有 Python 程式與單元測試皆在 Docker container 中執行
 
 ## 測試
 
-使用 `unittest` + `unittest.mock`，mock 外部 MySQL 連線進行測試。
+使用 `unittest` + `unittest.mock`，mock 外部 MySQL 連線進行測試。測試檔案放在 `test/` 目錄下。

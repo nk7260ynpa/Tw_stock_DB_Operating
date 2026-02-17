@@ -1,3 +1,5 @@
+"""TAIFEX 資料上傳模組。"""
+
 import logging
 
 from pydantic import BaseModel
@@ -39,8 +41,8 @@ class Uploader(DataUploadBase):
         """初始化 TAIFEX 上傳器。
 
         Args:
-            conn: 資料庫連線物件。
-            host: 爬蟲服務主機位址。
+            conn (sqlalchemy.engine.Connection): 資料庫連線物件。
+            host (str): 爬蟲服務主機位址。
         """
         super().__init__(conn)
         self.UploadType = UploadType
@@ -50,9 +52,9 @@ class Uploader(DataUploadBase):
         """預處理 DataFrame（TAIFEX 無需額外處理）。
 
         Args:
-            df: 待預處理的 DataFrame。
+            df (pd.DataFrame): 待預處理的 DataFrame。
 
         Returns:
-            原始 DataFrame。
+            pd.DataFrame: 原始 DataFrame。
         """
         return df

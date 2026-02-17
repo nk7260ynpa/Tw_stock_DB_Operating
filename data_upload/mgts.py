@@ -1,3 +1,5 @@
+"""MGTS 資料上傳模組。"""
+
 import logging
 
 from pydantic import BaseModel
@@ -36,8 +38,8 @@ class Uploader(DataUploadBase):
         """初始化 MGTS 上傳器。
 
         Args:
-            conn: 資料庫連線物件。
-            host: 爬蟲服務主機位址。
+            conn (sqlalchemy.engine.Connection): 資料庫連線物件。
+            host (str): 爬蟲服務主機位址。
         """
         super().__init__(conn)
         self.UploadType = UploadType
@@ -47,10 +49,10 @@ class Uploader(DataUploadBase):
         """預處理 DataFrame，移除 StockName 欄位。
 
         Args:
-            df: 待預處理的 DataFrame。
+            df (pd.DataFrame): 待預處理的 DataFrame。
 
         Returns:
-            移除 StockName 欄位後的 DataFrame。
+            pd.DataFrame: 移除 StockName 欄位後的 DataFrame。
         """
         df = df.drop(columns=['StockName'])
         return df

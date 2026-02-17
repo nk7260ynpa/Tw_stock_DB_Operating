@@ -1,3 +1,5 @@
+"""台股資料批次上傳入口模組。"""
+
 import os
 import time
 import random
@@ -28,13 +30,13 @@ def day_upload(date, opt):
     """執行單日資料上傳至 MySQL 資料庫。
 
     Args:
-        date: 日期字串，格式為 YYYY-MM-DD。
-        opt: 命令列參數，包含以下屬性：
-            - host: MySQL 主機位址。
-            - user: MySQL 使用者名稱。
-            - password: MySQL 密碼。
-            - dbname: MySQL 資料庫名稱。
-            - crawlerhost: 爬蟲服務主機位址。
+        date (str): 日期字串，格式為 YYYY-MM-DD。
+        opt (argparse.Namespace | EasyDict): 命令列參數，包含以下屬性：
+            - host (str): MySQL 主機位址。
+            - user (str): MySQL 使用者名稱。
+            - password (str): MySQL 密碼。
+            - dbname (str): MySQL 資料庫名稱。
+            - crawlerhost (str): 爬蟲服務主機位址。
     """
     HOST = opt.host
     USER = opt.user
@@ -58,7 +60,7 @@ def main(opt):
     """主函式，處理命令列參數並執行批次上傳。
 
     Args:
-        opt: 命令列參數。
+        opt (argparse.Namespace): 命令列參數。
     """
     if not opt.end_date:
         opt.end_date = opt.start_date

@@ -1,3 +1,5 @@
+"""MySQLRouter 單元測試模組。"""
+
 import unittest
 from unittest.mock import patch, MagicMock
 
