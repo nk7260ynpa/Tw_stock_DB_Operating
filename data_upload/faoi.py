@@ -47,6 +47,8 @@ class Uploader(DataUploadBase):
         super().__init__(conn)
         self.UploadType = UploadType
         self.url = f"http://{host}"
+        self.stock_code_col = "SecurityCode"
+        self.stock_name_col = "StockName"
 
     def preprocess(self, df):
         """預處理 DataFrame，移除 StockName 欄位。

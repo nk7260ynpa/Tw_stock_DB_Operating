@@ -17,6 +17,9 @@ class DataUploadBase(ABC):
     定義爬蟲資料的預處理、schema 驗證與上傳流程。
     """
 
+    stock_code_col = None
+    stock_name_col = None
+
     @abstractmethod
     def __init__(self, conn):
         """初始化資料上傳基類。
@@ -84,6 +87,44 @@ class DataUploadBase(ABC):
             return True
         return False
 
+    def register_stock_names(self, df):
+        """檢查並註冊新的股票代碼至 StockName 資料表。
+
+        若 stock_code_col 或 stock_name_col 未設定則跳過（如 TAIFEX 無 StockName 表）。
+        比對 DataFrame 中的股票代碼與資料庫現有記錄，將新代碼插入 StockName 表。
+
+        Args:
+            df (pd.DataFrame): 包含股票代碼與名稱的 DataFrame。
+        """
+        if self.stock_code_col is None or self.stock_name_col is None:
+            return
+
+        new_stocks = df[[self.stock_code_col, self.stock_name_col]].drop_duplicates(
+            subset=[self.stock_code_col]
+        )
+
+        existing = self.conn.execute(
+            text(f"SELECT {self.stock_code_col} FROM StockName")
+        ).fetchall()
+        existing_codes = {row[0] for row in existing}
+
+        new_stocks = new_stocks[
+            ~new_stocks[self.stock_code_col].isin(existing_codes)
+        ]
+
+        if new_stocks.empty:
+            return
+
+        new_stocks.to_sql(
+            "StockName", self.conn,
+            if_exists='append', index=False
+        )
+        self.conn.commit()
+        logger.info(
+            f"新增 {len(new_stocks)} 筆股票代碼至 StockName："
+            f"{new_stocks[self.stock_code_col].tolist()}"
+        )
+
     def upload_df(self, df):
         """上傳每日資料至 DailyPrice 資料表。
 
@@ -133,6 +174,7 @@ class DataUploadBase(ABC):
         else:
             df = self.craw_data(date)
             if df.shape[0] > 0:
+                self.register_stock_names(df)
                 self.upload_df(df)
             self.upload_date(date, df)
             logger.info(f"日期 {date} 的資料已成功上傳至資料庫。")
