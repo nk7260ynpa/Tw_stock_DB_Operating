@@ -19,10 +19,10 @@ bash docker/build.sh
 ./run.sh python upload.py --start_date 2024-01-02 --end_date 2024-01-31 --dbname TWSE
 
 # 執行全部單元測試
-docker run --rm tw_stock_db_operating:1.0.0 python -m pytest test/
+docker run --rm nk7260ynpa/tw_stock_db_operating:1.0.0 python -m pytest test/
 
 # 執行單一測試檔案
-docker run --rm tw_stock_db_operating:1.0.0 python -m pytest test/test_routers.py -v
+docker run --rm nk7260ynpa/tw_stock_db_operating:1.0.0 python -m pytest test/test_routers.py -v
 
 # 啟動完整服務（含爬蟲）
 docker compose -f docker/docker-compose.yaml up -d

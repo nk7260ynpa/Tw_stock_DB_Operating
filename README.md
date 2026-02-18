@@ -73,7 +73,7 @@ bash docker/build.sh
 docker run -d --name tw_stock_daily_upload \
   --network db_network \
   -v $(pwd)/logs:/workspace/logs \
-  tw_stock_db_operating:1.0.0
+  nk7260ynpa/tw_stock_db_operating:1.0.0
 
 # 或透過 run.sh
 ./run.sh
@@ -88,7 +88,7 @@ docker compose -f docker/docker-compose.yaml up -d
 ### 5. 執行單元測試
 
 ```bash
-docker run --rm tw_stock_db_operating:1.0.0 python -m pytest test/
+docker run --rm nk7260ynpa/tw_stock_db_operating:1.0.0 python -m pytest test/
 ```
 
 ## 命令列參數（upload.py）

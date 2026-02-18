@@ -11,7 +11,7 @@ services:
       - db_network
 
   tw_stocker_daily_upload:
-    image: tw_stock_db_operating:1.0.0
+    image: nk7260ynpa/tw_stock_db_operating:1.0.0
     container_name: tw_stocker_daily_upload
     restart: "always"
     networks:
