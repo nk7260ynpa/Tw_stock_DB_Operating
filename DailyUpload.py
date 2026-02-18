@@ -28,10 +28,10 @@ logger.setLevel(logging.INFO)
 logger.addHandler(log_handler)
 
 DB_NAMES = ["TWSE", "TPEX", "TAIFEX", "FAOI", "MGTS"]
-HOST = "localhost:3306"
+HOST = "tw_stock_database:3306"
 USER = "root"
 PASSWORD = "stock"
-CRAWLERHOST = "127.0.0.1:6738"
+CRAWLERHOST = "tw_stocker_crawler:6738"
 
 
 def get_missing_dates(db_name, days=30):

@@ -98,7 +98,7 @@ if __name__ == "__main__":
         help="結束日期，格式為 YYYY-MM-DD"
     )
     parser.add_argument(
-        "--host", type=str, default="localhost:3306",
+        "--host", type=str, default="tw_stock_database:3306",
         help="MySQL 主機位址"
     )
     parser.add_argument(
@@ -116,7 +116,7 @@ if __name__ == "__main__":
         help="MySQL 資料庫名稱"
     )
     parser.add_argument(
-        "--crawlerhost", type=str, default="127.0.0.1:6738",
+        "--crawlerhost", type=str, default="tw_stocker_crawler:6738",
         help="爬蟲服務主機位址"
     )
     opt = parser.parse_args()

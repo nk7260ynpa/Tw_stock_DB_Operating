@@ -97,11 +97,11 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:1.0.0 python -m pytest test/
 |------|------|--------|
 | `--start_date` | 起始日期（YYYY-MM-DD） | 必填 |
 | `--end_date` | 結束日期（YYYY-MM-DD） | 同 start_date |
-| `--host` | MySQL 主機位址 | `localhost:3306` |
+| `--host` | MySQL 主機位址 | `tw_stock_database:3306` |
 | `--user` | MySQL 使用者名稱 | `root` |
 | `--password` | MySQL 密碼 | `stock` |
 | `--dbname` | 資料庫名稱 | `TWSE` |
-| `--crawlerhost` | 爬蟲服務主機位址 | `127.0.0.1:6738` |
+| `--crawlerhost` | 爬蟲服務主機位址 | `tw_stocker_crawler:6738` |
 
 ## 環境需求
 
