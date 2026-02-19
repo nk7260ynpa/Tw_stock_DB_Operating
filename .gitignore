@@ -1,6 +1,12 @@
 # Claude Code
 CLAUDE.md
 
+# Node.js
+node_modules/
+
+# React build output
+static/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE_NAME="nk7260ynpa/tw_stock_db_operating"
-IMAGE_TAG="1.0.0"
+IMAGE_TAG="2.0.0"
 CONTAINER_NAME="tw_stock_db_operating"
 LOG_DIR="${SCRIPT_DIR}/logs"
 
@@ -19,10 +19,17 @@ if ! docker image inspect "${IMAGE_NAME}:${IMAGE_TAG}" > /dev/null 2>&1; then
   exit 1
 fi
 
+# 若容器已存在，先移除
+if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+  echo "移除既有容器: ${CONTAINER_NAME}"
+  docker rm -f "${CONTAINER_NAME}" > /dev/null
+fi
+
 echo "啟動 Docker container: ${CONTAINER_NAME}"
-docker run --rm \
+docker run -d \
   --name "${CONTAINER_NAME}" \
   --network db_network \
+  --restart always \
+  -p 8080:8080 \
   -v "${LOG_DIR}:/workspace/logs" \
-  "${IMAGE_NAME}:${IMAGE_TAG}" \
-  "$@"
+  "${IMAGE_NAME}:${IMAGE_TAG}"

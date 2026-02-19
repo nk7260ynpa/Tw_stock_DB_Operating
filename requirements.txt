@@ -1,4 +1,6 @@
 easydict
+fastapi
+httpx
 mysql-connector-python
 pandas
 pydantic
@@ -7,3 +9,4 @@ pytest
 requests
 schedule
 sqlalchemy
+uvicorn[standard]

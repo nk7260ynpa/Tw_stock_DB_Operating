@@ -7,7 +7,8 @@
 - **DB 存取層**：透過 SQLAlchemy 建立 MySQL 連線（`clients.py`、`routers.py`）
 - **DB 上傳層**：爬蟲資料預處理、schema 驗證與批次上傳（`data_upload/`）
 - **批次上傳**：支援日期範圍批次上傳（`upload.py`）
-- **每日排程**：每日 20:07 自動檢查過去 30 天，補抓缺漏資料（`DailyUpload.py`）
+- **每日排程**：自動檢查過去 30 天，補抓缺漏資料（`DailyUpload.py`）
+- **Web 管理介面**：透過瀏覽器手動觸發上傳、修改排程時間（`web_server.py`）
 
 ## 支援的資料來源
 
@@ -29,6 +30,7 @@ Tw_stock_DB_Operating/
 ├── DailyUpload.py            # 每日排程上傳
 ├── requirements.txt          # Python 套件依賴
 ├── run.sh                    # 啟動主程式腳本
+├── web_server.py             # Web 管理介面（FastAPI）
 ├── data_upload/              # 資料上傳模組
 │   ├── __init__.py
 │   ├── base.py               # DataUploadBase 抽象基類
@@ -37,9 +39,18 @@ Tw_stock_DB_Operating/
 │   ├── taifex.py
 │   ├── faoi.py
 │   └── mgts.py
+├── frontend/                 # React 前端原始碼（Vite）
+│   ├── package.json
+│   ├── vite.config.js
+│   ├── index.html
+│   └── src/
+│       ├── App.jsx
+│       └── components/
+│           ├── ManualUpload.jsx
+│           └── ScheduleManager.jsx
 ├── docker/                   # Docker 設定
 │   ├── build.sh              # 建立 Docker image 腳本
-│   ├── Dockerfile
+│   ├── Dockerfile            # Multi-stage build（Node + Python）
 │   └── docker-compose.yaml
 ├── test/                     # 單元測試
 │   └── test_routers.py
@@ -64,19 +75,20 @@ bash docker/build.sh
 ./run.sh python upload.py --start_date 2024-01-02 --end_date 2024-01-31 --dbname TWSE
 ```
 
-### 3. 啟動每日排程上傳
+### 3. 啟動服務（含 Web 管理介面與每日排程）
 
-每日 20:07 自動執行，檢查過去 30 天所有資料來源是否有缺漏，若有則補抓。
+啟動後可透過瀏覽器開啟 `http://localhost:8080` 存取管理介面。
 
 ```bash
-# 背景啟動
-docker run -d --name tw_stock_daily_upload \
-  --network db_network \
-  -v $(pwd)/logs:/workspace/logs \
-  nk7260ynpa/tw_stock_db_operating:1.0.0
-
-# 或透過 run.sh
+# 透過 run.sh 啟動
 ./run.sh
+
+# 或背景啟動
+docker run -d --name tw_stock_db_operating \
+  --network db_network \
+  -p 8080:8080 \
+  -v $(pwd)/logs:/workspace/logs \
+  nk7260ynpa/tw_stock_db_operating:2.0.0
 ```
 
 ### 4. 使用 docker-compose 啟動服務
@@ -88,7 +100,7 @@ docker compose -f docker/docker-compose.yaml up -d
 ### 5. 執行單元測試
 
 ```bash
-docker run --rm nk7260ynpa/tw_stock_db_operating:1.0.0 python -m pytest test/
+docker run --rm nk7260ynpa/tw_stock_db_operating:2.0.0 python -m pytest test/
 ```
 
 ## 命令列參數（upload.py）
@@ -102,6 +114,15 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:1.0.0 python -m pytest test/
 | `--password` | MySQL 密碼 | `stock` |
 | `--dbname` | 資料庫名稱 | `TWSE` |
 | `--crawlerhost` | 爬蟲服務主機位址 | `tw_stocker_crawler:6738` |
+
+## Web 管理介面
+
+啟動服務後開啟 `http://localhost:8080`，提供以下功能：
+
+- **手動上傳**：選擇日期範圍與資料庫，直接觸發資料上傳
+- **排程設定**：檢視與修改每日自動上傳的排程時間
+
+排程設定會儲存至 `logs/config.json`，容器重啟後自動套用。
 
 ## 環境需求
 

@@ -11,8 +11,12 @@ services:
       - db_network
 
   tw_stocker_daily_upload:
-    image: nk7260ynpa/tw_stock_db_operating:1.0.0
+    image: nk7260ynpa/tw_stock_db_operating:2.0.0
     container_name: tw_stocker_daily_upload
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../logs:/workspace/logs
     restart: "always"
     networks:
       - db_network
