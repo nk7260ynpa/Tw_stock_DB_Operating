@@ -23,7 +23,7 @@ function ManualUpload() {
       const res = await fetch('/api/upload/jobs')
       if (res.ok) {
         const data = await res.json()
-        setJobs(data.reverse())
+        setJobs(data.filter((j) => !j.type).reverse())
       }
     } catch {
       /* 忽略網路錯誤 */

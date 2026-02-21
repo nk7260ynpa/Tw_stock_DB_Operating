@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 
 IMAGE_NAME="nk7260ynpa/tw_stock_db_operating"
-IMAGE_TAG="2.0.0"
+IMAGE_TAG="2.1.0"
 
 echo "開始建立 Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
 docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" -f "${SCRIPT_DIR}/Dockerfile" "${PROJECT_DIR}"

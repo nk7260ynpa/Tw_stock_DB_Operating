@@ -15,8 +15,14 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 WORKDIR /workspace
 
+# 先安裝 Playwright 及瀏覽器（獨立快取層，不受 requirements.txt 變動影響）
+RUN pip install --no-cache-dir playwright \
+    && playwright install chromium --with-deps
+
+# 安裝 Python 套件（利用 Docker cache）
 COPY requirements.txt /workspace/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
+
 COPY . /workspace/
 
 # 複製前端建構產出

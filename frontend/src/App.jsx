@@ -1,5 +1,6 @@
 import ManualUpload from './components/ManualUpload'
 import ScheduleManager from './components/ScheduleManager'
+import QuarterRevenueUpload from './components/QuarterRevenueUpload'
 
 function App() {
   return (
@@ -10,7 +11,10 @@ function App() {
       </header>
       <main className="main">
         <ManualUpload />
-        <ScheduleManager />
+        <div className="side-panels">
+          <ScheduleManager />
+          <QuarterRevenueUpload />
+        </div>
       </main>
     </div>
   )

@@ -63,6 +63,12 @@ body {
   align-items: start;
 }
 
+.side-panels {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
 @media (max-width: 768px) {
   .main {
     grid-template-columns: 1fr;
@@ -104,7 +110,8 @@ body {
 }
 
 .form-group input[type="date"],
-.form-group input[type="time"] {
+.form-group input[type="time"],
+.form-group .form-select {
   width: 100%;
   padding: 8px 12px;
   border: 1px solid var(--color-border);
@@ -155,8 +162,20 @@ body {
   font-weight: 600;
 }
 
-.checkbox-label input[type="checkbox"] {
+.checkbox-label input[type="checkbox"],
+.checkbox-label input[type="radio"] {
   display: none;
+}
+
+.checkbox-label.uploaded {
+  border-color: var(--color-success);
+  background: var(--color-success-bg);
+}
+
+.uploaded-mark {
+  color: var(--color-success);
+  font-weight: 700;
+  font-size: 0.875rem;
 }
 
 /* Buttons */
@@ -327,6 +346,28 @@ body {
 .message-error {
   background: var(--color-error-bg);
   color: var(--color-error);
+}
+
+/* Uploaded grid */
+.uploaded-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.uploaded-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  font-size: 0.8125rem;
+}
+
+.uploaded-count {
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
 }
 
 /* Spinner */

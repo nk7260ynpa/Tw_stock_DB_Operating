@@ -1,8 +1,10 @@
 easydict
 fastapi
 httpx
+lxml
 mysql-connector-python
 pandas
+playwright
 pydantic
 pymysql
 pytest

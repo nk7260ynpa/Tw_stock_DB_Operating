@@ -20,9 +20,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from easydict import EasyDict
+from sqlalchemy import text
 
 from DailyUpload import daily_craw, DB_NAMES, HOST, USER, PASSWORD, CRAWLERHOST
 from upload import day_upload
+from data_upload.quarter_revenue import QuarterRevenueUploader
+from routers import MySQLRouter
 
 # 路徑設定
 BASE_DIR = Path(__file__).parent
@@ -173,6 +176,12 @@ class UploadRequest(BaseModel):
     start_date: str
     end_date: str
     databases: list[str]
+
+
+class QuarterRevenueRequest(BaseModel):
+    """季度營業收入抓取請求。"""
+    year: int
+    season: int
 
 
 class ScheduleRequest(BaseModel):
@@ -336,6 +345,146 @@ def list_databases():
         dict: 包含 databases 欄位的資料庫清單。
     """
     return {"databases": DB_NAMES}
+
+
+def run_quarter_revenue_job(job_id, year, season):
+    """執行季度營業收入抓取任務（背景執行緒）。
+
+    Args:
+        job_id (str): 任務 ID。
+        year (int): 民國年。
+        season (int): 季度（1-4）。
+    """
+    with jobs_lock:
+        upload_jobs[job_id]["status"] = "running"
+
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
+        uploader = QuarterRevenueUploader(conn)
+        record_count = uploader.upload(year, season)
+        conn.close()
+
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "completed"
+            upload_jobs[job_id]["record_count"] = record_count
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        logger.info("季度營業收入任務完成 %s", job_id)
+
+    except Exception as e:
+        logger.error("季度營業收入任務失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+
+@app.post("/api/quarter-revenue/upload")
+def create_quarter_revenue_upload(req: QuarterRevenueRequest):
+    """建立季度營業收入抓取任務。
+
+    Args:
+        req: 包含年份與季度的請求。
+
+    Returns:
+        dict: 任務 ID 與初始狀態。
+    """
+    if req.season not in (1, 2, 3, 4):
+        raise HTTPException(400, "季度必須為 1-4")
+
+    if not (80 <= req.year <= 200):
+        raise HTTPException(400, "年份必須為 80-200（民國年）")
+
+    with jobs_lock:
+        running_jobs = [
+            j for j in upload_jobs.values()
+            if j["status"] == "running"
+        ]
+        if running_jobs:
+            raise HTTPException(
+                409, "已有任務正在執行中，請等待完成後再提交"
+            )
+
+    job_id = str(uuid.uuid4())[:8]
+
+    with jobs_lock:
+        upload_jobs[job_id] = {
+            "job_id": job_id,
+            "type": "quarter_revenue",
+            "status": "pending",
+            "year": req.year,
+            "season": req.season,
+            "record_count": 0,
+            "errors": [],
+            "created_at": datetime.now().isoformat(),
+            "finished_at": None,
+        }
+
+    t = threading.Thread(
+        target=run_quarter_revenue_job,
+        args=(job_id, req.year, req.season),
+        daemon=True,
+    )
+    t.start()
+
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/quarter-revenue/uploaded")
+def list_uploaded_quarters():
+    """列出已上傳的季度營業收入記錄。
+
+    Returns:
+        dict: 包含 uploaded 欄位的已上傳記錄清單。
+    """
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
+
+        # 檢查並移除不相容的舊表結構
+        try:
+            cols = conn.execute(
+                text("DESCRIBE QuarterRevenueUploaded")
+            ).fetchall()
+            col_names = {row[0] for row in cols}
+            if "Season" not in col_names:
+                conn.execute(text("DROP TABLE QuarterRevenueUploaded"))
+                conn.commit()
+        except Exception:
+            pass
+
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS QuarterRevenueUploaded (
+                Year INT,
+                Season INT,
+                UploadedAt DATETIME,
+                RecordCount INT,
+                UNIQUE KEY uq_quarter_uploaded (Year, Season)
+            )
+        """))
+        conn.commit()
+
+        rows = conn.execute(
+            text(
+                "SELECT Year, Season, UploadedAt, RecordCount "
+                "FROM QuarterRevenueUploaded "
+                "ORDER BY Year DESC, Season DESC"
+            )
+        ).fetchall()
+        conn.close()
+
+        uploaded = [
+            {
+                "year": row[0],
+                "season": row[1],
+                "uploaded_at": row[2].isoformat() if row[2] else None,
+                "record_count": row[3],
+            }
+            for row in rows
+        ]
+        return {"uploaded": uploaded}
+
+    except Exception as e:
+        logger.error("查詢已上傳季度失敗：%s", e)
+        return {"uploaded": []}
 
 
 # Serve React 前端靜態檔案

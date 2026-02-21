@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE_NAME="nk7260ynpa/tw_stock_db_operating"
-IMAGE_TAG="2.0.0"
+IMAGE_TAG="2.1.0"
 CONTAINER_NAME="tw_stock_db_operating"
 LOG_DIR="${SCRIPT_DIR}/logs"
 
