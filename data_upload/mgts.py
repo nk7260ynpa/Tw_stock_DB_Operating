@@ -32,13 +32,20 @@ class UploadType(BaseModel):
 
 
 class Uploader(DataUploadBase):
-    """MGTS 資料上傳器。"""
+    """MGTS 資料上傳器。
+
+    MGTS 資料已合併至 TWSE 資料庫，使用 MGTSDailyPrice 和
+    MGTSUploadDate 資料表。
+    """
+
+    daily_price_table = "MGTSDailyPrice"
+    upload_date_table = "MGTSUploadDate"
 
     def __init__(self, conn, host):
         """初始化 MGTS 上傳器。
 
         Args:
-            conn (sqlalchemy.engine.Connection): 資料庫連線物件。
+            conn (sqlalchemy.engine.Connection): TWSE 資料庫連線物件。
             host (str): 爬蟲服務主機位址。
         """
         super().__init__(conn)

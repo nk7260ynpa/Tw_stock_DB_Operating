@@ -11,6 +11,15 @@ from datetime import datetime, timedelta
 import data_upload
 from routers import MySQLRouter
 
+# MGTS 已合併至 TWSE 資料庫，連線時需對應至 TWSE
+DB_MAPPING = {
+    "TWSE": "TWSE",
+    "TPEX": "TPEX",
+    "TAIFEX": "TAIFEX",
+    "FAOI": "FAOI",
+    "MGTS": "TWSE",
+}
+
 # 設定 logging，輸出至 logs/ 資料夾
 log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 os.makedirs(log_dir, exist_ok=True)
@@ -44,8 +53,12 @@ def day_upload(date, opt):
     DBNAME = opt.dbname
     CRAWLERHOST = opt.crawlerhost
 
-    logger.info(f"連線至 MySQL 資料庫 {DBNAME}，主機 {HOST}，使用者 {USER}")
-    conn = MySQLRouter(HOST, USER, PASSWORD, DBNAME).mysql_conn
+    actual_db = DB_MAPPING.get(DBNAME, DBNAME)
+    logger.info(
+        f"連線至 MySQL 資料庫 {actual_db}，主機 {HOST}，使用者 {USER}"
+        f"（資料來源：{DBNAME}）"
+    )
+    conn = MySQLRouter(HOST, USER, PASSWORD, actual_db).mysql_conn
     package_name = DBNAME.lower()
 
     logger.info(f"上傳資料：模組 {package_name}，日期 {date}")

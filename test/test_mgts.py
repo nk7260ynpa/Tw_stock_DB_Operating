@@ -60,6 +60,11 @@ class TestUploader(unittest.TestCase):
         self.assertEqual(self.uploader.stock_name_col, "StockName")
         self.assertEqual(self.uploader.name, "mgts")
 
+    def test_table_names(self):
+        """測試 MGTS 使用 TWSE 資料庫的 MGTS 前綴表名。"""
+        self.assertEqual(self.uploader.daily_price_table, "MGTSDailyPrice")
+        self.assertEqual(self.uploader.upload_date_table, "MGTSUploadDate")
+
     def test_preprocess_drops_stock_name(self):
         """測試預處理移除 StockName 欄位。"""
         df = pd.DataFrame({

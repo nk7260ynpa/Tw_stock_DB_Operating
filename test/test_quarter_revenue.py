@@ -19,35 +19,30 @@ class TestQuarterRevenueType(unittest.TestCase):
     def test_valid_data(self):
         """測試合法資料通過驗證。"""
         data = QuarterRevenueType(
+            SecurityCode="2330",
             Year=113,
-            Season=1,
-            CompanyCode="2330",
-            TYPEK="sii",
-            CompanyName="台積電",
-            Industry="半導體業",
+            Quarter="1",
             EPS=10.53,
             Revenue=592559000,
         )
 
-        self.assertEqual(data.CompanyCode, "2330")
+        self.assertEqual(data.SecurityCode, "2330")
         self.assertEqual(data.Year, 113)
-        self.assertEqual(data.Season, 1)
-        self.assertEqual(data.Industry, "半導體業")
+        self.assertEqual(data.Quarter, "1")
         self.assertEqual(data.EPS, 10.53)
 
     def test_optional_fields(self):
         """測試選填欄位可為 None。"""
         data = QuarterRevenueType(
+            SecurityCode="2330",
             Year=113,
-            Season=1,
-            CompanyCode="2330",
-            TYPEK="sii",
+            Quarter="1",
         )
 
-        self.assertIsNone(data.CompanyName)
-        self.assertIsNone(data.Industry)
         self.assertIsNone(data.EPS)
         self.assertIsNone(data.Revenue)
+        self.assertIsNone(data.Income)
+        self.assertIsNone(data.OtherIncome)
         self.assertIsNone(data.NetIncome)
 
     def test_missing_required_field(self):
@@ -55,7 +50,7 @@ class TestQuarterRevenueType(unittest.TestCase):
         with self.assertRaises(ValidationError):
             QuarterRevenueType(
                 Year=113,
-                Season=1,
+                Quarter="1",
             )
 
 
@@ -65,10 +60,7 @@ class TestCheckUploaded(unittest.TestCase):
     def setUp(self):
         """初始化測試環境。"""
         self.mock_conn = MagicMock()
-        with patch.object(
-            QuarterRevenueUploader, "_ensure_tables"
-        ):
-            self.uploader = QuarterRevenueUploader(self.mock_conn)
+        self.uploader = QuarterRevenueUploader(self.mock_conn)
 
     def test_uploaded_exists(self):
         """測試已上傳時回傳 True。"""
@@ -93,75 +85,65 @@ class TestCleanDataframe(unittest.TestCase):
     def setUp(self):
         """初始化測試環境。"""
         self.mock_conn = MagicMock()
-        with patch.object(
-            QuarterRevenueUploader, "_ensure_tables"
-        ):
-            self.uploader = QuarterRevenueUploader(self.mock_conn)
+        self.uploader = QuarterRevenueUploader(self.mock_conn)
 
     def test_removes_non_numeric_code(self):
-        """測試移除 CompanyCode 非數字開頭的列。"""
+        """測試移除 SecurityCode 非數字開頭的列。"""
         df = pd.DataFrame({
             "公司代號": ["2330", "合計", "8069"],
-            "公司名稱": ["台積電", "合計", "元太"],
             "營業收入": [100, 200, 300],
         })
 
-        result = self.uploader._clean_dataframe(df, 113, 1, "sii")
+        result = self.uploader._clean_dataframe(df, 113, 1)
 
         self.assertEqual(len(result), 2)
-        self.assertIn("2330", result["CompanyCode"].values)
-        self.assertIn("8069", result["CompanyCode"].values)
+        self.assertIn("2330", result["SecurityCode"].values)
+        self.assertIn("8069", result["SecurityCode"].values)
 
     def test_replaces_dashes(self):
         """測試 '--' 被替換為 NaN。"""
         df = pd.DataFrame({
             "公司代號": ["2330"],
-            "公司名稱": ["台積電"],
             "營業收入": ["--"],
         })
 
-        result = self.uploader._clean_dataframe(df, 113, 1, "sii")
+        result = self.uploader._clean_dataframe(df, 113, 1)
 
         self.assertTrue(
             pd.isna(result["Revenue"].iloc[0])
         )
 
     def test_adds_metadata(self):
-        """測試加入 Year、Season、TYPEK 欄位。"""
+        """測試加入 Year、Quarter 欄位。"""
         df = pd.DataFrame({
             "公司代號": ["2330"],
-            "公司名稱": ["台積電"],
-            "產業別": ["半導體業"],
             "營業收入": [100000],
         })
 
-        result = self.uploader._clean_dataframe(df, 113, 2, "sii")
+        result = self.uploader._clean_dataframe(df, 113, 2)
 
         self.assertEqual(result["Year"].iloc[0], 113)
-        self.assertEqual(result["Season"].iloc[0], 2)
-        self.assertEqual(result["TYPEK"].iloc[0], "sii")
-        self.assertEqual(result["Industry"].iloc[0], "半導體業")
+        self.assertEqual(result["Quarter"].iloc[0], "2")
 
     def test_drops_total_rows(self):
         """測試移除合計列。"""
         df = pd.DataFrame({
             "公司代號": ["2330", "合計"],
-            "公司名稱": ["台積電", ""],
             "營業收入": [100000, 200000],
         })
 
-        result = self.uploader._clean_dataframe(df, 113, 1, "sii")
+        result = self.uploader._clean_dataframe(df, 113, 1)
 
         self.assertEqual(len(result), 1)
 
-    def test_missing_company_code_returns_empty(self):
-        """測試找不到 CompanyCode 欄位時回傳空 DataFrame。"""
+    def test_missing_security_code_returns_empty(self):
+        """測試找不到 SecurityCode 欄位時回傳空 DataFrame。"""
         df = pd.DataFrame({
             "未知欄位": ["2330"],
             "另一個欄位": ["台積電"],
         })
 
-        result = self.uploader._clean_dataframe(df, 113, 1, "sii")
+        result = self.uploader._clean_dataframe(df, 113, 1)
 
         self.assertTrue(result.empty)
 
@@ -169,18 +151,17 @@ class TestCleanDataframe(unittest.TestCase):
         """測試數值欄位轉換（含千分位逗號）。"""
         df = pd.DataFrame({
             "公司代號": ["2330"],
-            "公司名稱": ["台積電"],
             "基本每股盈餘(元)": ["10.53"],
             "營業收入": ["592,559,000"],
             "營業利益": ["200,000,000"],
             "稅後淨利": ["180,000,000"],
         })
 
-        result = self.uploader._clean_dataframe(df, 113, 1, "sii")
+        result = self.uploader._clean_dataframe(df, 113, 1)
 
         self.assertAlmostEqual(result["EPS"].iloc[0], 10.53)
         self.assertEqual(result["Revenue"].iloc[0], 592559000)
-        self.assertEqual(result["OperatingIncome"].iloc[0], 200000000)
+        self.assertEqual(result["Income"].iloc[0], 200000000)
         self.assertEqual(result["NetIncome"].iloc[0], 180000000)
 
 
@@ -190,23 +171,17 @@ class TestBuildColumnMapping(unittest.TestCase):
     def setUp(self):
         """初始化測試環境。"""
         self.mock_conn = MagicMock()
-        with patch.object(
-            QuarterRevenueUploader, "_ensure_tables"
-        ):
-            self.uploader = QuarterRevenueUploader(self.mock_conn)
+        self.uploader = QuarterRevenueUploader(self.mock_conn)
 
     def test_mapping_standard_columns(self):
         """測試標準欄位名稱對應。"""
         columns = [
-            "公司代號", "公司名稱", "產業別",
-            "基本每股盈餘(元)", "營業收入",
+            "公司代號", "基本每股盈餘(元)", "營業收入",
         ]
 
         result = self.uploader._build_column_mapping(columns)
 
-        self.assertEqual(result["公司代號"], "CompanyCode")
-        self.assertEqual(result["公司名稱"], "CompanyName")
-        self.assertEqual(result["產業別"], "Industry")
+        self.assertEqual(result["公司代號"], "SecurityCode")
         self.assertEqual(result["基本每股盈餘(元)"], "EPS")
         self.assertEqual(result["營業收入"], "Revenue")
 
@@ -216,7 +191,7 @@ class TestBuildColumnMapping(unittest.TestCase):
 
         result = self.uploader._build_column_mapping(columns)
 
-        self.assertEqual(result["公司代號 Code"], "CompanyCode")
+        self.assertEqual(result["公司代號 Code"], "SecurityCode")
         self.assertEqual(
             result["基本每股盈餘（元）"], "EPS"
         )
@@ -239,9 +214,9 @@ class TestBuildColumnMapping(unittest.TestCase):
         result = self.uploader._build_column_mapping(columns)
 
         self.assertEqual(result["營業收入"], "Revenue")
-        self.assertEqual(result["營業利益"], "OperatingIncome")
+        self.assertEqual(result["營業利益"], "Income")
         self.assertEqual(
-            result["營業外收入及支出"], "NonOperatingIncome"
+            result["營業外收入及支出"], "OtherIncome"
         )
 
 
@@ -251,10 +226,7 @@ class TestCrawlData(unittest.TestCase):
     def setUp(self):
         """初始化測試環境。"""
         self.mock_conn = MagicMock()
-        with patch.object(
-            QuarterRevenueUploader, "_ensure_tables"
-        ):
-            self.uploader = QuarterRevenueUploader(self.mock_conn)
+        self.uploader = QuarterRevenueUploader(self.mock_conn)
 
     def test_fetch_failure_returns_empty(self):
         """測試 _fetch_html 失敗時回傳空 DataFrame。"""
@@ -281,16 +253,12 @@ class TestCrawlData(unittest.TestCase):
         html = """
         <html><body>
         <table>
-            <tr><th>公司代號</th><th>公司名稱</th>
-                <th>產業別</th><th>營業收入</th></tr>
-            <tr><td>2330</td><td>台積電</td>
-                <td>半導體業</td><td>100</td></tr>
+            <tr><th>公司代號</th><th>營業收入</th></tr>
+            <tr><td>2330</td><td>100</td></tr>
         </table>
         <table>
-            <tr><th>公司代號</th><th>公司名稱</th>
-                <th>產業別</th><th>營業收入</th></tr>
-            <tr><td>1102</td><td>亞泥</td>
-                <td>水泥工業</td><td>200</td></tr>
+            <tr><th>公司代號</th><th>營業收入</th></tr>
+            <tr><td>1102</td><td>200</td></tr>
         </table>
         </body></html>
         """
@@ -299,8 +267,8 @@ class TestCrawlData(unittest.TestCase):
         result = self.uploader.crawl_data(113, 1)
 
         self.assertEqual(len(result), 2)
-        self.assertIn("2330", result["CompanyCode"].values)
-        self.assertIn("1102", result["CompanyCode"].values)
+        self.assertIn("2330", result["SecurityCode"].values)
+        self.assertIn("1102", result["SecurityCode"].values)
 
 
 class TestUpload(unittest.TestCase):
@@ -309,10 +277,7 @@ class TestUpload(unittest.TestCase):
     def setUp(self):
         """初始化測試環境。"""
         self.mock_conn = MagicMock()
-        with patch.object(
-            QuarterRevenueUploader, "_ensure_tables"
-        ):
-            self.uploader = QuarterRevenueUploader(self.mock_conn)
+        self.uploader = QuarterRevenueUploader(self.mock_conn)
 
     def test_skips_existing(self):
         """測試已上傳時跳過並回傳 0。"""

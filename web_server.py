@@ -181,7 +181,7 @@ class UploadRequest(BaseModel):
 class QuarterRevenueRequest(BaseModel):
     """季度營業收入抓取請求。"""
     year: int
-    season: int
+    quarter: int
 
 
 class ScheduleRequest(BaseModel):
@@ -347,13 +347,13 @@ def list_databases():
     return {"databases": DB_NAMES}
 
 
-def run_quarter_revenue_job(job_id, year, season):
+def run_quarter_revenue_job(job_id, year, quarter):
     """執行季度營業收入抓取任務（背景執行緒）。
 
     Args:
         job_id (str): 任務 ID。
         year (int): 民國年。
-        season (int): 季度（1-4）。
+        quarter (int): 季度（1-4）。
     """
     with jobs_lock:
         upload_jobs[job_id]["status"] = "running"
@@ -361,7 +361,7 @@ def run_quarter_revenue_job(job_id, year, season):
     try:
         conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
         uploader = QuarterRevenueUploader(conn)
-        record_count = uploader.upload(year, season)
+        record_count = uploader.upload(year, quarter)
         conn.close()
 
         with jobs_lock:
@@ -388,7 +388,7 @@ def create_quarter_revenue_upload(req: QuarterRevenueRequest):
     Returns:
         dict: 任務 ID 與初始狀態。
     """
-    if req.season not in (1, 2, 3, 4):
+    if req.quarter not in (1, 2, 3, 4):
         raise HTTPException(400, "季度必須為 1-4")
 
     if not (80 <= req.year <= 200):
@@ -412,7 +412,7 @@ def create_quarter_revenue_upload(req: QuarterRevenueRequest):
             "type": "quarter_revenue",
             "status": "pending",
             "year": req.year,
-            "season": req.season,
+            "quarter": req.quarter,
             "record_count": 0,
             "errors": [],
             "created_at": datetime.now().isoformat(),
@@ -421,7 +421,7 @@ def create_quarter_revenue_upload(req: QuarterRevenueRequest):
 
     t = threading.Thread(
         target=run_quarter_revenue_job,
-        args=(job_id, req.year, req.season),
+        args=(job_id, req.year, req.quarter),
         daemon=True,
     )
     t.start()
@@ -439,34 +439,11 @@ def list_uploaded_quarters():
     try:
         conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
 
-        # 檢查並移除不相容的舊表結構
-        try:
-            cols = conn.execute(
-                text("DESCRIBE QuarterRevenueUploaded")
-            ).fetchall()
-            col_names = {row[0] for row in cols}
-            if "Season" not in col_names:
-                conn.execute(text("DROP TABLE QuarterRevenueUploaded"))
-                conn.commit()
-        except Exception:
-            pass
-
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS QuarterRevenueUploaded (
-                Year INT,
-                Season INT,
-                UploadedAt DATETIME,
-                RecordCount INT,
-                UNIQUE KEY uq_quarter_uploaded (Year, Season)
-            )
-        """))
-        conn.commit()
-
         rows = conn.execute(
             text(
-                "SELECT Year, Season, UploadedAt, RecordCount "
+                "SELECT Year, Quarter "
                 "FROM QuarterRevenueUploaded "
-                "ORDER BY Year DESC, Season DESC"
+                "ORDER BY Year DESC, Quarter DESC"
             )
         ).fetchall()
         conn.close()
@@ -474,9 +451,7 @@ def list_uploaded_quarters():
         uploaded = [
             {
                 "year": row[0],
-                "season": row[1],
-                "uploaded_at": row[2].isoformat() if row[2] else None,
-                "record_count": row[3],
+                "quarter": row[1],
             }
             for row in rows
         ]

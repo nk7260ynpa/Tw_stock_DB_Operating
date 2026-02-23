@@ -27,7 +27,7 @@ class TestQuarterRevenueAPI(unittest.TestCase):
 
         res = self.client.post(
             "/api/quarter-revenue/upload",
-            json={"year": 113, "season": 1},
+            json={"year": 113, "quarter": 1},
         )
 
         self.assertEqual(res.status_code, 200)
@@ -35,20 +35,20 @@ class TestQuarterRevenueAPI(unittest.TestCase):
         self.assertIn("job_id", data)
         self.assertEqual(data["status"], "pending")
 
-    def test_invalid_season(self):
+    def test_invalid_quarter(self):
         """測試無效季度被拒絕。"""
         res = self.client.post(
             "/api/quarter-revenue/upload",
-            json={"year": 113, "season": 5},
+            json={"year": 113, "quarter": 5},
         )
 
         self.assertEqual(res.status_code, 400)
 
-    def test_invalid_season_zero(self):
+    def test_invalid_quarter_zero(self):
         """測試季度為 0 被拒絕。"""
         res = self.client.post(
             "/api/quarter-revenue/upload",
-            json={"year": 113, "season": 0},
+            json={"year": 113, "quarter": 0},
         )
 
         self.assertEqual(res.status_code, 400)
@@ -57,7 +57,7 @@ class TestQuarterRevenueAPI(unittest.TestCase):
         """測試年份太低被拒絕。"""
         res = self.client.post(
             "/api/quarter-revenue/upload",
-            json={"year": 50, "season": 1},
+            json={"year": 50, "quarter": 1},
         )
 
         self.assertEqual(res.status_code, 400)
@@ -66,7 +66,7 @@ class TestQuarterRevenueAPI(unittest.TestCase):
         """測試年份太高被拒絕。"""
         res = self.client.post(
             "/api/quarter-revenue/upload",
-            json={"year": 300, "season": 1},
+            json={"year": 300, "quarter": 1},
         )
 
         self.assertEqual(res.status_code, 400)
@@ -85,7 +85,7 @@ class TestQuarterRevenueAPI(unittest.TestCase):
 
         res = self.client.post(
             "/api/quarter-revenue/upload",
-            json={"year": 113, "season": 1},
+            json={"year": 113, "quarter": 1},
         )
 
         self.assertEqual(res.status_code, 409)
@@ -93,14 +93,11 @@ class TestQuarterRevenueAPI(unittest.TestCase):
     @patch("web_server.MySQLRouter")
     def test_list_uploaded_quarters(self, mock_router_cls):
         """測試列出已上傳的季度記錄。"""
-        from datetime import datetime
-
         mock_conn = MagicMock()
         mock_router_cls.return_value.mysql_conn = mock_conn
 
-        mock_uploaded_at = datetime(2026, 1, 15, 10, 30, 0)
         mock_conn.execute.return_value.fetchall.return_value = [
-            (113, 1, mock_uploaded_at, 1234),
+            (113, "1"),
         ]
 
         res = self.client.get("/api/quarter-revenue/uploaded")
@@ -110,8 +107,7 @@ class TestQuarterRevenueAPI(unittest.TestCase):
         self.assertIn("uploaded", data)
         self.assertEqual(len(data["uploaded"]), 1)
         self.assertEqual(data["uploaded"][0]["year"], 113)
-        self.assertEqual(data["uploaded"][0]["season"], 1)
-        self.assertEqual(data["uploaded"][0]["record_count"], 1234)
+        self.assertEqual(data["uploaded"][0]["quarter"], "1")
 
     @patch("web_server.MySQLRouter")
     def test_list_uploaded_quarters_empty(self, mock_router_cls):

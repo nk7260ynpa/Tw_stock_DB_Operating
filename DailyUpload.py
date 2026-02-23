@@ -33,18 +33,38 @@ USER = "root"
 PASSWORD = "stock"
 CRAWLERHOST = "tw_stocker_crawler:6738"
 
+# MGTS 已合併至 TWSE 資料庫，連線時需對應至 TWSE
+DB_MAPPING = {
+    "TWSE": "TWSE",
+    "TPEX": "TPEX",
+    "TAIFEX": "TAIFEX",
+    "FAOI": "FAOI",
+    "MGTS": "TWSE",
+}
+
+# 各資料來源對應的 UploadDate 表名
+UPLOAD_DATE_TABLE = {
+    "TWSE": "UploadDate",
+    "TPEX": "UploadDate",
+    "TAIFEX": "UploadDate",
+    "FAOI": "UploadDate",
+    "MGTS": "MGTSUploadDate",
+}
+
 
 def get_missing_dates(db_name, days=30):
     """查詢過去指定天數內尚未上傳的日期。
 
     Args:
-        db_name (str): 資料庫名稱。
+        db_name (str): 資料來源名稱（TWSE/TPEX/TAIFEX/FAOI/MGTS）。
         days (int): 往回檢查的天數，預設為 30。
 
     Returns:
         list[str]: 尚未上傳的日期清單，格式為 YYYY-MM-DD。
     """
-    conn = MySQLRouter(HOST, USER, PASSWORD, db_name).mysql_conn
+    actual_db = DB_MAPPING.get(db_name, db_name)
+    upload_date_table = UPLOAD_DATE_TABLE.get(db_name, "UploadDate")
+    conn = MySQLRouter(HOST, USER, PASSWORD, actual_db).mysql_conn
 
     date_list = [
         (datetime.datetime.now() - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
@@ -53,7 +73,7 @@ def get_missing_dates(db_name, days=30):
 
     uploaded_dates = conn.execute(
         text(
-            f"SELECT Date FROM UploadDate "
+            f"SELECT Date FROM {upload_date_table} "
             f"WHERE Date >= '{date_list[-1]}'"
         )
     ).fetchall()

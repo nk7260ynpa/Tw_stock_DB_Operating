@@ -9,7 +9,7 @@ function QuarterRevenueUpload() {
   const years = Array.from({ length: 10 }, (_, i) => currentYear - i)
 
   const [year, setYear] = useState(currentYear)
-  const [season, setSeason] = useState(1)
+  const [quarter, setQuarter] = useState(1)
   const [uploaded, setUploaded] = useState([])
   const [jobs, setJobs] = useState([])
   const [submitting, setSubmitting] = useState(false)
@@ -19,8 +19,8 @@ function QuarterRevenueUpload() {
     (j) => j.status === 'running' || j.status === 'pending'
   )
 
-  const isUploaded = (y, s) =>
-    uploaded.some((u) => u.year === y && u.season === s)
+  const isUploaded = (y, q) =>
+    uploaded.some((u) => u.year === y && String(u.quarter) === String(q))
 
   const fetchUploaded = useCallback(async () => {
     try {
@@ -66,7 +66,7 @@ function QuarterRevenueUpload() {
       const res = await fetch('/api/quarter-revenue/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ year, season }),
+        body: JSON.stringify({ year, quarter }),
       })
 
       if (!res.ok) {
@@ -115,20 +115,20 @@ function QuarterRevenueUpload() {
       <div className="form-group">
         <label>季度</label>
         <div className="checkbox-group">
-          {[1, 2, 3, 4].map((s) => {
-            const done = isUploaded(year, s)
+          {[1, 2, 3, 4].map((q) => {
+            const done = isUploaded(year, q)
             return (
               <label
-                key={s}
-                className={`checkbox-label${season === s ? ' checked' : ''}${done ? ' uploaded' : ''}`}
+                key={q}
+                className={`checkbox-label${quarter === q ? ' checked' : ''}${done ? ' uploaded' : ''}`}
               >
                 <input
                   type="radio"
-                  name="season"
-                  checked={season === s}
-                  onChange={() => setSeason(s)}
+                  name="quarter"
+                  checked={quarter === q}
+                  onChange={() => setQuarter(q)}
                 />
-                Q{s}
+                Q{q}
                 {done && <span className="uploaded-mark">&#10003;</span>}
               </label>
             )
@@ -158,12 +158,9 @@ function QuarterRevenueUpload() {
           <h3 className="jobs-title">已上傳季度</h3>
           <div className="uploaded-grid">
             {uploaded.map((u) => (
-              <div key={`${u.year}-${u.season}`} className="uploaded-item">
+              <div key={`${u.year}-${u.quarter}`} className="uploaded-item">
                 <span>
-                  民國 {u.year} 年 Q{u.season}
-                </span>
-                <span className="uploaded-count">
-                  {u.record_count?.toLocaleString()} 筆
+                  民國 {u.year} 年 Q{u.quarter}
                 </span>
               </div>
             ))}
@@ -178,7 +175,7 @@ function QuarterRevenueUpload() {
             <div key={job.job_id} className="job-item">
               <div className="job-header">
                 <span className="job-info">
-                  民國 {job.year} 年 Q{job.season}
+                  民國 {job.year} 年 Q{job.quarter}
                 </span>
                 <span className={`badge badge-${job.status}`}>
                   {job.status === 'running' && <span className="spinner" />}

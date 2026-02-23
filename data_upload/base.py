@@ -19,6 +19,8 @@ class DataUploadBase(ABC):
 
     stock_code_col = None
     stock_name_col = None
+    daily_price_table = "DailyPrice"
+    upload_date_table = "UploadDate"
 
     @abstractmethod
     def __init__(self, conn):
@@ -82,7 +84,10 @@ class DataUploadBase(ABC):
             bool: 若日期已存在回傳 True，否則回傳 False。
         """
         if self.conn.execute(
-            text(f"SELECT COUNT(*) FROM UploadDate WHERE Date = '{date}'")
+            text(
+                f"SELECT COUNT(*) FROM {self.upload_date_table} "
+                f"WHERE Date = '{date}'"
+            )
         ).scalar():
             return True
         return False
@@ -134,7 +139,7 @@ class DataUploadBase(ABC):
         df_copy = self.preprocess(df.copy())
         df_copy = self.check_schema(df_copy)
         df_copy.to_sql(
-            "DailyPrice", self.conn,
+            self.daily_price_table, self.conn,
             if_exists='append', index=False, chunksize=1000
         )
         self.conn.commit()
@@ -148,13 +153,15 @@ class DataUploadBase(ABC):
         """
         if df.shape[0] != 0:
             update = text(
-                f"INSERT INTO UploadDate (Date, Open) VALUES ('{date}', True);"
+                f"INSERT INTO {self.upload_date_table} "
+                f"(Date, Open) VALUES ('{date}', True);"
             )
             self.conn.execute(update)
             self.conn.commit()
         else:
             update = text(
-                f"INSERT INTO UploadDate (Date, Open) VALUES ('{date}', False);"
+                f"INSERT INTO {self.upload_date_table} "
+                f"(Date, Open) VALUES ('{date}', False);"
             )
             self.conn.execute(update)
             self.conn.commit()
