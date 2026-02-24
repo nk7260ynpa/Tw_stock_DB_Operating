@@ -35,7 +35,14 @@ class UploadType(BaseModel):
 
 
 class Uploader(DataUploadBase):
-    """FAOI 資料上傳器。"""
+    """FAOI 資料上傳器。
+
+    FAOI 資料已合併至 TWSE 資料庫，使用 FAOIDailyPrice 和
+    FAOIUploadDate 資料表。
+    """
+
+    daily_price_table = "FAOIDailyPrice"
+    upload_date_table = "FAOIUploadDate"
 
     def __init__(self, conn, host):
         """初始化 FAOI 上傳器。

@@ -86,6 +86,26 @@ class TestGetMissingDates(unittest.TestCase):
         )
 
     @patch("DailyUpload.MySQLRouter")
+    def test_faoi_maps_to_twse(self, mock_router_cls):
+        """測試 FAOI 連線至 TWSE 資料庫並查詢 FAOIUploadDate。"""
+        import DailyUpload
+
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = []
+        mock_router_cls.return_value.mysql_conn = mock_conn
+
+        DailyUpload.get_missing_dates("FAOI", days=1)
+
+        mock_router_cls.assert_called_once_with(
+            DailyUpload.HOST,
+            DailyUpload.USER,
+            DailyUpload.PASSWORD,
+            "TWSE",
+        )
+        call_args = mock_conn.execute.call_args[0][0]
+        self.assertIn("FAOIUploadDate", str(call_args))
+
+    @patch("DailyUpload.MySQLRouter")
     def test_mgts_maps_to_twse(self, mock_router_cls):
         """測試 MGTS 連線至 TWSE 資料庫並查詢 MGTSUploadDate。"""
         import DailyUpload

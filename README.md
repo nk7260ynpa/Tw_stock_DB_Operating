@@ -18,7 +18,7 @@
 | TWSE | 台灣證券交易所每日行情 |
 | TPEX | 證券櫃檯買賣中心每日行情 |
 | TAIFEX | 台灣期貨交易所每日行情 |
-| FAOI | 三大法人買賣超 |
+| FAOI | 三大法人買賣超（存放於 TWSE 資料庫的 FAOIDailyPrice 表） |
 | MGTS | 融資融券（存放於 TWSE 資料庫的 MGTSDailyPrice 表） |
 | QuarterRevenue | 上市公司季度營業收入（MOPS，存放於 TWSE 資料庫） |
 

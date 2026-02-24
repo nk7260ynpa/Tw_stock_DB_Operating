@@ -63,6 +63,11 @@ class TestUploader(unittest.TestCase):
         self.assertEqual(self.uploader.stock_name_col, "StockName")
         self.assertEqual(self.uploader.name, "faoi")
 
+    def test_custom_table_names(self):
+        """測試 FAOI 使用自定義資料表名稱（合併至 TWSE）。"""
+        self.assertEqual(self.uploader.daily_price_table, "FAOIDailyPrice")
+        self.assertEqual(self.uploader.upload_date_table, "FAOIUploadDate")
+
     def test_preprocess_drops_stock_name(self):
         """測試預處理移除 StockName 欄位。"""
         df = pd.DataFrame({

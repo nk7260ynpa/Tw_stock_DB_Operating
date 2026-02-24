@@ -33,12 +33,12 @@ USER = "root"
 PASSWORD = "stock"
 CRAWLERHOST = "tw_stocker_crawler:6738"
 
-# MGTS 已合併至 TWSE 資料庫，連線時需對應至 TWSE
+# MGTS、FAOI 已合併至 TWSE 資料庫，連線時需對應至 TWSE
 DB_MAPPING = {
     "TWSE": "TWSE",
     "TPEX": "TPEX",
     "TAIFEX": "TAIFEX",
-    "FAOI": "FAOI",
+    "FAOI": "TWSE",
     "MGTS": "TWSE",
 }
 
@@ -47,7 +47,7 @@ UPLOAD_DATE_TABLE = {
     "TWSE": "UploadDate",
     "TPEX": "UploadDate",
     "TAIFEX": "UploadDate",
-    "FAOI": "UploadDate",
+    "FAOI": "FAOIUploadDate",
     "MGTS": "MGTSUploadDate",
 }
 

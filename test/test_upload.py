@@ -70,6 +70,39 @@ class TestDayUpload(unittest.TestCase):
 
     @patch("upload.data_upload")
     @patch("upload.MySQLRouter")
+    def test_day_upload_faoi_maps_to_twse(
+        self, mock_router_cls, mock_data_upload
+    ):
+        """測試 FAOI 上傳時連線至 TWSE 資料庫。"""
+        import upload
+
+        mock_conn = MagicMock()
+        mock_router_cls.return_value.mysql_conn = mock_conn
+
+        mock_uploader = MagicMock()
+        mock_module = MagicMock()
+        mock_module.Uploader.return_value = mock_uploader
+        mock_data_upload.__dict__ = {"faoi": mock_module}
+
+        opt = EasyDict({
+            "host": "localhost:3306",
+            "user": "root",
+            "password": "stock",
+            "dbname": "FAOI",
+            "crawlerhost": "127.0.0.1:6738",
+        })
+
+        upload.day_upload("2026-01-02", opt)
+
+        mock_router_cls.assert_called_once_with(
+            "localhost:3306", "root", "stock", "TWSE"
+        )
+        mock_module.Uploader.assert_called_once_with(
+            mock_conn, "127.0.0.1:6738"
+        )
+
+    @patch("upload.data_upload")
+    @patch("upload.MySQLRouter")
     def test_day_upload_mgts_maps_to_twse(
         self, mock_router_cls, mock_data_upload
     ):

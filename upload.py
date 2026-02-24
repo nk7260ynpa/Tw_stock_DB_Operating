@@ -11,12 +11,12 @@ from datetime import datetime, timedelta
 import data_upload
 from routers import MySQLRouter
 
-# MGTS 已合併至 TWSE 資料庫，連線時需對應至 TWSE
+# MGTS、FAOI 已合併至 TWSE 資料庫，連線時需對應至 TWSE
 DB_MAPPING = {
     "TWSE": "TWSE",
     "TPEX": "TPEX",
     "TAIFEX": "TAIFEX",
-    "FAOI": "FAOI",
+    "FAOI": "TWSE",
     "MGTS": "TWSE",
 }
 
