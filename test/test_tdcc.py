@@ -116,19 +116,22 @@ class TestCrawlData(unittest.TestCase):
         self.uploader = TDCCUploader(self.mock_conn, "localhost:6738")
 
     @patch("data_upload.tdcc.requests.get")
-    def test_success(self, mock_get):
-        """測試成功取得資料。"""
+    def test_success_nested_format(self, mock_get):
+        """測試成功取得巢狀格式資料（實際 API 格式）。"""
         mock_resp = MagicMock()
-        mock_resp.json.return_value = [
-            {
-                "Date": "2024-01-05",
-                "SecurityCode": "2330",
-                "HoldingLevel": "1-999",
-                "Holders": 150000,
-                "Shares": 5000000,
-                "Percentage": 3.14,
-            },
-        ]
+        mock_resp.json.return_value = {
+            "date": "2024-01-05",
+            "data": [
+                {
+                    "Date": "2024-01-05T00:00:00",
+                    "SecurityCode": "2330",
+                    "HoldingLevel": 1,
+                    "Holders": 150000,
+                    "Shares": 5000000,
+                    "Percentage": 3.14,
+                },
+            ],
+        }
         mock_resp.raise_for_status = MagicMock()
         mock_get.return_value = mock_resp
 
@@ -136,6 +139,10 @@ class TestCrawlData(unittest.TestCase):
 
         self.assertEqual(date, "2024-01-05")
         self.assertEqual(len(df), 1)
+        # 驗證 Date 截取日期部分
+        self.assertEqual(df["Date"].iloc[0], "2024-01-05")
+        # 驗證 HoldingLevel 轉為字串
+        self.assertEqual(df["HoldingLevel"].iloc[0], "1")
 
     @patch("data_upload.tdcc.requests.get")
     def test_connection_failure(self, mock_get):
@@ -151,7 +158,20 @@ class TestCrawlData(unittest.TestCase):
     def test_empty_response(self, mock_get):
         """測試空回應回傳空資料。"""
         mock_resp = MagicMock()
-        mock_resp.json.return_value = []
+        mock_resp.json.return_value = {"date": "2024-01-05", "data": []}
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        date, df = self.uploader.crawl_data()
+
+        self.assertIsNone(date)
+        self.assertTrue(df.empty)
+
+    @patch("data_upload.tdcc.requests.get")
+    def test_empty_dict_response(self, mock_get):
+        """測試完全空回應回傳空資料。"""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {}
         mock_resp.raise_for_status = MagicMock()
         mock_get.return_value = mock_resp
 

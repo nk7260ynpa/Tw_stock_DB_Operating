@@ -84,6 +84,10 @@ class TDCCUploader:
     def crawl_data(self):
         """從爬蟲服務取得 TDCC 資料。
 
+        爬蟲 API 回傳格式為 {"date": "...", "data": [...]}，
+        其中 data 陣列內的 Date 欄位帶有時間戳（如 2026-02-13T00:00:00），
+        需截取日期部分。HoldingLevel 為數字（1-17），需轉為字串。
+
         Returns:
             tuple[str, pd.DataFrame]: (日期, 資料 DataFrame)。
                 爬取失敗時回傳 (None, 空 DataFrame)。
@@ -96,17 +100,35 @@ class TDCCUploader:
             logger.error("TDCC 爬蟲呼叫失敗：%s", e)
             return None, pd.DataFrame()
 
-        data = resp.json()
-        if not data:
+        result = resp.json()
+        if not result:
             logger.warning("TDCC 爬蟲回傳空資料")
             return None, pd.DataFrame()
 
-        df = pd.DataFrame(data)
+        # API 回傳巢狀結構：{"date": "...", "data": [...]}
+        records = result.get("data", result)
+        if isinstance(records, dict):
+            # 若無 data key 且本身是 dict，視為異常
+            logger.warning("TDCC 爬蟲回傳資料格式異常")
+            return None, pd.DataFrame()
+
+        if not records:
+            logger.warning("TDCC 爬蟲回傳空資料")
+            return None, pd.DataFrame()
+
+        df = pd.DataFrame(records)
         if df.empty or "Date" not in df.columns:
             logger.warning("TDCC 爬蟲回傳資料格式異常")
             return None, pd.DataFrame()
 
-        date = str(df["Date"].iloc[0])
+        # Date 欄位截取日期部分（移除 T00:00:00）
+        df["Date"] = df["Date"].astype(str).str[:10]
+
+        # HoldingLevel 轉為字串
+        if "HoldingLevel" in df.columns:
+            df["HoldingLevel"] = df["HoldingLevel"].astype(str)
+
+        date = df["Date"].iloc[0]
         return date, df
 
     def _rename_columns(self, df):
