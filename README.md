@@ -21,6 +21,7 @@
 | FAOI | 三大法人買賣超（存放於 TWSE 資料庫的 FAOIDailyPrice 表） |
 | MGTS | 融資融券（存放於 TWSE 資料庫的 MGTSDailyPrice 表） |
 | QuarterRevenue | 上市公司季度營業收入（MOPS，存放於 TWSE 資料庫） |
+| TDCC | 集保庫存分級（每週更新，存放於 TWSE 資料庫） |
 
 ## 專案結構
 
@@ -41,7 +42,8 @@ Tw_stock_DB_Operating/
 │   ├── taifex.py
 │   ├── faoi.py
 │   ├── mgts.py
-│   └── quarter_revenue.py    # 季度營業收入（MOPS）
+│   ├── quarter_revenue.py    # 季度營業收入（MOPS）
+│   └── tdcc.py               # TDCC 集保庫存分級
 ├── frontend/                 # React 前端原始碼（Vite）
 │   ├── package.json
 │   ├── vite.config.js
@@ -52,7 +54,8 @@ Tw_stock_DB_Operating/
 │       └── components/
 │           ├── ManualUpload.jsx
 │           ├── ScheduleManager.jsx
-│           └── QuarterRevenueUpload.jsx
+│           ├── QuarterRevenueUpload.jsx
+│           └── TDCCUpload.jsx
 ├── docker/                   # Docker 設定
 │   ├── build.sh              # 建立 Docker image 腳本
 │   ├── Dockerfile            # Multi-stage build（Node + Python）
@@ -70,7 +73,9 @@ Tw_stock_DB_Operating/
 │   ├── test_twse.py
 │   ├── test_upload.py
 │   ├── test_web_server.py
-│   └── test_web_server_revenue.py
+│   ├── test_web_server_revenue.py
+│   ├── test_tdcc.py
+│   └── test_web_server_tdcc.py
 └── logs/                     # 日誌資料夾
 ```
 
@@ -105,7 +110,7 @@ docker run -d --name tw_stock_db_operating \
   --network db_network \
   -p 8080:8080 \
   -v $(pwd)/logs:/workspace/logs \
-  nk7260ynpa/tw_stock_db_operating:2.1.0
+  nk7260ynpa/tw_stock_db_operating:2.2.0
 ```
 
 ### 4. 使用 docker-compose 啟動服務
@@ -117,7 +122,7 @@ docker compose -f docker/docker-compose.yaml up -d
 ### 5. 執行單元測試
 
 ```bash
-docker run --rm nk7260ynpa/tw_stock_db_operating:2.1.0 python -m pytest test/
+docker run --rm nk7260ynpa/tw_stock_db_operating:2.2.0 python -m pytest test/
 ```
 
 ## 命令列參數（upload.py）
@@ -139,6 +144,7 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:2.1.0 python -m pytest test/
 - **手動上傳**：選擇日期範圍與資料庫，直接觸發資料上傳
 - **排程設定**：檢視與修改每日自動上傳的排程時間
 - **季度營業收入**：選擇民國年與季度，從 MOPS 抓取上市公司營業收入
+- **TDCC 集保庫存**：一鍵取得最新集保庫存分級資料，支援週排程自動上傳
 
 排程設定會儲存至 `logs/config.json`，容器重啟後自動套用。
 

@@ -1,0 +1,145 @@
+"""TDCC API 端點單元測試。"""
+
+import unittest
+from unittest.mock import patch, MagicMock
+
+from fastapi.testclient import TestClient
+
+
+class TestTDCCAPI(unittest.TestCase):
+    """測試 TDCC API 端點。"""
+
+    @classmethod
+    def setUpClass(cls):
+        """建立測試用 FastAPI TestClient。"""
+        import web_server
+        cls.client = TestClient(web_server.app)
+
+    def setUp(self):
+        """每次測試前清空任務清單。"""
+        import web_server
+        web_server.upload_jobs.clear()
+
+    @patch("web_server.threading.Thread")
+    def test_create_tdcc_upload_success(self, mock_thread):
+        """測試成功建立 TDCC 上傳任務。"""
+        mock_thread.return_value.start = MagicMock()
+
+        res = self.client.post("/api/tdcc/upload")
+
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertIn("job_id", data)
+        self.assertEqual(data["status"], "pending")
+
+    @patch("web_server.threading.Thread")
+    def test_rejects_when_running(self, mock_thread):
+        """測試已有執行中任務時拒絕新任務。"""
+        import web_server
+
+        mock_thread.return_value.start = MagicMock()
+
+        web_server.upload_jobs["existing"] = {
+            "job_id": "existing",
+            "status": "running",
+        }
+
+        res = self.client.post("/api/tdcc/upload")
+
+        self.assertEqual(res.status_code, 409)
+
+    @patch("web_server.MySQLRouter")
+    def test_list_uploaded_tdcc(self, mock_router_cls):
+        """測試列出已上傳的 TDCC 日期。"""
+        mock_conn = MagicMock()
+        mock_router_cls.return_value.mysql_conn = mock_conn
+
+        mock_conn.execute.return_value.fetchall.return_value = [
+            ("2024-01-05",),
+            ("2024-01-12",),
+        ]
+
+        res = self.client.get("/api/tdcc/uploaded")
+
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertIn("uploaded", data)
+        self.assertEqual(len(data["uploaded"]), 2)
+        self.assertEqual(data["uploaded"][0], "2024-01-05")
+
+    @patch("web_server.MySQLRouter")
+    def test_list_uploaded_tdcc_empty(self, mock_router_cls):
+        """測試無已上傳記錄時回傳空清單。"""
+        mock_conn = MagicMock()
+        mock_router_cls.return_value.mysql_conn = mock_conn
+        mock_conn.execute.return_value.fetchall.return_value = []
+
+        res = self.client.get("/api/tdcc/uploaded")
+
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["uploaded"], [])
+
+    @patch("web_server.MySQLRouter")
+    def test_list_uploaded_tdcc_db_error(self, mock_router_cls):
+        """測試資料庫連線失敗時回傳空清單。"""
+        mock_router_cls.side_effect = Exception("連線失敗")
+
+        res = self.client.get("/api/tdcc/uploaded")
+
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["uploaded"], [])
+
+    def test_get_tdcc_schedule(self):
+        """測試取得 TDCC 排程設定。"""
+        res = self.client.get("/api/tdcc/schedule")
+
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertIn("day", data)
+        self.assertIn("time", data)
+
+    @patch("web_server.save_config")
+    @patch("web_server.load_config")
+    @patch("web_server.setup_schedule")
+    def test_update_tdcc_schedule_success(
+        self, mock_setup, mock_load, mock_save
+    ):
+        """測試成功更新 TDCC 排程。"""
+        mock_load.return_value = {
+            "schedule_time": "20:07",
+            "tdcc_schedule": {"day": "saturday", "time": "10:00"},
+        }
+
+        res = self.client.put(
+            "/api/tdcc/schedule",
+            json={"day": "sunday", "time": "09:30"},
+        )
+
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["day"], "sunday")
+        self.assertEqual(data["time"], "09:30")
+
+    def test_update_tdcc_schedule_invalid_day(self):
+        """測試無效星期被拒絕。"""
+        res = self.client.put(
+            "/api/tdcc/schedule",
+            json={"day": "invalidday", "time": "10:00"},
+        )
+
+        self.assertEqual(res.status_code, 400)
+
+    def test_update_tdcc_schedule_invalid_time(self):
+        """測試無效時間被拒絕。"""
+        res = self.client.put(
+            "/api/tdcc/schedule",
+            json={"day": "saturday", "time": "25:00"},
+        )
+
+        self.assertEqual(res.status_code, 400)
+
+
+if __name__ == "__main__":
+    unittest.main()

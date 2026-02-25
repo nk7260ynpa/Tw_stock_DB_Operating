@@ -25,6 +25,7 @@ from sqlalchemy import text
 from DailyUpload import daily_craw, DB_NAMES, HOST, USER, PASSWORD, CRAWLERHOST
 from upload import day_upload
 from data_upload.quarter_revenue import QuarterRevenueUploader
+from data_upload.tdcc import TDCCUploader
 from routers import MySQLRouter
 
 # 路徑設定
@@ -62,12 +63,20 @@ def load_config():
     """讀取設定檔。
 
     Returns:
-        dict: 設定內容，包含 schedule_time 欄位。
+        dict: 設定內容，包含 schedule_time 和 tdcc_schedule 欄位。
     """
+    default = {
+        "schedule_time": "20:07",
+        "tdcc_schedule": {"day": "saturday", "time": "10:00"},
+    }
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"schedule_time": "20:07"}
+            config = json.load(f)
+        # 向後相容：舊 config 可能沒有 tdcc_schedule
+        if "tdcc_schedule" not in config:
+            config["tdcc_schedule"] = default["tdcc_schedule"]
+        return config
+    return default
 
 
 def save_config(config):
@@ -80,16 +89,28 @@ def save_config(config):
         json.dump(config, f, indent=2, ensure_ascii=False)
 
 
-def setup_schedule(schedule_time):
-    """設定每日排程。
+def setup_schedule(schedule_time, tdcc_schedule=None):
+    """設定每日與每週排程。
 
     Args:
-        schedule_time (str): 排程時間，格式為 HH:MM。
+        schedule_time (str): 每日排程時間，格式為 HH:MM。
+        tdcc_schedule (dict | None): TDCC 週排程設定，
+            包含 day（星期）和 time（HH:MM）。
     """
     with schedule_lock:
         schedule_lib.clear()
         schedule_lib.every().day.at(schedule_time).do(daily_craw)
-        logger.info("排程已設定為每日 %s", schedule_time)
+        logger.info("每日排程已設定為 %s", schedule_time)
+
+        if tdcc_schedule:
+            day = tdcc_schedule.get("day", "saturday")
+            tdcc_time = tdcc_schedule.get("time", "10:00")
+            getattr(schedule_lib.every(), day).at(tdcc_time).do(
+                run_tdcc_scheduled
+            )
+            logger.info(
+                "TDCC 排程已設定為每週 %s %s", day, tdcc_time
+            )
 
 
 def scheduler_thread():
@@ -170,6 +191,61 @@ def run_upload_job(job_id, start_date, end_date, databases):
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
 
 
+def run_tdcc_scheduled():
+    """排程觸發的 TDCC 上傳。"""
+    job_id = str(uuid.uuid4())[:8]
+
+    with jobs_lock:
+        upload_jobs[job_id] = {
+            "job_id": job_id,
+            "type": "tdcc",
+            "status": "pending",
+            "record_count": 0,
+            "errors": [],
+            "created_at": datetime.now().isoformat(),
+            "finished_at": None,
+            "scheduled": True,
+        }
+
+    t = threading.Thread(
+        target=run_tdcc_upload_job,
+        args=(job_id,),
+        daemon=True,
+    )
+    t.start()
+    logger.info("TDCC 排程任務已建立 %s", job_id)
+
+
+def run_tdcc_upload_job(job_id):
+    """執行 TDCC 上傳任務（背景執行緒）。
+
+    Args:
+        job_id (str): 任務 ID。
+    """
+    with jobs_lock:
+        upload_jobs[job_id]["status"] = "running"
+
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
+        uploader = TDCCUploader(conn, CRAWLERHOST)
+        result = uploader.upload()
+        conn.close()
+
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "completed"
+            upload_jobs[job_id]["date"] = result["date"]
+            upload_jobs[job_id]["record_count"] = result["record_count"]
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        logger.info("TDCC 任務完成 %s", job_id)
+
+    except Exception as e:
+        logger.error("TDCC 任務失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+
 # Pydantic 請求模型
 class UploadRequest(BaseModel):
     """手動上傳請求。"""
@@ -189,12 +265,18 @@ class ScheduleRequest(BaseModel):
     time: str
 
 
+class TDCCScheduleRequest(BaseModel):
+    """TDCC 週排程更新請求。"""
+    day: str
+    time: str
+
+
 # FastAPI 應用
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """應用程式生命週期管理。"""
     config = load_config()
-    setup_schedule(config["schedule_time"])
+    setup_schedule(config["schedule_time"], config.get("tdcc_schedule"))
 
     t = threading.Thread(target=scheduler_thread, daemon=True)
     t.start()
@@ -331,7 +413,7 @@ def update_schedule(req: ScheduleRequest):
     config = load_config()
     config["schedule_time"] = req.time
     save_config(config)
-    setup_schedule(req.time)
+    setup_schedule(req.time, config.get("tdcc_schedule"))
 
     logger.info("排程時間已更新為 %s", req.time)
     return {"time": req.time, "message": f"排程時間已更新為 {req.time}"}
@@ -460,6 +542,128 @@ def list_uploaded_quarters():
     except Exception as e:
         logger.error("查詢已上傳季度失敗：%s", e)
         return {"uploaded": []}
+
+
+@app.post("/api/tdcc/upload")
+def create_tdcc_upload():
+    """建立 TDCC 上傳任務。
+
+    Returns:
+        dict: 任務 ID 與初始狀態。
+    """
+    with jobs_lock:
+        running_jobs = [
+            j for j in upload_jobs.values()
+            if j["status"] == "running"
+        ]
+        if running_jobs:
+            raise HTTPException(
+                409, "已有任務正在執行中，請等待完成後再提交"
+            )
+
+    job_id = str(uuid.uuid4())[:8]
+
+    with jobs_lock:
+        upload_jobs[job_id] = {
+            "job_id": job_id,
+            "type": "tdcc",
+            "status": "pending",
+            "record_count": 0,
+            "errors": [],
+            "created_at": datetime.now().isoformat(),
+            "finished_at": None,
+        }
+
+    t = threading.Thread(
+        target=run_tdcc_upload_job,
+        args=(job_id,),
+        daemon=True,
+    )
+    t.start()
+
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/tdcc/uploaded")
+def list_uploaded_tdcc():
+    """列出已上傳的 TDCC 日期。
+
+    Returns:
+        dict: 包含 uploaded 欄位的已上傳日期清單（最近 20 筆）。
+    """
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
+
+        rows = conn.execute(
+            text(
+                "SELECT DISTINCT Date FROM TDCC "
+                "ORDER BY Date DESC LIMIT 20"
+            )
+        ).fetchall()
+        conn.close()
+
+        uploaded = [str(row[0]) for row in rows]
+        return {"uploaded": uploaded}
+
+    except Exception as e:
+        logger.error("查詢已上傳 TDCC 日期失敗：%s", e)
+        return {"uploaded": []}
+
+
+@app.get("/api/tdcc/schedule")
+def get_tdcc_schedule():
+    """取得 TDCC 排程設定。
+
+    Returns:
+        dict: 包含 day 和 time 欄位的排程資訊。
+    """
+    config = load_config()
+    tdcc = config.get("tdcc_schedule", {"day": "saturday", "time": "10:00"})
+    return {"day": tdcc["day"], "time": tdcc["time"]}
+
+
+VALID_DAYS = {
+    "monday", "tuesday", "wednesday", "thursday",
+    "friday", "saturday", "sunday",
+}
+
+
+@app.put("/api/tdcc/schedule")
+def update_tdcc_schedule(req: TDCCScheduleRequest):
+    """更新 TDCC 週排程設定。
+
+    Args:
+        req: 包含 day 和 time 的請求。
+
+    Returns:
+        dict: 更新後的排程設定與訊息。
+    """
+    if req.day.lower() not in VALID_DAYS:
+        raise HTTPException(400, "無效的星期設定")
+
+    try:
+        time_parts = req.time.split(":")
+        hour = int(time_parts[0])
+        minute = int(time_parts[1])
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError
+    except (ValueError, IndexError):
+        raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
+
+    config = load_config()
+    config["tdcc_schedule"] = {
+        "day": req.day.lower(),
+        "time": req.time,
+    }
+    save_config(config)
+    setup_schedule(config["schedule_time"], config["tdcc_schedule"])
+
+    logger.info("TDCC 排程已更新為每週 %s %s", req.day, req.time)
+    return {
+        "day": req.day.lower(),
+        "time": req.time,
+        "message": f"TDCC 排程已更新為每週 {req.day} {req.time}",
+    }
 
 
 # Serve React 前端靜態檔案

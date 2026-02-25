@@ -1,6 +1,7 @@
 import ManualUpload from './components/ManualUpload'
 import ScheduleManager from './components/ScheduleManager'
 import QuarterRevenueUpload from './components/QuarterRevenueUpload'
+import TDCCUpload from './components/TDCCUpload'
 
 function App() {
   return (
@@ -14,6 +15,7 @@ function App() {
         <div className="side-panels">
           <ScheduleManager />
           <QuarterRevenueUpload />
+          <TDCCUpload />
         </div>
       </main>
     </div>
