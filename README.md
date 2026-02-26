@@ -21,7 +21,7 @@
 | FAOI | 三大法人買賣超（存放於 TWSE 資料庫的 FAOIDailyPrice 表） |
 | MGTS | 融資融券（存放於 TWSE 資料庫的 MGTSDailyPrice 表） |
 | QuarterRevenue | 上市公司季度營業收入（MOPS，存放於 TWSE 資料庫） |
-| TDCC | 集保庫存分級（每週更新，每日排程檢查新資料，存放於 TWSE 資料庫） |
+| TDCC | 集保庫存分級（每日排程檢查並上傳新資料，存放於 TWSE 資料庫） |
 
 ## 專案結構
 
