@@ -1,22 +1,11 @@
 import { useState, useEffect, useCallback } from 'react'
 
-const DAY_OPTIONS = [
-  { value: 'monday', label: '星期一' },
-  { value: 'tuesday', label: '星期二' },
-  { value: 'wednesday', label: '星期三' },
-  { value: 'thursday', label: '星期四' },
-  { value: 'friday', label: '星期五' },
-  { value: 'saturday', label: '星期六' },
-  { value: 'sunday', label: '星期日' },
-]
-
 function TDCCUpload() {
   const [uploaded, setUploaded] = useState([])
   const [jobs, setJobs] = useState([])
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  const [scheduleDay, setScheduleDay] = useState('saturday')
   const [scheduleTime, setScheduleTime] = useState('10:00')
   const [saving, setSaving] = useState(false)
   const [scheduleMsg, setScheduleMsg] = useState('')
@@ -57,7 +46,6 @@ function TDCCUpload() {
       const res = await fetch('/api/tdcc/schedule')
       if (res.ok) {
         const data = await res.json()
-        setScheduleDay(data.day || 'saturday')
         setScheduleTime(data.time || '10:00')
       }
     } catch {
@@ -106,7 +94,7 @@ function TDCCUpload() {
       const res = await fetch('/api/tdcc/schedule', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ day: scheduleDay, time: scheduleTime }),
+        body: JSON.stringify({ time: scheduleTime }),
       })
 
       if (res.ok) {
@@ -129,11 +117,6 @@ function TDCCUpload() {
     completed: '已完成',
     failed: '失敗',
   }
-
-  const dayLabel = DAY_OPTIONS.reduce((acc, d) => {
-    acc[d.value] = d.label
-    return acc
-  }, {})
 
   return (
     <div className="card">
@@ -161,20 +144,8 @@ function TDCCUpload() {
       {error && <div className="message message-error">{error}</div>}
 
       <div className="form-group" style={{ marginTop: '16px' }}>
-        <label>週排程設定</label>
+        <label>每日排程設定（每天檢查是否有新資料）</label>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <select
-            className="form-select"
-            value={scheduleDay}
-            onChange={(e) => setScheduleDay(e.target.value)}
-            style={{ flex: 1 }}
-          >
-            {DAY_OPTIONS.map((d) => (
-              <option key={d.value} value={d.value}>
-                {d.label}
-              </option>
-            ))}
-          </select>
           <input
             type="time"
             className="form-input"

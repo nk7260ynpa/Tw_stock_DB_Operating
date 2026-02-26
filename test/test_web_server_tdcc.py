@@ -92,13 +92,13 @@ class TestTDCCAPI(unittest.TestCase):
         self.assertEqual(data["uploaded"], [])
 
     def test_get_tdcc_schedule(self):
-        """測試取得 TDCC 排程設定。"""
+        """測試取得 TDCC 每日排程設定。"""
         res = self.client.get("/api/tdcc/schedule")
 
         self.assertEqual(res.status_code, 200)
         data = res.json()
-        self.assertIn("day", data)
         self.assertIn("time", data)
+        self.assertNotIn("day", data)
 
     @patch("web_server.save_config")
     @patch("web_server.load_config")
@@ -106,39 +106,108 @@ class TestTDCCAPI(unittest.TestCase):
     def test_update_tdcc_schedule_success(
         self, mock_setup, mock_load, mock_save
     ):
-        """測試成功更新 TDCC 排程。"""
+        """測試成功更新 TDCC 每日排程。"""
         mock_load.return_value = {
             "schedule_time": "20:07",
-            "tdcc_schedule": {"day": "saturday", "time": "10:00"},
+            "tdcc_schedule": {"time": "10:00"},
         }
 
         res = self.client.put(
             "/api/tdcc/schedule",
-            json={"day": "sunday", "time": "09:30"},
+            json={"time": "09:30"},
         )
 
         self.assertEqual(res.status_code, 200)
         data = res.json()
-        self.assertEqual(data["day"], "sunday")
         self.assertEqual(data["time"], "09:30")
-
-    def test_update_tdcc_schedule_invalid_day(self):
-        """測試無效星期被拒絕。"""
-        res = self.client.put(
-            "/api/tdcc/schedule",
-            json={"day": "invalidday", "time": "10:00"},
-        )
-
-        self.assertEqual(res.status_code, 400)
+        self.assertNotIn("day", data)
+        self.assertIn("message", data)
 
     def test_update_tdcc_schedule_invalid_time(self):
         """測試無效時間被拒絕。"""
         res = self.client.put(
             "/api/tdcc/schedule",
-            json={"day": "saturday", "time": "25:00"},
+            json={"time": "25:00"},
         )
 
         self.assertEqual(res.status_code, 400)
+
+    def test_update_tdcc_schedule_empty_time(self):
+        """測試空時間被拒絕。"""
+        res = self.client.put(
+            "/api/tdcc/schedule",
+            json={"time": ""},
+        )
+
+        self.assertEqual(res.status_code, 400)
+
+
+class TestLoadConfigMigration(unittest.TestCase):
+    """測試 load_config 向後相容遷移邏輯。"""
+
+    @patch("web_server.CONFIG_PATH")
+    @patch("web_server.save_config")
+    def test_migrate_old_format_with_day(self, mock_save, mock_path):
+        """測試舊格式（含 day）自動遷移為新格式。"""
+        import web_server
+
+        mock_path.exists.return_value = True
+
+        old_config = {
+            "schedule_time": "20:07",
+            "tdcc_schedule": {"day": "saturday", "time": "10:00"},
+        }
+
+        with patch("builtins.open", unittest.mock.mock_open(
+            read_data='{"schedule_time": "20:07", '
+            '"tdcc_schedule": {"day": "saturday", "time": "10:00"}}'
+        )):
+            with patch("json.load", return_value=old_config.copy()):
+                config = web_server.load_config()
+
+        self.assertNotIn("day", config["tdcc_schedule"])
+        self.assertEqual(config["tdcc_schedule"]["time"], "10:00")
+        mock_save.assert_called_once()
+
+    @patch("web_server.CONFIG_PATH")
+    def test_new_format_no_migration(self, mock_path):
+        """測試新格式不觸發遷移。"""
+        import web_server
+
+        mock_path.exists.return_value = True
+
+        new_config = {
+            "schedule_time": "20:07",
+            "tdcc_schedule": {"time": "10:00"},
+        }
+
+        with patch("builtins.open", unittest.mock.mock_open(
+            read_data='{"schedule_time": "20:07", '
+            '"tdcc_schedule": {"time": "10:00"}}'
+        )):
+            with patch("json.load", return_value=new_config.copy()):
+                with patch("web_server.save_config") as mock_save:
+                    config = web_server.load_config()
+
+        self.assertEqual(config["tdcc_schedule"], {"time": "10:00"})
+        mock_save.assert_not_called()
+
+    @patch("web_server.CONFIG_PATH")
+    def test_missing_tdcc_schedule_uses_default(self, mock_path):
+        """測試缺少 tdcc_schedule 時使用預設值。"""
+        import web_server
+
+        mock_path.exists.return_value = True
+
+        old_config = {"schedule_time": "20:07"}
+
+        with patch("builtins.open", unittest.mock.mock_open(
+            read_data='{"schedule_time": "20:07"}'
+        )):
+            with patch("json.load", return_value=old_config.copy()):
+                config = web_server.load_config()
+
+        self.assertEqual(config["tdcc_schedule"], {"time": "10:00"})
 
 
 if __name__ == "__main__":

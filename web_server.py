@@ -67,7 +67,7 @@ def load_config():
     """
     default = {
         "schedule_time": "20:07",
-        "tdcc_schedule": {"day": "saturday", "time": "10:00"},
+        "tdcc_schedule": {"time": "10:00"},
     }
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -75,6 +75,13 @@ def load_config():
         # 向後相容：舊 config 可能沒有 tdcc_schedule
         if "tdcc_schedule" not in config:
             config["tdcc_schedule"] = default["tdcc_schedule"]
+        # 向後相容：舊格式含 day 欄位，遷移為新格式（僅保留 time）
+        elif "day" in config["tdcc_schedule"]:
+            config["tdcc_schedule"] = {
+                "time": config["tdcc_schedule"].get("time", "10:00"),
+            }
+            save_config(config)
+            logger.info("已將 TDCC 排程設定從週排程遷移為每日排程。")
         return config
     return default
 
@@ -90,12 +97,12 @@ def save_config(config):
 
 
 def setup_schedule(schedule_time, tdcc_schedule=None):
-    """設定每日與每週排程。
+    """設定每日排程（含 TDCC 每日檢查）。
 
     Args:
-        schedule_time (str): 每日排程時間，格式為 HH:MM。
-        tdcc_schedule (dict | None): TDCC 週排程設定，
-            包含 day（星期）和 time（HH:MM）。
+        schedule_time (str): 每日資料上傳排程時間，格式為 HH:MM。
+        tdcc_schedule (dict | None): TDCC 每日排程設定，
+            包含 time（HH:MM）。
     """
     with schedule_lock:
         schedule_lib.clear()
@@ -103,13 +110,12 @@ def setup_schedule(schedule_time, tdcc_schedule=None):
         logger.info("每日排程已設定為 %s", schedule_time)
 
         if tdcc_schedule:
-            day = tdcc_schedule.get("day", "saturday")
             tdcc_time = tdcc_schedule.get("time", "10:00")
-            getattr(schedule_lib.every(), day).at(tdcc_time).do(
+            schedule_lib.every().day.at(tdcc_time).do(
                 run_tdcc_scheduled
             )
             logger.info(
-                "TDCC 排程已設定為每週 %s %s", day, tdcc_time
+                "TDCC 每日排程已設定為 %s", tdcc_time
             )
 
 
@@ -266,8 +272,7 @@ class ScheduleRequest(BaseModel):
 
 
 class TDCCScheduleRequest(BaseModel):
-    """TDCC 週排程更新請求。"""
-    day: str
+    """TDCC 每日排程更新請求。"""
     time: str
 
 
@@ -612,35 +617,26 @@ def list_uploaded_tdcc():
 
 @app.get("/api/tdcc/schedule")
 def get_tdcc_schedule():
-    """取得 TDCC 排程設定。
+    """取得 TDCC 每日排程設定。
 
     Returns:
-        dict: 包含 day 和 time 欄位的排程資訊。
+        dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    tdcc = config.get("tdcc_schedule", {"day": "saturday", "time": "10:00"})
-    return {"day": tdcc["day"], "time": tdcc["time"]}
-
-
-VALID_DAYS = {
-    "monday", "tuesday", "wednesday", "thursday",
-    "friday", "saturday", "sunday",
-}
+    tdcc = config.get("tdcc_schedule", {"time": "10:00"})
+    return {"time": tdcc["time"]}
 
 
 @app.put("/api/tdcc/schedule")
 def update_tdcc_schedule(req: TDCCScheduleRequest):
-    """更新 TDCC 週排程設定。
+    """更新 TDCC 每日排程設定。
 
     Args:
-        req: 包含 day 和 time 的請求。
+        req: 包含 time 的請求。
 
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    if req.day.lower() not in VALID_DAYS:
-        raise HTTPException(400, "無效的星期設定")
-
     try:
         time_parts = req.time.split(":")
         hour = int(time_parts[0])
@@ -651,18 +647,14 @@ def update_tdcc_schedule(req: TDCCScheduleRequest):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
-    config["tdcc_schedule"] = {
-        "day": req.day.lower(),
-        "time": req.time,
-    }
+    config["tdcc_schedule"] = {"time": req.time}
     save_config(config)
     setup_schedule(config["schedule_time"], config["tdcc_schedule"])
 
-    logger.info("TDCC 排程已更新為每週 %s %s", req.day, req.time)
+    logger.info("TDCC 每日排程已更新為 %s", req.time)
     return {
-        "day": req.day.lower(),
         "time": req.time,
-        "message": f"TDCC 排程已更新為每週 {req.day} {req.time}",
+        "message": f"TDCC 每日排程已更新為 {req.time}",
     }
 
 

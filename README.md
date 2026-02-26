@@ -21,7 +21,7 @@
 | FAOI | 三大法人買賣超（存放於 TWSE 資料庫的 FAOIDailyPrice 表） |
 | MGTS | 融資融券（存放於 TWSE 資料庫的 MGTSDailyPrice 表） |
 | QuarterRevenue | 上市公司季度營業收入（MOPS，存放於 TWSE 資料庫） |
-| TDCC | 集保庫存分級（每週更新，存放於 TWSE 資料庫） |
+| TDCC | 集保庫存分級（每週更新，每日排程檢查新資料，存放於 TWSE 資料庫） |
 
 ## 專案結構
 
@@ -144,7 +144,7 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:2.2.0 python -m pytest test/
 - **手動上傳**：選擇日期範圍與資料庫，直接觸發資料上傳
 - **排程設定**：檢視與修改每日自動上傳的排程時間
 - **季度營業收入**：選擇民國年與季度，從 MOPS 抓取上市公司營業收入
-- **TDCC 集保庫存**：一鍵取得最新集保庫存分級資料，支援週排程自動上傳
+- **TDCC 集保庫存**：一鍵取得最新集保庫存分級資料，每日排程自動檢查並上傳新資料
 
 排程設定會儲存至 `logs/config.json`，容器重啟後自動套用。
 
