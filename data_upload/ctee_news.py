@@ -245,6 +245,9 @@ class CTEENewsUploader:
         # 儲存全文
         file_count = self.save_contents(new_df, date)
 
+        # 記錄已上傳日期
+        self.record_uploaded_date(date)
+
         logger.info(
             "CTEE 新聞 %s 已上傳 %d 筆 metadata，儲存 %d 個全文檔案。",
             date, record_count, file_count,
@@ -254,3 +257,20 @@ class CTEENewsUploader:
             "record_count": record_count,
             "file_count": file_count,
         }
+
+    def record_uploaded_date(self, date):
+        """將日期記錄至 CTEEUploaded 資料表。
+
+        Args:
+            date (str): 日期字串（YYYY-MM-DD）。
+        """
+        try:
+            self.conn.execute(
+                text(
+                    "INSERT IGNORE INTO CTEEUploaded (Date) VALUES (:date)"
+                ),
+                {"date": date},
+            )
+            self.conn.commit()
+        except Exception as e:
+            logger.error("記錄 CTEE 已上傳日期失敗（%s）：%s", date, e)

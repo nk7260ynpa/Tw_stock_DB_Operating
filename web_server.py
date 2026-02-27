@@ -847,7 +847,7 @@ def list_uploaded_ctee_news():
 
         rows = conn.execute(
             text(
-                "SELECT DISTINCT Date FROM CTEE "
+                "SELECT Date FROM CTEEUploaded "
                 "ORDER BY Date DESC LIMIT 50"
             )
         ).fetchall()
