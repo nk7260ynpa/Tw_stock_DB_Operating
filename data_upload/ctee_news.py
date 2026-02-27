@@ -27,11 +27,11 @@ class CTEENewsType(BaseModel):
     """
 
     Date: str
-    Time: str
-    Author: str
+    Time: str | None = None
+    Author: str | None = None
     Head: str
-    SubHead: str
-    HashTag: str
+    SubHead: str | None = None
+    HashTag: str | None = None
     url: str
 
 
@@ -76,7 +76,7 @@ class CTEENewsUploader:
         """
         url = f"http://{self.crawler_host}/ctee_news"
         try:
-            resp = requests.get(url, params={"date": date}, timeout=60)
+            resp = requests.get(url, params={"date": date}, timeout=600)
             resp.raise_for_status()
         except Exception as e:
             logger.error("CTEE 新聞爬蟲呼叫失敗（%s）：%s", date, e)
@@ -90,6 +90,8 @@ class CTEENewsUploader:
             return pd.DataFrame()
 
         df = pd.DataFrame(records)
+        # 將 NaN 轉為 None（避免 Pydantic 驗證失敗）
+        df = df.where(df.notna(), None)
         return df
 
     def get_existing_urls(self, date):
@@ -132,6 +134,23 @@ class CTEENewsUploader:
             )
         return new_df
 
+    @staticmethod
+    def _clean_value(value, default=""):
+        """清理欄位值，將 NaN 轉為 None。
+
+        Args:
+            value: 欄位值。
+            default: 預設值。
+
+        Returns:
+            清理後的值。
+        """
+        if value is None:
+            return default if default != "" else None
+        if isinstance(value, float) and pd.isna(value):
+            return default if default != "" else None
+        return value
+
     def check_schema(self, df):
         """使用 Pydantic 驗證 DataFrame schema。
 
@@ -144,15 +163,15 @@ class CTEENewsUploader:
         records = df.to_dict(orient="records")
         validated = []
         for record in records:
-            # 只取 metadata 欄位進行驗證
+            # 只取 metadata 欄位進行驗證（NaN 轉為 None）
             meta = {
-                "Date": record.get("Date", ""),
-                "Time": record.get("Time", ""),
-                "Author": record.get("Author", ""),
-                "Head": record.get("Head", ""),
-                "SubHead": record.get("SubHead", ""),
-                "HashTag": record.get("HashTag", ""),
-                "url": record.get("url", ""),
+                "Date": self._clean_value(record.get("Date"), ""),
+                "Time": self._clean_value(record.get("Time")),
+                "Author": self._clean_value(record.get("Author")),
+                "Head": self._clean_value(record.get("Head"), ""),
+                "SubHead": self._clean_value(record.get("SubHead")),
+                "HashTag": self._clean_value(record.get("HashTag")),
+                "url": self._clean_value(record.get("url"), ""),
             }
             validated.append(CTEENewsType(**meta).model_dump())
         return pd.DataFrame(validated)
