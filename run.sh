@@ -26,10 +26,16 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
 fi
 
 echo "啟動 Docker container: ${CONTAINER_NAME}"
+
+# NewsContents 目錄用於存放 CTEE 新聞全文
+NEWS_CONTENTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)/Tw_stock_DB/NewsContents"
+mkdir -p "${NEWS_CONTENTS_DIR}"
+
 docker run -d \
   --name "${CONTAINER_NAME}" \
   --network db_network \
   --restart always \
   -p 8080:8080 \
   -v "${LOG_DIR}:/workspace/logs" \
+  -v "${NEWS_CONTENTS_DIR}:/workspace/NewsContents" \
   "${IMAGE_NAME}:${IMAGE_TAG}"

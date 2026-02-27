@@ -2,6 +2,7 @@ import ManualUpload from './components/ManualUpload'
 import ScheduleManager from './components/ScheduleManager'
 import QuarterRevenueUpload from './components/QuarterRevenueUpload'
 import TDCCUpload from './components/TDCCUpload'
+import CTEENewsUpload from './components/CTEENewsUpload'
 
 function App() {
   return (
@@ -16,6 +17,7 @@ function App() {
           <ScheduleManager />
           <QuarterRevenueUpload />
           <TDCCUpload />
+          <CTEENewsUpload />
         </div>
       </main>
     </div>

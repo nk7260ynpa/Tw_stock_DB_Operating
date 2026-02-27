@@ -26,6 +26,7 @@ from DailyUpload import daily_craw, DB_NAMES, HOST, USER, PASSWORD, CRAWLERHOST
 from upload import day_upload
 from data_upload.quarter_revenue import QuarterRevenueUploader
 from data_upload.tdcc import TDCCUploader
+from data_upload.ctee_news import CTEENewsUploader
 from routers import MySQLRouter
 
 # 路徑設定
@@ -63,11 +64,13 @@ def load_config():
     """讀取設定檔。
 
     Returns:
-        dict: 設定內容，包含 schedule_time 和 tdcc_schedule 欄位。
+        dict: 設定內容，包含 schedule_time、tdcc_schedule 和
+            ctee_schedule 欄位。
     """
     default = {
         "schedule_time": "20:07",
         "tdcc_schedule": {"time": "10:00"},
+        "ctee_schedule": {"time": "21:00"},
     }
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -82,6 +85,9 @@ def load_config():
             }
             save_config(config)
             logger.info("已將 TDCC 排程設定從週排程遷移為每日排程。")
+        # 向後相容：舊 config 可能沒有 ctee_schedule
+        if "ctee_schedule" not in config:
+            config["ctee_schedule"] = default["ctee_schedule"]
         return config
     return default
 
@@ -96,12 +102,14 @@ def save_config(config):
         json.dump(config, f, indent=2, ensure_ascii=False)
 
 
-def setup_schedule(schedule_time, tdcc_schedule=None):
-    """設定每日排程（含 TDCC 每日檢查）。
+def setup_schedule(schedule_time, tdcc_schedule=None, ctee_schedule=None):
+    """設定每日排程（含 TDCC 與 CTEE 每日檢查）。
 
     Args:
         schedule_time (str): 每日資料上傳排程時間，格式為 HH:MM。
         tdcc_schedule (dict | None): TDCC 每日排程設定，
+            包含 time（HH:MM）。
+        ctee_schedule (dict | None): CTEE 新聞每日排程設定，
             包含 time（HH:MM）。
     """
     with schedule_lock:
@@ -116,6 +124,15 @@ def setup_schedule(schedule_time, tdcc_schedule=None):
             )
             logger.info(
                 "TDCC 每日排程已設定為 %s", tdcc_time
+            )
+
+        if ctee_schedule:
+            ctee_time = ctee_schedule.get("time", "21:00")
+            schedule_lib.every().day.at(ctee_time).do(
+                run_ctee_news_scheduled
+            )
+            logger.info(
+                "CTEE 新聞每日排程已設定為 %s", ctee_time
             )
 
 
@@ -191,6 +208,88 @@ def run_upload_job(job_id, start_date, end_date, databases):
 
     except Exception as e:
         logger.error("上傳任務失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+
+def run_ctee_news_scheduled():
+    """排程觸發的 CTEE 新聞上傳（當日）。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_id = str(uuid.uuid4())[:8]
+
+    with jobs_lock:
+        upload_jobs[job_id] = {
+            "job_id": job_id,
+            "type": "ctee_news",
+            "status": "pending",
+            "date": today,
+            "record_count": 0,
+            "file_count": 0,
+            "errors": [],
+            "created_at": datetime.now().isoformat(),
+            "finished_at": None,
+            "scheduled": True,
+        }
+
+    t = threading.Thread(
+        target=run_ctee_news_upload_job,
+        args=(job_id, today, today),
+        daemon=True,
+    )
+    t.start()
+    logger.info("CTEE 新聞排程任務已建立 %s（%s）", job_id, today)
+
+
+def run_ctee_news_upload_job(job_id, start_date, end_date):
+    """執行 CTEE 新聞上傳任務（背景執行緒）。
+
+    支援日期範圍上傳，依序處理每一天的新聞。
+
+    Args:
+        job_id (str): 任務 ID。
+        start_date (str): 起始日期（YYYY-MM-DD）。
+        end_date (str): 結束日期（YYYY-MM-DD）。
+    """
+    with jobs_lock:
+        upload_jobs[job_id]["status"] = "running"
+
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
+        uploader = CTEENewsUploader(conn, CRAWLERHOST)
+
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+
+        total_records = 0
+        total_files = 0
+        current = start_dt
+
+        while current <= end_dt:
+            date_str = current.strftime("%Y-%m-%d")
+            with jobs_lock:
+                upload_jobs[job_id]["date"] = date_str
+
+            result = uploader.upload(date_str)
+            total_records += result["record_count"]
+            total_files += result["file_count"]
+            current += timedelta(days=1)
+
+        conn.close()
+
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "completed"
+            upload_jobs[job_id]["record_count"] = total_records
+            upload_jobs[job_id]["file_count"] = total_files
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        logger.info(
+            "CTEE 新聞任務完成 %s（%d 筆 metadata，%d 個檔案）",
+            job_id, total_records, total_files,
+        )
+
+    except Exception as e:
+        logger.error("CTEE 新聞任務失敗 %s: %s", job_id, e)
         with jobs_lock:
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
@@ -276,12 +375,27 @@ class TDCCScheduleRequest(BaseModel):
     time: str
 
 
+class CTEENewsUploadRequest(BaseModel):
+    """CTEE 新聞上傳請求。"""
+    start_date: str
+    end_date: str
+
+
+class CTEENewsScheduleRequest(BaseModel):
+    """CTEE 新聞每日排程更新請求。"""
+    time: str
+
+
 # FastAPI 應用
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """應用程式生命週期管理。"""
     config = load_config()
-    setup_schedule(config["schedule_time"], config.get("tdcc_schedule"))
+    setup_schedule(
+        config["schedule_time"],
+        config.get("tdcc_schedule"),
+        config.get("ctee_schedule"),
+    )
 
     t = threading.Thread(target=scheduler_thread, daemon=True)
     t.start()
@@ -418,7 +532,9 @@ def update_schedule(req: ScheduleRequest):
     config = load_config()
     config["schedule_time"] = req.time
     save_config(config)
-    setup_schedule(req.time, config.get("tdcc_schedule"))
+    setup_schedule(
+        req.time, config.get("tdcc_schedule"), config.get("ctee_schedule")
+    )
 
     logger.info("排程時間已更新為 %s", req.time)
     return {"time": req.time, "message": f"排程時間已更新為 {req.time}"}
@@ -649,12 +765,146 @@ def update_tdcc_schedule(req: TDCCScheduleRequest):
     config = load_config()
     config["tdcc_schedule"] = {"time": req.time}
     save_config(config)
-    setup_schedule(config["schedule_time"], config["tdcc_schedule"])
+    setup_schedule(
+        config["schedule_time"],
+        config["tdcc_schedule"],
+        config.get("ctee_schedule"),
+    )
 
     logger.info("TDCC 每日排程已更新為 %s", req.time)
     return {
         "time": req.time,
         "message": f"TDCC 每日排程已更新為 {req.time}",
+    }
+
+
+# CTEE 新聞 API 端點
+@app.post("/api/ctee-news/upload")
+def create_ctee_news_upload(req: CTEENewsUploadRequest):
+    """建立 CTEE 新聞上傳任務。
+
+    Args:
+        req: 包含起始日期與結束日期的請求。
+
+    Returns:
+        dict: 任務 ID 與初始狀態。
+    """
+    # 驗證日期格式
+    try:
+        start = datetime.strptime(req.start_date, "%Y-%m-%d")
+        end = datetime.strptime(req.end_date, "%Y-%m-%d")
+        if end < start:
+            raise HTTPException(400, "結束日期不能早於起始日期")
+    except ValueError:
+        raise HTTPException(400, "日期格式錯誤，請使用 YYYY-MM-DD")
+
+    with jobs_lock:
+        running_jobs = [
+            j for j in upload_jobs.values()
+            if j["status"] == "running"
+        ]
+        if running_jobs:
+            raise HTTPException(
+                409, "已有任務正在執行中，請等待完成後再提交"
+            )
+
+    job_id = str(uuid.uuid4())[:8]
+
+    with jobs_lock:
+        upload_jobs[job_id] = {
+            "job_id": job_id,
+            "type": "ctee_news",
+            "status": "pending",
+            "start_date": req.start_date,
+            "end_date": req.end_date,
+            "date": req.start_date,
+            "record_count": 0,
+            "file_count": 0,
+            "errors": [],
+            "created_at": datetime.now().isoformat(),
+            "finished_at": None,
+        }
+
+    t = threading.Thread(
+        target=run_ctee_news_upload_job,
+        args=(job_id, req.start_date, req.end_date),
+        daemon=True,
+    )
+    t.start()
+
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/ctee-news/uploaded")
+def list_uploaded_ctee_news():
+    """列出已上傳的 CTEE 新聞日期。
+
+    Returns:
+        dict: 包含 uploaded 欄位的已上傳日期清單（最近 50 筆）。
+    """
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
+
+        rows = conn.execute(
+            text(
+                "SELECT DISTINCT Date FROM CTEE "
+                "ORDER BY Date DESC LIMIT 50"
+            )
+        ).fetchall()
+        conn.close()
+
+        uploaded = [str(row[0]) for row in rows]
+        return {"uploaded": uploaded}
+
+    except Exception as e:
+        logger.error("查詢已上傳 CTEE 新聞日期失敗：%s", e)
+        return {"uploaded": []}
+
+
+@app.get("/api/ctee-news/schedule")
+def get_ctee_news_schedule():
+    """取得 CTEE 新聞每日排程設定。
+
+    Returns:
+        dict: 包含 time 欄位的排程資訊。
+    """
+    config = load_config()
+    ctee = config.get("ctee_schedule", {"time": "21:00"})
+    return {"time": ctee["time"]}
+
+
+@app.put("/api/ctee-news/schedule")
+def update_ctee_news_schedule(req: CTEENewsScheduleRequest):
+    """更新 CTEE 新聞每日排程設定。
+
+    Args:
+        req: 包含 time 的請求。
+
+    Returns:
+        dict: 更新後的排程設定與訊息。
+    """
+    try:
+        time_parts = req.time.split(":")
+        hour = int(time_parts[0])
+        minute = int(time_parts[1])
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError
+    except (ValueError, IndexError):
+        raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
+
+    config = load_config()
+    config["ctee_schedule"] = {"time": req.time}
+    save_config(config)
+    setup_schedule(
+        config["schedule_time"],
+        config.get("tdcc_schedule"),
+        config["ctee_schedule"],
+    )
+
+    logger.info("CTEE 新聞每日排程已更新為 %s", req.time)
+    return {
+        "time": req.time,
+        "message": f"CTEE 新聞每日排程已更新為 {req.time}",
     }
 
 
