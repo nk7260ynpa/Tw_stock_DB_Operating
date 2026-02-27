@@ -21,7 +21,11 @@ class TestLoadConfig(unittest.TestCase):
         with patch("builtins.open", mock_open(read_data=json.dumps(config_data))):
             result = web_server.load_config()
 
-        self.assertEqual(result, {"schedule_time": "21:30"})
+        # 向後相容：自動補上缺少的排程欄位
+        self.assertEqual(result["schedule_time"], "21:30")
+        self.assertIn("tdcc_schedule", result)
+        self.assertIn("ctee_schedule", result)
+        self.assertIn("cnyes_schedule", result)
 
     @patch("web_server.CONFIG_PATH")
     def test_load_config_file_not_exists(self, mock_path):
@@ -32,7 +36,10 @@ class TestLoadConfig(unittest.TestCase):
 
         result = web_server.load_config()
 
-        self.assertEqual(result, {"schedule_time": "20:07"})
+        self.assertEqual(result["schedule_time"], "20:07")
+        self.assertIn("tdcc_schedule", result)
+        self.assertIn("ctee_schedule", result)
+        self.assertIn("cnyes_schedule", result)
 
 
 class TestSaveConfig(unittest.TestCase):
@@ -205,7 +212,9 @@ class TestAPIEndpoints(unittest.TestCase):
         data = res.json()
         self.assertEqual(data["time"], "21:30")
         mock_save.assert_called_once()
-        mock_setup.assert_called_once_with("21:30")
+        mock_setup.assert_called_once()
+        args = mock_setup.call_args[0]
+        self.assertEqual(args[0], "21:30")
 
     def test_update_schedule_invalid_time(self):
         """測試無效時間格式被拒絕。"""
