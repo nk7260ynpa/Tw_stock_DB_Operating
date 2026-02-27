@@ -33,6 +33,7 @@ class CTEENewsType(BaseModel):
     SubHead: str | None = None
     HashTag: str | None = None
     url: str
+    ContentFile: str | None = None
 
 
 class CTEENewsUploader:
@@ -164,6 +165,10 @@ class CTEENewsUploader:
         validated = []
         for record in records:
             # 只取 metadata 欄位進行驗證（NaN 轉為 None）
+            url_val = self._clean_value(record.get("url"), "")
+            content_file = (
+                f"{self.url_hash(url_val)}.txt" if url_val else None
+            )
             meta = {
                 "Date": self._clean_value(record.get("Date"), ""),
                 "Time": self._clean_value(record.get("Time")),
@@ -171,7 +176,8 @@ class CTEENewsUploader:
                 "Head": self._clean_value(record.get("Head"), ""),
                 "SubHead": self._clean_value(record.get("SubHead")),
                 "HashTag": self._clean_value(record.get("HashTag")),
-                "url": self._clean_value(record.get("url"), ""),
+                "url": url_val,
+                "ContentFile": content_file,
             }
             validated.append(CTEENewsType(**meta).model_dump())
         return pd.DataFrame(validated)
