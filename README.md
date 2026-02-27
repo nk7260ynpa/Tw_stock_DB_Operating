@@ -12,6 +12,7 @@
 - **季度營業收入**：從公開資訊觀測站 (MOPS) 抓取上市公司季度營業收入（`data_upload/quarter_revenue.py`）
 - **CTEE 新聞**：從爬蟲取得工商時報新聞，metadata 存入 MySQL，全文存為 txt 檔（`data_upload/ctee_news.py`）
 - **CNYES 新聞**：從爬蟲取得鉅亨網新聞，metadata 存入 MySQL，全文存為 md 檔（`data_upload/cnyes_news.py`）
+- **PTT 新聞**：從爬蟲取得 PTT 股版新聞，metadata 存入 MySQL，全文存為 md 檔（`data_upload/ptt_news.py`）
 
 ## 支援的資料來源
 
@@ -26,6 +27,7 @@
 | TDCC | 集保庫存分級（每日排程檢查並上傳新資料，存放於 TWSE 資料庫） |
 | CTEE News | 工商時報新聞（metadata 存於 NEWS.CTEE，全文存為 txt 檔） |
 | CNYES News | 鉅亨網新聞（metadata 存於 NEWS.CNYES，全文存為 md 檔） |
+| PTT News | PTT 股版新聞（metadata 存於 NEWS.PTT，全文存為 md 檔） |
 
 ## 專案結構
 
@@ -49,7 +51,8 @@ Tw_stock_DB_Operating/
 │   ├── quarter_revenue.py    # 季度營業收入（MOPS）
 │   ├── tdcc.py               # TDCC 集保庫存分級
 │   ├── ctee_news.py          # CTEE 工商時報新聞
-│   └── cnyes_news.py         # CNYES 鉅亨網新聞
+│   ├── cnyes_news.py         # CNYES 鉅亨網新聞
+│   └── ptt_news.py           # PTT 股版新聞
 ├── frontend/                 # React 前端原始碼（Vite）
 │   ├── package.json
 │   ├── vite.config.js
@@ -63,7 +66,8 @@ Tw_stock_DB_Operating/
 │           ├── QuarterRevenueUpload.jsx
 │           ├── TDCCUpload.jsx
 │           ├── CTEENewsUpload.jsx
-│           └── CNYESNewsUpload.jsx
+│           ├── CNYESNewsUpload.jsx
+│           └── PTTNewsUpload.jsx
 ├── docker/                   # Docker 設定
 │   ├── build.sh              # 建立 Docker image 腳本
 │   ├── Dockerfile            # Multi-stage build（Node + Python）
@@ -87,7 +91,9 @@ Tw_stock_DB_Operating/
 │   ├── test_ctee_news.py
 │   ├── test_web_server_ctee.py
 │   ├── test_cnyes_news.py
-│   └── test_web_server_cnyes.py
+│   ├── test_web_server_cnyes.py
+│   ├── test_ptt_news.py
+│   └── test_web_server_ptt.py
 └── logs/                     # 日誌資料夾
 ```
 
@@ -159,6 +165,7 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:2.2.0 python -m pytest test/
 - **TDCC 集保庫存**：一鍵取得最新集保庫存分級資料，每日排程自動檢查並上傳新資料
 - **CTEE 新聞**：選擇日期範圍上傳工商時報新聞，metadata 寫入 MySQL，全文存為 txt 檔，每日排程自動抓取當日新聞
 - **CNYES 新聞**：選擇日期範圍上傳鉅亨網新聞，metadata 寫入 MySQL，全文存為 md 檔，每日排程自動抓取當日新聞
+- **PTT 新聞**：選擇日期範圍上傳 PTT 股版新聞，metadata 寫入 MySQL，全文存為 md 檔，每日排程自動抓取當日新聞
 
 排程設定會儲存至 `logs/config.json`，容器重啟後自動套用。
 

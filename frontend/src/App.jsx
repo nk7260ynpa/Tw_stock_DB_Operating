@@ -4,6 +4,7 @@ import QuarterRevenueUpload from './components/QuarterRevenueUpload'
 import TDCCUpload from './components/TDCCUpload'
 import CTEENewsUpload from './components/CTEENewsUpload'
 import CNYESNewsUpload from './components/CNYESNewsUpload'
+import PTTNewsUpload from './components/PTTNewsUpload'
 
 function App() {
   return (
@@ -20,6 +21,7 @@ function App() {
           <TDCCUpload />
           <CTEENewsUpload />
           <CNYESNewsUpload />
+          <PTTNewsUpload />
         </div>
       </main>
     </div>
