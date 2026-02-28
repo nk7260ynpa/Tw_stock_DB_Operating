@@ -3,10 +3,12 @@
 從爬蟲服務取得 MoneyUDN（聯合新聞網-經濟日報）新聞資料，
 將 metadata 寫入 MySQL NEWS.MoneyUDN 表，
 全文內容存為 md 檔至 /workspace/NewsContents/MoneyUDN/。
+圖片下載至本地並改寫 Markdown 中的圖片路徑。
 """
 
 import hashlib
 import logging
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -179,8 +181,137 @@ class MoneyUDNNewsUploader:
             validated.append(MoneyUDNNewsType(**meta).model_dump())
         return pd.DataFrame(validated)
 
+    # 圖片下載用 HTTP headers
+    _IMAGE_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+    }
+
+    # Content-Type 對應副檔名
+    _CONTENT_TYPE_MAP = {
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/gif": "gif",
+        "image/webp": "webp",
+    }
+
+    # 從 URL 路徑判斷副檔名的合法集合
+    _VALID_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "webp"}
+
+    @staticmethod
+    def _guess_extension(image_url, response):
+        """從 URL 路徑或 HTTP Content-Type 推測圖片副檔名。
+
+        Args:
+            image_url (str): 圖片 URL。
+            response (requests.Response): HTTP 回應物件。
+
+        Returns:
+            str: 副檔名（不含點號），預設為 'jpg'。
+        """
+        # 優先從 Content-Type 判斷
+        content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        if content_type in MoneyUDNNewsUploader._CONTENT_TYPE_MAP:
+            return MoneyUDNNewsUploader._CONTENT_TYPE_MAP[content_type]
+
+        # 從 URL 路徑取副檔名
+        url_path = image_url.split("?")[0]
+        if "." in url_path:
+            ext = url_path.rsplit(".", 1)[-1].lower()
+            if ext in MoneyUDNNewsUploader._VALID_EXTENSIONS:
+                return "jpg" if ext == "jpeg" else ext
+
+        return "jpg"
+
+    @staticmethod
+    def _download_images(content, date):
+        """解析 Markdown 中的圖片 URL，下載至本地並改寫路徑。
+
+        解析格式為 ![alt](url) 的圖片語法，將遠端圖片下載至
+        NewsContents/MoneyUDN/{date}/images/ 目錄，
+        並將 Markdown 中的遠端 URL 替換為本地相對路徑。
+
+        Args:
+            content (str): 原始 Markdown 內容。
+            date (str): 日期字串（YYYY-MM-DD），用於建立圖片存放目錄。
+
+        Returns:
+            str: 改寫圖片路徑後的 Markdown 內容。
+                 下載失敗的圖片保留原始遠端 URL。
+        """
+        if not content:
+            return content
+
+        # 找出所有 Markdown 圖片語法
+        pattern = r"!\[([^\]]*)\]\((https?://[^)]+)\)"
+        matches = re.findall(pattern, content)
+
+        if not matches:
+            return content
+
+        # 建立圖片存放目錄
+        images_dir = NEWS_CONTENT_BASE / date / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        # 記錄已處理的 URL → 本地路徑對應（避免重複下載同一張圖）
+        url_to_local = {}
+
+        for alt_text, image_url in matches:
+            if image_url in url_to_local:
+                continue
+
+            img_hash = hashlib.md5(image_url.encode()).hexdigest()[:12]
+
+            try:
+                resp = requests.get(
+                    image_url,
+                    headers=MoneyUDNNewsUploader._IMAGE_HEADERS,
+                    timeout=30,
+                )
+                resp.raise_for_status()
+            except Exception as e:
+                logger.warning(
+                    "MoneyUDN 圖片下載失敗（%s）：%s", image_url, e
+                )
+                continue
+
+            ext = MoneyUDNNewsUploader._guess_extension(image_url, resp)
+            file_name = f"{img_hash}.{ext}"
+            file_path = images_dir / file_name
+
+            try:
+                file_path.write_bytes(resp.content)
+                url_to_local[image_url] = f"images/{file_name}"
+                logger.debug(
+                    "MoneyUDN 圖片已下載：%s → %s", image_url, file_path
+                )
+            except Exception as e:
+                logger.warning(
+                    "MoneyUDN 圖片儲存失敗（%s）：%s", file_path, e
+                )
+
+        # 替換 Markdown 中的圖片 URL
+        if url_to_local:
+            def _replace_url(match):
+                """替換單一圖片 URL。"""
+                alt = match.group(1)
+                url = match.group(2)
+                local_path = url_to_local.get(url, url)
+                return f"![{alt}]({local_path})"
+
+            content = re.sub(pattern, _replace_url, content)
+
+        return content
+
     def save_contents(self, df, date):
-        """將新聞全文存為 md 檔案。
+        """將新聞全文存為 md 檔案，同時下載內嵌圖片至本地。
+
+        解析 Markdown 中的遠端圖片 URL，下載至
+        images/ 子目錄，並將 Markdown 中的 URL 替換為本地相對路徑。
+        圖片下載失敗不會阻斷上傳流程。
 
         Args:
             df (pd.DataFrame): 包含 Content 與 url 欄位的 DataFrame。
@@ -199,13 +330,16 @@ class MoneyUDNNewsUploader:
             if not url:
                 continue
 
+            # 下載圖片並改寫 Markdown 中的圖片路徑
+            content = self._download_images(
+                content if content else "", date
+            )
+
             file_name = f"{self.url_hash(url)}.md"
             file_path = content_dir / file_name
 
             try:
-                file_path.write_text(
-                    content if content else "", encoding="utf-8"
-                )
+                file_path.write_text(content, encoding="utf-8")
                 saved += 1
             except Exception as e:
                 logger.error(

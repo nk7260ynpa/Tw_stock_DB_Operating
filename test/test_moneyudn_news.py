@@ -388,6 +388,214 @@ class TestSaveContents(unittest.TestCase):
             self.assertTrue(file_name.endswith(".md"))
 
 
+class TestGuessExtension(unittest.TestCase):
+    """測試 _guess_extension 靜態方法。"""
+
+    def test_content_type_jpeg(self):
+        """測試 Content-Type 為 image/jpeg 時回傳 jpg。"""
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "image/jpeg"}
+
+        result = MoneyUDNNewsUploader._guess_extension(
+            "https://example.com/photo", mock_resp
+        )
+
+        self.assertEqual(result, "jpg")
+
+    def test_content_type_png(self):
+        """測試 Content-Type 為 image/png 時回傳 png。"""
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "image/png; charset=utf-8"}
+
+        result = MoneyUDNNewsUploader._guess_extension(
+            "https://example.com/photo", mock_resp
+        )
+
+        self.assertEqual(result, "png")
+
+    def test_content_type_webp(self):
+        """測試 Content-Type 為 image/webp 時回傳 webp。"""
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "image/webp"}
+
+        result = MoneyUDNNewsUploader._guess_extension(
+            "https://example.com/photo", mock_resp
+        )
+
+        self.assertEqual(result, "webp")
+
+    def test_fallback_to_url_extension(self):
+        """測試 Content-Type 不明確時從 URL 推斷副檔名。"""
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/octet-stream"}
+
+        result = MoneyUDNNewsUploader._guess_extension(
+            "https://example.com/photo.png?w=800", mock_resp
+        )
+
+        self.assertEqual(result, "png")
+
+    def test_jpeg_normalized_to_jpg(self):
+        """測試 URL 中的 jpeg 副檔名正規化為 jpg。"""
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/octet-stream"}
+
+        result = MoneyUDNNewsUploader._guess_extension(
+            "https://example.com/photo.jpeg", mock_resp
+        )
+
+        self.assertEqual(result, "jpg")
+
+    def test_default_jpg(self):
+        """測試無法判斷時預設回傳 jpg。"""
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/octet-stream"}
+
+        result = MoneyUDNNewsUploader._guess_extension(
+            "https://example.com/photo", mock_resp
+        )
+
+        self.assertEqual(result, "jpg")
+
+
+class TestDownloadImages(unittest.TestCase):
+    """測試 _download_images 靜態方法。"""
+
+    def test_empty_content(self):
+        """測試空內容直接回傳。"""
+        result = MoneyUDNNewsUploader._download_images("", "2026-02-28")
+
+        self.assertEqual(result, "")
+
+    def test_none_content(self):
+        """測試 None 內容直接回傳。"""
+        result = MoneyUDNNewsUploader._download_images(None, "2026-02-28")
+
+        self.assertIsNone(result)
+
+    def test_no_images(self):
+        """測試不含圖片的 Markdown 原樣回傳。"""
+        content = "# 標題\n\n這是純文字內容。"
+
+        result = MoneyUDNNewsUploader._download_images(
+            content, "2026-02-28"
+        )
+
+        self.assertEqual(result, content)
+
+    @patch("data_upload.moneyudn_news.NEWS_CONTENT_BASE")
+    @patch("data_upload.moneyudn_news.requests.get")
+    def test_successful_download(self, mock_get, mock_base):
+        """測試成功下載圖片並替換 URL。"""
+        # 設定 mock 目錄
+        mock_images_dir = MagicMock()
+        mock_date_dir = MagicMock()
+        mock_base.__truediv__ = MagicMock(return_value=mock_date_dir)
+        mock_date_dir.__truediv__ = MagicMock(return_value=mock_images_dir)
+        mock_images_dir.__truediv__ = MagicMock(return_value=MagicMock())
+        mock_images_dir.mkdir = MagicMock()
+
+        # 設定 mock HTTP 回應
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "image/jpeg"}
+        mock_resp.content = b"fake_image_data"
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        content = "![圖片](https://example.com/photo.jpg)"
+
+        result = MoneyUDNNewsUploader._download_images(
+            content, "2026-02-28"
+        )
+
+        # 確認 URL 已被替換為本地路徑
+        self.assertIn("images/", result)
+        self.assertNotIn("https://example.com/photo.jpg", result)
+
+    @patch("data_upload.moneyudn_news.NEWS_CONTENT_BASE")
+    @patch("data_upload.moneyudn_news.requests.get")
+    def test_download_failure_keeps_original_url(self, mock_get, mock_base):
+        """測試下載失敗時保留原始 URL。"""
+        mock_images_dir = MagicMock()
+        mock_date_dir = MagicMock()
+        mock_base.__truediv__ = MagicMock(return_value=mock_date_dir)
+        mock_date_dir.__truediv__ = MagicMock(return_value=mock_images_dir)
+        mock_images_dir.mkdir = MagicMock()
+
+        # 模擬下載失敗
+        mock_get.side_effect = Exception("連線逾時")
+
+        content = "![圖片](https://example.com/photo.jpg)"
+
+        result = MoneyUDNNewsUploader._download_images(
+            content, "2026-02-28"
+        )
+
+        # 原始 URL 應保留
+        self.assertIn("https://example.com/photo.jpg", result)
+
+    @patch("data_upload.moneyudn_news.NEWS_CONTENT_BASE")
+    @patch("data_upload.moneyudn_news.requests.get")
+    def test_duplicate_urls_downloaded_once(self, mock_get, mock_base):
+        """測試重複的圖片 URL 只下載一次。"""
+        mock_images_dir = MagicMock()
+        mock_date_dir = MagicMock()
+        mock_base.__truediv__ = MagicMock(return_value=mock_date_dir)
+        mock_date_dir.__truediv__ = MagicMock(return_value=mock_images_dir)
+        mock_images_dir.__truediv__ = MagicMock(return_value=MagicMock())
+        mock_images_dir.mkdir = MagicMock()
+
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "image/png"}
+        mock_resp.content = b"fake_image"
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        content = (
+            "![圖1](https://example.com/same.png)\n"
+            "![圖2](https://example.com/same.png)"
+        )
+
+        MoneyUDNNewsUploader._download_images(content, "2026-02-28")
+
+        # requests.get 只應被呼叫一次（同一 URL 不重複下載）
+        mock_get.assert_called_once()
+
+    @patch("data_upload.moneyudn_news.NEWS_CONTENT_BASE")
+    @patch("data_upload.moneyudn_news.requests.get")
+    def test_mixed_success_and_failure(self, mock_get, mock_base):
+        """測試部分下載成功、部分失敗的情境。"""
+        mock_images_dir = MagicMock()
+        mock_date_dir = MagicMock()
+        mock_base.__truediv__ = MagicMock(return_value=mock_date_dir)
+        mock_date_dir.__truediv__ = MagicMock(return_value=mock_images_dir)
+        mock_images_dir.__truediv__ = MagicMock(return_value=MagicMock())
+        mock_images_dir.mkdir = MagicMock()
+
+        # 第一次成功，第二次失敗
+        mock_resp_ok = MagicMock()
+        mock_resp_ok.headers = {"Content-Type": "image/jpeg"}
+        mock_resp_ok.content = b"ok"
+        mock_resp_ok.raise_for_status = MagicMock()
+
+        mock_get.side_effect = [mock_resp_ok, Exception("失敗")]
+
+        content = (
+            "![圖1](https://example.com/ok.jpg)\n"
+            "![圖2](https://example.com/fail.jpg)"
+        )
+
+        result = MoneyUDNNewsUploader._download_images(
+            content, "2026-02-28"
+        )
+
+        # 成功的圖片 URL 應被替換
+        self.assertNotIn("https://example.com/ok.jpg", result)
+        self.assertIn("images/", result)
+        # 失敗的圖片 URL 應保留
+        self.assertIn("https://example.com/fail.jpg", result)
+
+
 class TestUploadMetadata(unittest.TestCase):
     """測試 upload_metadata 方法。"""
 
