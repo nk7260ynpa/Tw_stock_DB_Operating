@@ -94,6 +94,41 @@ class PTTNewsUploader:
         df = df.where(df.notna(), None)
         return df
 
+    def crawl_data_by_hours(self, hours):
+        """從爬蟲服務取得過去指定小時數的 PTT 股版新聞。
+
+        使用 hours 參數呼叫爬蟲 API，取得跨日的新聞資料。
+
+        Args:
+            hours (int): 要回溯的小時數（1-72）。
+
+        Returns:
+            pd.DataFrame: 新聞資料 DataFrame，爬取失敗時回傳空 DataFrame。
+        """
+        url = f"http://{self.crawler_host}/ptt_news"
+        try:
+            resp = requests.get(
+                url, params={"hours": hours}, timeout=600
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            logger.error(
+                "PTT 新聞爬蟲呼叫失敗（hours=%d）：%s", hours, e
+            )
+            return pd.DataFrame()
+
+        result = resp.json()
+        records = result.get("data", [])
+
+        if not records:
+            logger.info("PTT 新聞過去 %d 小時無資料。", hours)
+            return pd.DataFrame()
+
+        df = pd.DataFrame(records)
+        # 將 NaN 轉為 None（避免 Pydantic 驗證失敗）
+        df = df.where(df.notna(), None)
+        return df
+
     def get_existing_urls(self, date):
         """查詢指定日期已存在的新聞 URL。
 
@@ -278,6 +313,71 @@ class PTTNewsUploader:
             "date": date,
             "record_count": record_count,
             "file_count": file_count,
+        }
+
+    def upload_by_hours(self, hours):
+        """以時數模式執行 PTT 新聞上傳流程。
+
+        使用 hours 參數呼叫爬蟲 API 取得過去指定小時數的新聞，
+        自動依 Date 分組處理跨日資料，並對每個日期分別執行
+        去重、schema 驗證、metadata 上傳、全文儲存。
+
+        Args:
+            hours (int): 要回溯的小時數（1-72）。
+
+        Returns:
+            dict: 包含 hours、record_count、file_count、dates 的結果字典。
+        """
+        raw_df = self.crawl_data_by_hours(hours)
+
+        if raw_df.empty:
+            logger.info("PTT 新聞過去 %d 小時無資料可上傳。", hours)
+            return {
+                "hours": hours,
+                "record_count": 0,
+                "file_count": 0,
+                "dates": [],
+            }
+
+        total_records = 0
+        total_files = 0
+        processed_dates = []
+
+        # 依 Date 分組處理跨日資料
+        for date_str, group_df in raw_df.groupby("Date"):
+            new_df = self.filter_new_records(group_df, date_str)
+
+            if new_df.empty:
+                logger.info(
+                    "PTT 新聞 %s 所有記錄皆已存在，跳過上傳。",
+                    date_str,
+                )
+                continue
+
+            # 驗證 schema 並上傳 metadata
+            meta_df = self.check_schema(new_df)
+            record_count = self.upload_metadata(meta_df)
+
+            # 儲存全文
+            file_count = self.save_contents(new_df, date_str)
+
+            # 記錄已上傳日期
+            self.record_uploaded_date(date_str)
+
+            total_records += record_count
+            total_files += file_count
+            processed_dates.append(date_str)
+
+        logger.info(
+            "PTT 新聞（hours=%d）已上傳 %d 筆 metadata，"
+            "儲存 %d 個全文檔案，涵蓋日期：%s。",
+            hours, total_records, total_files, processed_dates,
+        )
+        return {
+            "hours": hours,
+            "record_count": total_records,
+            "file_count": total_files,
+            "dates": processed_dates,
         }
 
     def record_uploaded_date(self, date):

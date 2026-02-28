@@ -270,7 +270,7 @@ def run_upload_job(job_id, start_date, end_date, databases):
 
 
 def run_ctee_news_scheduled():
-    """排程觸發的 CTEE 新聞上傳（當日）。"""
+    """排程觸發的 CTEE 新聞上傳（過去 24 小時）。"""
     today = datetime.now().strftime("%Y-%m-%d")
     job_id = str(uuid.uuid4())[:8]
 
@@ -289,12 +289,12 @@ def run_ctee_news_scheduled():
         }
 
     t = threading.Thread(
-        target=run_ctee_news_upload_job,
-        args=(job_id, today, today),
+        target=run_ctee_news_hours_job,
+        args=(job_id, 24),
         daemon=True,
     )
     t.start()
-    logger.info("CTEE 新聞排程任務已建立 %s（%s）", job_id, today)
+    logger.info("CTEE 新聞排程任務已建立 %s（hours=24）", job_id)
 
 
 def run_ctee_news_upload_job(job_id, start_date, end_date):
@@ -351,8 +351,46 @@ def run_ctee_news_upload_job(job_id, start_date, end_date):
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
 
 
+def run_ctee_news_hours_job(job_id, hours):
+    """執行 CTEE 新聞時數模式上傳任務（背景執行緒）。
+
+    使用 hours 參數呼叫爬蟲 API，取得過去指定小時數的新聞，
+    自動處理跨日資料的去重與上傳。
+
+    Args:
+        job_id (str): 任務 ID。
+        hours (int): 要回溯的小時數。
+    """
+    with jobs_lock:
+        upload_jobs[job_id]["status"] = "running"
+
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
+        uploader = CTEENewsUploader(conn, CRAWLERHOST)
+
+        result = uploader.upload_by_hours(hours)
+        conn.close()
+
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "completed"
+            upload_jobs[job_id]["record_count"] = result["record_count"]
+            upload_jobs[job_id]["file_count"] = result["file_count"]
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        logger.info(
+            "CTEE 新聞任務完成 %s（hours=%d，%d 筆 metadata，%d 個檔案）",
+            job_id, hours, result["record_count"], result["file_count"],
+        )
+
+    except Exception as e:
+        logger.error("CTEE 新聞任務失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+
 def run_cnyes_news_scheduled():
-    """排程觸發的 CNYES 新聞上傳（當日）。"""
+    """排程觸發的 CNYES 新聞上傳（過去 24 小時）。"""
     today = datetime.now().strftime("%Y-%m-%d")
     job_id = str(uuid.uuid4())[:8]
 
@@ -371,12 +409,12 @@ def run_cnyes_news_scheduled():
         }
 
     t = threading.Thread(
-        target=run_cnyes_news_upload_job,
-        args=(job_id, today, today),
+        target=run_cnyes_news_hours_job,
+        args=(job_id, 24),
         daemon=True,
     )
     t.start()
-    logger.info("CNYES 新聞排程任務已建立 %s（%s）", job_id, today)
+    logger.info("CNYES 新聞排程任務已建立 %s（hours=24）", job_id)
 
 
 def run_cnyes_news_upload_job(job_id, start_date, end_date):
@@ -433,8 +471,46 @@ def run_cnyes_news_upload_job(job_id, start_date, end_date):
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
 
 
+def run_cnyes_news_hours_job(job_id, hours):
+    """執行 CNYES 新聞時數模式上傳任務（背景執行緒）。
+
+    使用 hours 參數呼叫爬蟲 API，取得過去指定小時數的新聞，
+    自動處理跨日資料的去重與上傳。
+
+    Args:
+        job_id (str): 任務 ID。
+        hours (int): 要回溯的小時數。
+    """
+    with jobs_lock:
+        upload_jobs[job_id]["status"] = "running"
+
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
+        uploader = CNYESNewsUploader(conn, CRAWLERHOST)
+
+        result = uploader.upload_by_hours(hours)
+        conn.close()
+
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "completed"
+            upload_jobs[job_id]["record_count"] = result["record_count"]
+            upload_jobs[job_id]["file_count"] = result["file_count"]
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        logger.info(
+            "CNYES 新聞任務完成 %s（hours=%d，%d 筆 metadata，%d 個檔案）",
+            job_id, hours, result["record_count"], result["file_count"],
+        )
+
+    except Exception as e:
+        logger.error("CNYES 新聞任務失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+
 def run_ptt_news_scheduled():
-    """排程觸發的 PTT 新聞上傳（當日）。"""
+    """排程觸發的 PTT 新聞上傳（過去 24 小時）。"""
     today = datetime.now().strftime("%Y-%m-%d")
     job_id = str(uuid.uuid4())[:8]
 
@@ -453,12 +529,12 @@ def run_ptt_news_scheduled():
         }
 
     t = threading.Thread(
-        target=run_ptt_news_upload_job,
-        args=(job_id, today, today),
+        target=run_ptt_news_hours_job,
+        args=(job_id, 24),
         daemon=True,
     )
     t.start()
-    logger.info("PTT 新聞排程任務已建立 %s（%s）", job_id, today)
+    logger.info("PTT 新聞排程任務已建立 %s（hours=24）", job_id)
 
 
 def run_ptt_news_upload_job(job_id, start_date, end_date):
@@ -515,8 +591,46 @@ def run_ptt_news_upload_job(job_id, start_date, end_date):
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
 
 
+def run_ptt_news_hours_job(job_id, hours):
+    """執行 PTT 新聞時數模式上傳任務（背景執行緒）。
+
+    使用 hours 參數呼叫爬蟲 API，取得過去指定小時數的新聞，
+    自動處理跨日資料的去重與上傳。
+
+    Args:
+        job_id (str): 任務 ID。
+        hours (int): 要回溯的小時數。
+    """
+    with jobs_lock:
+        upload_jobs[job_id]["status"] = "running"
+
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
+        uploader = PTTNewsUploader(conn, CRAWLERHOST)
+
+        result = uploader.upload_by_hours(hours)
+        conn.close()
+
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "completed"
+            upload_jobs[job_id]["record_count"] = result["record_count"]
+            upload_jobs[job_id]["file_count"] = result["file_count"]
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        logger.info(
+            "PTT 新聞任務完成 %s（hours=%d，%d 筆 metadata，%d 個檔案）",
+            job_id, hours, result["record_count"], result["file_count"],
+        )
+
+    except Exception as e:
+        logger.error("PTT 新聞任務失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+
 def run_moneyudn_news_scheduled():
-    """排程觸發的 MoneyUDN 新聞上傳（當日）。"""
+    """排程觸發的 MoneyUDN 新聞上傳（過去 24 小時）。"""
     today = datetime.now().strftime("%Y-%m-%d")
     job_id = str(uuid.uuid4())[:8]
 
@@ -535,12 +649,12 @@ def run_moneyudn_news_scheduled():
         }
 
     t = threading.Thread(
-        target=run_moneyudn_news_upload_job,
-        args=(job_id, today, today),
+        target=run_moneyudn_news_hours_job,
+        args=(job_id, 24),
         daemon=True,
     )
     t.start()
-    logger.info("MoneyUDN 新聞排程任務已建立 %s（%s）", job_id, today)
+    logger.info("MoneyUDN 新聞排程任務已建立 %s（hours=24）", job_id)
 
 
 def run_moneyudn_news_upload_job(job_id, start_date, end_date):
@@ -587,6 +701,44 @@ def run_moneyudn_news_upload_job(job_id, start_date, end_date):
         logger.info(
             "MoneyUDN 新聞任務完成 %s（%d 筆 metadata，%d 個檔案）",
             job_id, total_records, total_files,
+        )
+
+    except Exception as e:
+        logger.error("MoneyUDN 新聞任務失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+
+def run_moneyudn_news_hours_job(job_id, hours):
+    """執行 MoneyUDN 新聞時數模式上傳任務（背景執行緒）。
+
+    使用 hours 參數呼叫爬蟲 API，取得過去指定小時數的新聞，
+    自動處理跨日資料的去重與上傳。
+
+    Args:
+        job_id (str): 任務 ID。
+        hours (int): 要回溯的小時數。
+    """
+    with jobs_lock:
+        upload_jobs[job_id]["status"] = "running"
+
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
+        uploader = MoneyUDNNewsUploader(conn, CRAWLERHOST)
+
+        result = uploader.upload_by_hours(hours)
+        conn.close()
+
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "completed"
+            upload_jobs[job_id]["record_count"] = result["record_count"]
+            upload_jobs[job_id]["file_count"] = result["file_count"]
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        logger.info(
+            "MoneyUDN 新聞任務完成 %s（hours=%d，%d 筆 metadata，%d 個檔案）",
+            job_id, hours, result["record_count"], result["file_count"],
         )
 
     except Exception as e:

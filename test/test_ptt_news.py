@@ -489,5 +489,139 @@ class TestUpload(unittest.TestCase):
         self.uploader.save_contents.assert_called_once()
 
 
+class TestCrawlDataByHours(unittest.TestCase):
+    """測試 crawl_data_by_hours 方法。"""
+
+    def setUp(self):
+        """初始化測試環境。"""
+        self.mock_conn = MagicMock()
+        self.uploader = PTTNewsUploader(self.mock_conn, "localhost:6738")
+
+    @patch("data_upload.ptt_news.requests.get")
+    def test_success(self, mock_get):
+        """測試成功取得過去 N 小時的新聞資料。"""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "data": [
+                {
+                    "Date": "2026-02-28",
+                    "Time": "14:30:00",
+                    "Author": "test_user",
+                    "Head": "標題1",
+                    "url": "https://ptt.cc/bbs/stock/1",
+                    "Content": "全文內容1",
+                },
+            ],
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        df = self.uploader.crawl_data_by_hours(24)
+
+        self.assertEqual(len(df), 1)
+        mock_get.assert_called_once_with(
+            "http://localhost:6738/ptt_news",
+            params={"hours": 24},
+            timeout=600,
+        )
+
+    @patch("data_upload.ptt_news.requests.get")
+    def test_connection_failure(self, mock_get):
+        """測試連線失敗回傳空 DataFrame。"""
+        mock_get.side_effect = Exception("連線失敗")
+
+        df = self.uploader.crawl_data_by_hours(24)
+
+        self.assertTrue(df.empty)
+
+    @patch("data_upload.ptt_news.requests.get")
+    def test_empty_data(self, mock_get):
+        """測試無資料時回傳空 DataFrame。"""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"data": []}
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        df = self.uploader.crawl_data_by_hours(24)
+
+        self.assertTrue(df.empty)
+
+
+class TestUploadByHours(unittest.TestCase):
+    """測試 upload_by_hours 方法。"""
+
+    def setUp(self):
+        """初始化測試環境。"""
+        self.mock_conn = MagicMock()
+        self.uploader = PTTNewsUploader(self.mock_conn, "localhost:6738")
+
+    def test_no_data(self):
+        """測試無資料時回傳空結果。"""
+        self.uploader.crawl_data_by_hours = MagicMock(
+            return_value=pd.DataFrame()
+        )
+
+        result = self.uploader.upload_by_hours(24)
+
+        self.assertEqual(result["record_count"], 0)
+        self.assertEqual(result["file_count"], 0)
+        self.assertEqual(result["dates"], [])
+        self.assertEqual(result["hours"], 24)
+
+    def test_cross_day_data(self):
+        """測試跨日資料正確分組處理。"""
+        raw_df = pd.DataFrame({
+            "Date": ["2026-02-28", "2026-02-27", "2026-02-28"],
+            "Time": ["14:30:00", "23:30:00", "15:00:00"],
+            "Author": ["user1", "user2", "user3"],
+            "Head": ["標題1", "標題2", "標題3"],
+            "url": [
+                "https://ptt.cc/1", "https://ptt.cc/2", "https://ptt.cc/3"
+            ],
+            "Content": ["全文1", "全文2", "全文3"],
+        })
+        self.uploader.crawl_data_by_hours = MagicMock(return_value=raw_df)
+        self.uploader.filter_new_records = MagicMock(
+            side_effect=lambda df, d: df
+        )
+        self.uploader.upload_metadata = MagicMock(
+            side_effect=lambda df: len(df)
+        )
+        self.uploader.save_contents = MagicMock(
+            side_effect=lambda df, d: len(df)
+        )
+        self.uploader.record_uploaded_date = MagicMock()
+
+        result = self.uploader.upload_by_hours(24)
+
+        self.assertEqual(result["record_count"], 3)
+        self.assertEqual(result["file_count"], 3)
+        self.assertEqual(len(result["dates"]), 2)
+        self.assertEqual(
+            self.uploader.record_uploaded_date.call_count, 2
+        )
+
+    def test_all_existing_skipped(self):
+        """測試所有記錄都已存在時跳過上傳。"""
+        raw_df = pd.DataFrame({
+            "Date": ["2026-02-28"],
+            "Time": ["14:30:00"],
+            "Author": ["test_user"],
+            "Head": ["標題"],
+            "url": ["https://ptt.cc/1"],
+            "Content": ["全文"],
+        })
+        self.uploader.crawl_data_by_hours = MagicMock(return_value=raw_df)
+        self.uploader.filter_new_records = MagicMock(
+            return_value=pd.DataFrame()
+        )
+
+        result = self.uploader.upload_by_hours(24)
+
+        self.assertEqual(result["record_count"], 0)
+        self.assertEqual(result["file_count"], 0)
+        self.assertEqual(result["dates"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
