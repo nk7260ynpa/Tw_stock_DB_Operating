@@ -39,7 +39,8 @@ Tw_stock_DB_Operating/
 ├── routers.py                # MySQLRouter 路由類別
 ├── upload.py                 # 批次上傳入口程式
 ├── DailyUpload.py            # 每日排程上傳
-├── requirements.txt          # Python 套件依賴
+├── pyproject.toml            # Python 專案定義（PEP 621）
+├── requirements.txt          # Docker 環境釘版依賴
 ├── run.sh                    # 啟動主程式腳本
 ├── web_server.py             # Web 管理介面（FastAPI）
 ├── data_upload/              # 資料上傳模組
@@ -175,6 +176,20 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:2.2.0 python -m pytest test/
 - **MoneyUDN 新聞**：選擇日期範圍上傳經濟日報新聞，metadata 寫入 MySQL，全文存為 md 檔，每日排程自動抓取當日新聞
 
 排程設定會儲存至 `logs/config.json`，容器重啟後自動套用。
+
+## 安裝方式
+
+本專案使用 `pyproject.toml`（PEP 621）定義套件元資料與抽象依賴，
+`requirements.txt` 負責 Docker 環境的完整釘版依賴。
+
+```bash
+# Docker 環境（由 Dockerfile 自動處理）
+pip install -r requirements.txt  # 安裝釘版依賴
+pip install --no-deps .          # 註冊專案模組
+
+# 本機開發（含測試套件）
+pip install -e ".[dev]"
+```
 
 ## 環境需求
 

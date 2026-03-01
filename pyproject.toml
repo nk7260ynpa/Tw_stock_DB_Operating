@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tw-stock-db-operating"
+version = "2.2.0"
+description = "台股資料庫操作模組，提供資料上傳、排程與 Web 管理介面"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "easydict",
+    "fastapi",
+    "httpx",
+    "lxml",
+    "mysql-connector-python",
+    "pandas",
+    "playwright",
+    "pydantic",
+    "pymysql",
+    "requests",
+    "schedule",
+    "sqlalchemy",
+    "uvicorn[standard]",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools]
+py-modules = ["clients", "routers", "upload", "DailyUpload", "web_server"]
+packages = ["data_upload"]
