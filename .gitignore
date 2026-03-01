@@ -216,6 +216,6 @@ marimo/_lsp/
 __marimo__/
 
 # Logs
-logs/*.log
+logs/*
 !logs/.gitkeep
 .DS_Store
