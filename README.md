@@ -191,6 +191,35 @@ pip install --no-deps .          # 註冊專案模組
 pip install -e ".[dev]"
 ```
 
+## CI/CD
+
+本專案使用 GitHub Actions 自動建置與發布 Docker image。
+
+### 自動發布流程
+
+推送版本 tag 時自動觸發：
+
+```bash
+git tag v2.2.0
+git push origin v2.2.0
+```
+
+Pipeline 會自動：
+
+1. 建置 Docker image（multi-stage build：Node 前端 + Python 後端）
+2. 推送至 DockerHub，同時標記版本號 tag 和 `latest` tag
+
+### 所需 GitHub Secrets
+
+| Secret | 說明 |
+|--------|------|
+| `DOCKER_USERNAME` | DockerHub 使用者名稱 |
+| `DOCKER_PASSWORD` | DockerHub 密碼或 Access Token |
+
+### Workflow 檔案
+
+- `.github/workflows/docker-publish.yml`：Docker image 建置與發布
+
 ## 環境需求
 
 - Python 3.12.7
