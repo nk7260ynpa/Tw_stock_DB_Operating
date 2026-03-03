@@ -30,6 +30,7 @@ from data_upload.ctee_news import CTEENewsUploader
 from data_upload.cnyes_news import CNYESNewsUploader
 from data_upload.ptt_news import PTTNewsUploader
 from data_upload.moneyudn_news import MoneyUDNNewsUploader
+from data_upload.company_info import CompanyInfoUploader
 from routers import MySQLRouter
 
 # 路徑設定
@@ -798,6 +799,40 @@ def run_tdcc_upload_job(job_id):
 
     except Exception as e:
         logger.error("TDCC 任務失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+
+def run_company_info_upload_job(job_id):
+    """執行公司產業對照上傳任務（背景執行緒）。
+
+    Args:
+        job_id (str): 任務 ID。
+    """
+    with jobs_lock:
+        upload_jobs[job_id]["status"] = "running"
+
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
+        uploader = CompanyInfoUploader(conn, CRAWLERHOST)
+        result = uploader.upload()
+        conn.close()
+
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "completed"
+            upload_jobs[job_id]["company_info_count"] = result[
+                "company_info_count"
+            ]
+            upload_jobs[job_id]["industry_map_count"] = result[
+                "industry_map_count"
+            ]
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        logger.info("公司產業對照任務完成 %s", job_id)
+
+    except Exception as e:
+        logger.error("公司產業對照任務失敗 %s: %s", job_id, e)
         with jobs_lock:
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
@@ -1805,6 +1840,79 @@ def update_moneyudn_news_schedule(req: MoneyUDNNewsScheduleRequest):
         "time": req.time,
         "message": f"MoneyUDN 新聞每日排程已更新為 {req.time}",
     }
+
+
+# 公司產業對照 API 端點
+@app.post("/api/company-info/upload")
+def create_company_info_upload():
+    """建立公司產業對照上傳任務。
+
+    Returns:
+        dict: 任務 ID 與初始狀態。
+    """
+    with jobs_lock:
+        running_jobs = [
+            j for j in upload_jobs.values()
+            if j["status"] == "running"
+        ]
+        if running_jobs:
+            raise HTTPException(
+                409, "已有任務正在執行中，請等待完成後再提交"
+            )
+
+    job_id = str(uuid.uuid4())[:8]
+
+    with jobs_lock:
+        upload_jobs[job_id] = {
+            "job_id": job_id,
+            "type": "company_info",
+            "status": "pending",
+            "company_info_count": 0,
+            "industry_map_count": 0,
+            "errors": [],
+            "created_at": datetime.now().isoformat(),
+            "finished_at": None,
+        }
+
+    t = threading.Thread(
+        target=run_company_info_upload_job,
+        args=(job_id,),
+        daemon=True,
+    )
+    t.start()
+
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/company-info/status")
+def get_company_info_status():
+    """取得 CompanyInfo 和 IndustryMap 表的資料筆數。
+
+    Returns:
+        dict: 包含 company_info_count 和 industry_map_count。
+    """
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
+
+        company_count = conn.execute(
+            text("SELECT COUNT(*) FROM CompanyInfo")
+        ).scalar()
+        industry_count = conn.execute(
+            text("SELECT COUNT(*) FROM IndustryMap")
+        ).scalar()
+        conn.close()
+
+        return {
+            "company_info_count": company_count,
+            "industry_map_count": industry_count,
+        }
+
+    except Exception as e:
+        logger.error("查詢公司產業對照狀態失敗：%s", e)
+        return {
+            "company_info_count": 0,
+            "industry_map_count": 0,
+        }
 
 
 # Serve React 前端靜態檔案

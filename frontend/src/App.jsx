@@ -6,6 +6,7 @@ import CTEENewsUpload from './components/CTEENewsUpload'
 import CNYESNewsUpload from './components/CNYESNewsUpload'
 import PTTNewsUpload from './components/PTTNewsUpload'
 import MoneyUDNNewsUpload from './components/MoneyUDNNewsUpload'
+import CompanyInfoUpload from './components/CompanyInfoUpload'
 
 function App() {
   return (
@@ -20,6 +21,7 @@ function App() {
           <ScheduleManager />
           <QuarterRevenueUpload />
           <TDCCUpload />
+          <CompanyInfoUpload />
           <CTEENewsUpload />
           <CNYESNewsUpload />
           <PTTNewsUpload />
