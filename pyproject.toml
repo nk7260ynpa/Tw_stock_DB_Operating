@@ -18,6 +18,7 @@ dependencies = [
     "playwright",
     "pydantic",
     "pymysql",
+    "cryptography",
     "requests",
     "schedule",
     "sqlalchemy",
