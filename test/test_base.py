@@ -7,7 +7,7 @@ import pandas as pd
 import requests
 from pydantic import BaseModel
 
-from data_upload.base import DataUploadBase
+from data_upload.base import CrawlError, DataUploadBase
 
 
 class SimpleUploadType(BaseModel):
@@ -76,24 +76,22 @@ class TestCrawData(unittest.TestCase):
 
     @patch("data_upload.base.requests.get")
     def test_craw_data_request_exception(self, mock_get):
-        """測試爬蟲服務連線失敗時回傳空 DataFrame。"""
+        """測試爬蟲服務連線失敗時拋出 CrawlError。"""
         mock_get.side_effect = requests.RequestException("Connection refused")
 
-        df = self.uploader.craw_data("2026-01-02")
-
-        self.assertTrue(df.empty)
+        with self.assertRaises(CrawlError):
+            self.uploader.craw_data("2026-01-02")
 
     @patch("data_upload.base.requests.get")
     def test_craw_data_missing_data_key(self, mock_get):
-        """測試爬蟲回應缺少 data 欄位時回傳空 DataFrame。"""
+        """測試爬蟲回應缺少 data 欄位時拋出 CrawlError。"""
         mock_response = MagicMock()
         mock_response.json.return_value = {"error": "not found"}
         mock_response.raise_for_status.return_value = None
         mock_get.return_value = mock_response
 
-        df = self.uploader.craw_data("2026-01-02")
-
-        self.assertTrue(df.empty)
+        with self.assertRaises(CrawlError):
+            self.uploader.craw_data("2026-01-02")
 
     @patch("data_upload.base.requests.get")
     def test_craw_data_empty_data(self, mock_get):
@@ -274,15 +272,37 @@ class TestUpload(unittest.TestCase):
             self.uploader.upload("2026-01-02")
 
     def test_upload_without_data(self):
-        """測試無資料時只記錄日期不上傳。"""
+        """測試非交易日（爬取成功但無資料）時只記錄日期不上傳。"""
         self.mock_conn.execute.return_value.scalar.return_value = 0
 
         empty_df = pd.DataFrame()
 
         with patch.object(self.uploader, "craw_data", return_value=empty_df):
             with patch.object(self.uploader, "upload_df") as mock_upload_df:
-                self.uploader.upload("2026-01-02")
-                mock_upload_df.assert_not_called()
+                with patch.object(
+                    self.uploader, "upload_date"
+                ) as mock_upload_date:
+                    self.uploader.upload("2026-01-02")
+                    mock_upload_df.assert_not_called()
+                    mock_upload_date.assert_called_once_with(
+                        "2026-01-02", empty_df
+                    )
+
+    def test_upload_crawl_failure_no_upload_date(self):
+        """測試爬取失敗時不寫入 UploadDate 紀錄。"""
+        self.mock_conn.execute.return_value.scalar.return_value = 0
+
+        with patch.object(
+            self.uploader, "craw_data",
+            side_effect=CrawlError("日期 2026-01-02 爬取失敗：'data'")
+        ):
+            with patch.object(self.uploader, "upload_df") as mock_upload_df:
+                with patch.object(
+                    self.uploader, "upload_date"
+                ) as mock_upload_date:
+                    self.uploader.upload("2026-01-02")
+                    mock_upload_df.assert_not_called()
+                    mock_upload_date.assert_not_called()
 
 
 class TestRegisterStockNames(unittest.TestCase):

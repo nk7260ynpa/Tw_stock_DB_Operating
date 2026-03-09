@@ -11,6 +11,10 @@ from sqlalchemy import text
 logger = logging.getLogger(__name__)
 
 
+class CrawlError(Exception):
+    """爬取資料失敗時拋出的異常。"""
+
+
 class DataUploadBase(ABC):
     """資料上傳抽象基類。
 
@@ -40,13 +44,16 @@ class DataUploadBase(ABC):
     def craw_data(self, date):
         """根據日期從爬蟲服務取得資料。
 
-        若爬蟲服務回傳異常則回傳空 DataFrame。
+        若爬蟲服務回傳異常則拋出 CrawlError。
 
         Args:
             date (str): 日期字串，格式為 YYYY-MM-DD。
 
         Returns:
             pd.DataFrame: 包含每日資料的 DataFrame。
+
+        Raises:
+            CrawlError: 爬取失敗時拋出。
         """
         url = f"{self.url}/{self.name}"
         payload = {"date": date}
@@ -56,8 +63,7 @@ class DataUploadBase(ABC):
             json_data = response.json()["data"]
             df = pd.DataFrame(json_data)
         except (requests.RequestException, KeyError, ValueError) as e:
-            logger.error(f"日期 {date} 爬取失敗：{e}")
-            df = pd.DataFrame()
+            raise CrawlError(f"日期 {date} 爬取失敗：{e}") from e
         return df
 
     def check_schema(self, df):
@@ -170,6 +176,7 @@ class DataUploadBase(ABC):
         """執行上傳流程。
 
         若該日期資料已存在則跳過，否則爬取資料並上傳至資料庫。
+        爬取失敗時不會寫入 UploadDate，以確保後續可重新上傳。
 
         Args:
             date (str): 日期字串，格式為 YYYY-MM-DD。
@@ -179,7 +186,11 @@ class DataUploadBase(ABC):
                 f"日期 {date} 的資料已存在於資料庫中，跳過上傳。"
             )
         else:
-            df = self.craw_data(date)
+            try:
+                df = self.craw_data(date)
+            except CrawlError as e:
+                logger.error(str(e))
+                return
             if df.shape[0] > 0:
                 self.register_stock_names(df)
                 self.upload_df(df)
