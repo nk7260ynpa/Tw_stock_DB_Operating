@@ -31,5 +31,5 @@ dev = [
 ]
 
 [tool.setuptools]
-py-modules = ["clients", "routers", "upload", "DailyUpload", "web_server"]
+py-modules = ["clients", "routers", "upload", "DailyUpload", "web_server", "retry_queue"]
 packages = ["data_upload"]
