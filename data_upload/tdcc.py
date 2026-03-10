@@ -13,6 +13,8 @@ import requests
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from data_upload.base import NetworkError
+
 logger = logging.getLogger(__name__)
 
 # 爬蟲欄位 → 資料庫欄位對應
@@ -96,6 +98,10 @@ class TDCCUploader:
         try:
             resp = requests.get(url, timeout=30)
             resp.raise_for_status()
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise NetworkError(
+                f"TDCC 爬蟲網路連線失敗：{e}"
+            ) from e
         except Exception as e:
             logger.error("TDCC 爬蟲呼叫失敗：%s", e)
             return None, pd.DataFrame()

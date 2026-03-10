@@ -14,6 +14,8 @@ import requests
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from data_upload.base import NetworkError
+
 logger = logging.getLogger(__name__)
 
 # 全文存放根目錄
@@ -79,6 +81,10 @@ class CNYESNewsUploader:
         try:
             resp = requests.get(url, params={"date": date}, timeout=600)
             resp.raise_for_status()
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise NetworkError(
+                f"CNYES 新聞爬蟲網路連線失敗（{date}）：{e}"
+            ) from e
         except Exception as e:
             logger.error("CNYES 新聞爬蟲呼叫失敗（%s）：%s", date, e)
             return pd.DataFrame()
@@ -112,6 +118,10 @@ class CNYESNewsUploader:
                 url, params={"hours": hours}, timeout=600
             )
             resp.raise_for_status()
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise NetworkError(
+                f"CNYES 新聞爬蟲網路連線失敗（hours={hours}）：{e}"
+            ) from e
         except Exception as e:
             logger.error(
                 "CNYES 新聞爬蟲呼叫失敗（hours=%d）：%s", hours, e

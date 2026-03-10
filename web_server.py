@@ -22,8 +22,11 @@ from pydantic import BaseModel
 from easydict import EasyDict
 from sqlalchemy import text
 
-from DailyUpload import daily_craw, DB_NAMES, HOST, USER, PASSWORD, CRAWLERHOST
+from dataclasses import asdict
+
+from DailyUpload import daily_craw, set_retry_queue, DB_NAMES, HOST, USER, PASSWORD, CRAWLERHOST
 from upload import day_upload
+from data_upload.base import NetworkError
 from data_upload.quarter_revenue import QuarterRevenueUploader
 from data_upload.tdcc import TDCCUploader
 from data_upload.ctee_news import CTEENewsUploader
@@ -31,6 +34,7 @@ from data_upload.cnyes_news import CNYESNewsUploader
 from data_upload.ptt_news import PTTNewsUploader
 from data_upload.moneyudn_news import MoneyUDNNewsUploader
 from data_upload.company_info import CompanyInfoUploader
+from retry_queue import RetryQueue, is_network_error, check_network_available
 from routers import MySQLRouter
 
 # 路徑設定
@@ -65,6 +69,9 @@ jobs_lock = threading.Lock()
 
 # 排程管理
 schedule_lock = threading.Lock()
+
+# 網路失敗重試佇列
+retry_queue: RetryQueue | None = None
 
 
 def load_config():
@@ -190,6 +197,128 @@ def setup_schedule(
             logger.info(
                 "MoneyUDN 新聞每日排程已設定為 %s", moneyudn_time
             )
+
+        # 每小時執行重試佇列
+        schedule_lib.every(1).hours.do(process_retry_queue)
+        logger.info("重試佇列每小時排程已設定。")
+
+
+def process_retry_queue():
+    """處理重試佇列中的 pending 任務。
+
+    檢查網路連通後，逐一執行 pending 任務。
+    成功則標為 success，NetworkError 則 retry_count+1 並中斷，
+    非網路錯誤或超過重試上限則標為 exhausted。
+    """
+    global retry_queue
+    if retry_queue is None:
+        return
+
+    pending = retry_queue.get_pending()
+    if not pending:
+        return
+
+    logger.info("開始處理重試佇列，共 %d 筆 pending 任務。", len(pending))
+
+    if not check_network_available(CRAWLERHOST):
+        logger.warning("爬蟲服務不可達，跳過本次重試。")
+        return
+
+    for task in pending:
+        if task.retry_count >= task.max_retries:
+            retry_queue.update_status(task.task_id, "exhausted")
+            logger.warning(
+                "重試任務 %s 已達上限 %d 次，標為 exhausted。",
+                task.task_id, task.max_retries,
+            )
+            continue
+
+        retry_queue.update_status(task.task_id, "retrying")
+        logger.info(
+            "重試任務 %s（%s），第 %d 次重試。",
+            task.task_id, task.task_type, task.retry_count,
+        )
+
+        try:
+            _execute_retry_task(task)
+            retry_queue.update_status(task.task_id, "success")
+            logger.info("重試任務 %s 成功。", task.task_id)
+        except NetworkError as e:
+            logger.warning(
+                "重試任務 %s 仍然網路失敗：%s，中斷本輪重試。",
+                task.task_id, e,
+            )
+            retry_queue.update_status(
+                task.task_id, "pending", str(e)
+            )
+            break
+        except Exception as e:
+            logger.error(
+                "重試任務 %s 非網路錯誤：%s，標為 exhausted。",
+                task.task_id, e,
+            )
+            retry_queue.update_status(
+                task.task_id, "exhausted", str(e)
+            )
+
+
+def _execute_retry_task(task):
+    """根據任務類型分發執行重試任務。
+
+    Args:
+        task (RetryTask): 要重試的任務。
+
+    Raises:
+        NetworkError: 網路連線失敗。
+        Exception: 其他執行錯誤。
+    """
+    if task.task_type == "daily_upload":
+        db_name = task.params["db_name"]
+        dates = task.params["dates"]
+        opt = EasyDict({
+            "host": HOST,
+            "user": USER,
+            "password": PASSWORD,
+            "dbname": db_name,
+            "crawlerhost": CRAWLERHOST,
+        })
+        for date in sorted(dates):
+            pause_duration = random.uniform(3, 15)
+            time.sleep(pause_duration)
+            day_upload(date, opt)
+
+    elif task.task_type == "ctee_news":
+        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
+        uploader = CTEENewsUploader(conn, CRAWLERHOST)
+        uploader.upload_by_hours(task.params["hours"])
+        conn.close()
+
+    elif task.task_type == "cnyes_news":
+        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
+        uploader = CNYESNewsUploader(conn, CRAWLERHOST)
+        uploader.upload_by_hours(task.params["hours"])
+        conn.close()
+
+    elif task.task_type == "ptt_news":
+        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
+        uploader = PTTNewsUploader(conn, CRAWLERHOST)
+        uploader.upload_by_hours(task.params["hours"])
+        conn.close()
+
+    elif task.task_type == "moneyudn_news":
+        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
+        uploader = MoneyUDNNewsUploader(conn, CRAWLERHOST)
+        uploader.upload_by_hours(task.params["hours"])
+        conn.close()
+
+    elif task.task_type == "tdcc":
+        conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
+        uploader = TDCCUploader(conn, CRAWLERHOST)
+        uploader.upload()
+        conn.close()
+
+    else:
+        raise ValueError(f"不支援的重試任務類型：{task.task_type}")
 
 
 def scheduler_thread():
@@ -382,6 +511,18 @@ def run_ctee_news_hours_job(job_id, hours):
             job_id, hours, result["record_count"], result["file_count"],
         )
 
+    except NetworkError as e:
+        logger.warning("CTEE 新聞任務網路失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        if retry_queue is not None:
+            retry_queue.add(
+                "ctee_news", {"hours": hours}, str(e),
+                created_by_job_id=job_id,
+            )
+
     except Exception as e:
         logger.error("CTEE 新聞任務失敗 %s: %s", job_id, e)
         with jobs_lock:
@@ -501,6 +642,18 @@ def run_cnyes_news_hours_job(job_id, hours):
             "CNYES 新聞任務完成 %s（hours=%d，%d 筆 metadata，%d 個檔案）",
             job_id, hours, result["record_count"], result["file_count"],
         )
+
+    except NetworkError as e:
+        logger.warning("CNYES 新聞任務網路失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        if retry_queue is not None:
+            retry_queue.add(
+                "cnyes_news", {"hours": hours}, str(e),
+                created_by_job_id=job_id,
+            )
 
     except Exception as e:
         logger.error("CNYES 新聞任務失敗 %s: %s", job_id, e)
@@ -622,6 +775,18 @@ def run_ptt_news_hours_job(job_id, hours):
             job_id, hours, result["record_count"], result["file_count"],
         )
 
+    except NetworkError as e:
+        logger.warning("PTT 新聞任務網路失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        if retry_queue is not None:
+            retry_queue.add(
+                "ptt_news", {"hours": hours}, str(e),
+                created_by_job_id=job_id,
+            )
+
     except Exception as e:
         logger.error("PTT 新聞任務失敗 %s: %s", job_id, e)
         with jobs_lock:
@@ -742,6 +907,18 @@ def run_moneyudn_news_hours_job(job_id, hours):
             job_id, hours, result["record_count"], result["file_count"],
         )
 
+    except NetworkError as e:
+        logger.warning("MoneyUDN 新聞任務網路失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        if retry_queue is not None:
+            retry_queue.add(
+                "moneyudn_news", {"hours": hours}, str(e),
+                created_by_job_id=job_id,
+            )
+
     except Exception as e:
         logger.error("MoneyUDN 新聞任務失敗 %s: %s", job_id, e)
         with jobs_lock:
@@ -796,6 +973,18 @@ def run_tdcc_upload_job(job_id):
             upload_jobs[job_id]["record_count"] = result["record_count"]
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
         logger.info("TDCC 任務完成 %s", job_id)
+
+    except NetworkError as e:
+        logger.warning("TDCC 任務網路失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        if retry_queue is not None:
+            retry_queue.add(
+                "tdcc", {}, str(e),
+                created_by_job_id=job_id,
+            )
 
     except Exception as e:
         logger.error("TDCC 任務失敗 %s: %s", job_id, e)
@@ -911,6 +1100,11 @@ class MoneyUDNNewsScheduleRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """應用程式生命週期管理。"""
+    global retry_queue
+    retry_queue = RetryQueue(LOG_DIR / "retry_queue.json")
+    set_retry_queue(retry_queue)
+    logger.info("重試佇列已初始化。")
+
     config = load_config()
     setup_schedule(
         config["schedule_time"],
@@ -1913,6 +2107,86 @@ def get_company_info_status():
             "company_info_count": 0,
             "industry_map_count": 0,
         }
+
+
+# 重試佇列 API 端點
+@app.get("/api/retry-queue")
+def get_retry_queue():
+    """取得所有重試任務與網路狀態。
+
+    Returns:
+        dict: 包含 tasks、network_available 和 summary。
+    """
+    tasks = retry_queue.get_all()
+    network_ok = check_network_available(CRAWLERHOST)
+    return {
+        "tasks": [asdict(t) for t in tasks],
+        "network_available": network_ok,
+        "summary": {
+            "pending": sum(1 for t in tasks if t.status == "pending"),
+            "retrying": sum(1 for t in tasks if t.status == "retrying"),
+            "success": sum(1 for t in tasks if t.status == "success"),
+            "exhausted": sum(1 for t in tasks if t.status == "exhausted"),
+        },
+    }
+
+
+@app.post("/api/retry-queue/retry-all")
+def retry_all_pending():
+    """手動立即觸發重試所有 pending 任務。
+
+    Returns:
+        dict: 操作結果訊息。
+    """
+    t = threading.Thread(target=process_retry_queue, daemon=True)
+    t.start()
+    return {"message": "已觸發重試所有 pending 任務"}
+
+
+@app.post("/api/retry-queue/reset-exhausted")
+def reset_exhausted_tasks():
+    """將所有 exhausted 任務重設為 pending。
+
+    Returns:
+        dict: 操作結果訊息與重設數量。
+    """
+    count = retry_queue.reset_exhausted()
+    return {
+        "message": f"已重設 {count} 筆 exhausted 任務",
+        "reset_count": count,
+    }
+
+
+@app.delete("/api/retry-queue/clear")
+def clear_completed_retry_tasks():
+    """清除所有已完成的重試任務。
+
+    Returns:
+        dict: 操作結果訊息與清除數量。
+    """
+    count = retry_queue.clear_completed()
+    return {
+        "message": f"已清除 {count} 筆已完成任務",
+        "cleared_count": count,
+    }
+
+
+@app.delete("/api/retry-queue/{task_id}")
+def remove_retry_task(task_id: str):
+    """移除單一重試任務。
+
+    Args:
+        task_id: 任務 ID。
+
+    Returns:
+        dict: 操作結果訊息。
+
+    Raises:
+        HTTPException: 任務不存在時拋出 404。
+    """
+    if not retry_queue.remove(task_id):
+        raise HTTPException(404, "任務不存在")
+    return {"message": "任務已移除"}
 
 
 # Serve React 前端靜態檔案

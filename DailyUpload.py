@@ -12,6 +12,7 @@ import schedule
 
 import upload
 from routers import MySQLRouter
+from data_upload.base import NetworkError
 
 # 設定 logging，輸出至 logs/ 資料夾
 log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -26,6 +27,9 @@ log_handler.setFormatter(log_formatter)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logger.addHandler(log_handler)
+
+# 全域重試佇列引用，由 web_server 注入
+_retry_queue = None
 
 DB_NAMES = ["TWSE", "TPEX", "TAIFEX", "FAOI", "MGTS"]
 HOST = "tw_stock_database:3306"
@@ -50,6 +54,32 @@ UPLOAD_DATE_TABLE = {
     "FAOI": "FAOIUploadDate",
     "MGTS": "MGTSUploadDate",
 }
+
+
+def set_retry_queue(queue):
+    """設定全域重試佇列引用。
+
+    Args:
+        queue (RetryQueue): 重試佇列實例。
+    """
+    global _retry_queue
+    _retry_queue = queue
+
+
+def _add_to_retry_queue(task_type, params, error_message):
+    """將失敗任務加入重試佇列。
+
+    若全域重試佇列尚未初始化則僅記錄日誌。
+
+    Args:
+        task_type (str): 任務類型。
+        params (dict): 任務參數。
+        error_message (str): 錯誤訊息。
+    """
+    if _retry_queue is None:
+        logger.warning("重試佇列尚未初始化，無法加入重試任務。")
+        return
+    _retry_queue.add(task_type, params, error_message)
 
 
 def get_missing_dates(db_name, days=30):
@@ -113,7 +143,19 @@ def daily_craw():
         for date in sorted(missing_dates):
             pause_duration = random.uniform(3, 15)
             time.sleep(pause_duration)
-            upload.day_upload(date, opt)
+            try:
+                upload.day_upload(date, opt)
+            except NetworkError as e:
+                logger.warning(
+                    f"{db_name}: 日期 {date} 網路連線失敗，"
+                    f"跳過後續日期：{e}"
+                )
+                _add_to_retry_queue(
+                    "daily_upload",
+                    {"db_name": db_name, "dates": sorted(missing_dates)},
+                    str(e),
+                )
+                break
 
         logger.info(f"{db_name}: 補抓完成。")
 

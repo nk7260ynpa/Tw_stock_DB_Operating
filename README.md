@@ -15,6 +15,7 @@
 - **PTT 新聞**：從爬蟲取得 PTT 股版新聞，metadata 存入 MySQL，全文存為 md 檔（`data_upload/ptt_news.py`）
 - **MoneyUDN 新聞**：從爬蟲取得經濟日報（聯合新聞網）新聞，metadata 存入 MySQL，全文存為 md 檔（`data_upload/moneyudn_news.py`）
 - **公司產業對照**：從爬蟲取得 TWSE/TPEX 公司基本資料與產業對照表，寫入 TWSE 資料庫（`data_upload/company_info.py`）
+- **網路失敗重試佇列**：排程任務因網路中斷失敗時自動加入重試佇列，每小時檢查網路並重試，最多 5 次（`retry_queue.py`）
 
 ## 支援的資料來源
 
@@ -41,6 +42,7 @@ Tw_stock_DB_Operating/
 ├── routers.py                # MySQLRouter 路由類別
 ├── upload.py                 # 批次上傳入口程式
 ├── DailyUpload.py            # 每日排程上傳
+├── retry_queue.py            # 網路失敗重試佇列
 ├── pyproject.toml            # Python 專案定義（PEP 621）
 ├── requirements.txt          # Docker 環境釘版依賴
 ├── run.sh                    # 啟動主程式腳本
@@ -76,7 +78,8 @@ Tw_stock_DB_Operating/
 │           ├── CNYESNewsUpload.jsx
 │           ├── PTTNewsUpload.jsx
 │           ├── MoneyUDNNewsUpload.jsx
-│           └── CompanyInfoUpload.jsx
+│           ├── CompanyInfoUpload.jsx
+│           └── RetryQueue.jsx
 ├── docker/                   # Docker 設定
 │   ├── build.sh              # 建立 Docker image 腳本
 │   ├── Dockerfile            # Multi-stage build（Node + Python）
@@ -106,7 +109,8 @@ Tw_stock_DB_Operating/
 │   ├── test_moneyudn_news.py
 │   ├── test_web_server_moneyudn.py
 │   ├── test_company_info.py
-│   └── test_web_server_company_info.py
+│   ├── test_web_server_company_info.py
+│   └── test_retry_queue.py
 └── logs/                     # 日誌資料夾
 ```
 
@@ -181,8 +185,9 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:2.2.0 python -m pytest test/
 - **PTT 新聞**：選擇日期範圍上傳 PTT 股版新聞，metadata 寫入 MySQL，全文存為 md 檔，每日排程自動抓取當日新聞
 - **MoneyUDN 新聞**：選擇日期範圍上傳經濟日報新聞，metadata 寫入 MySQL，全文存為 md 檔，每日排程自動抓取當日新聞
 - **公司產業對照**：一鍵從爬蟲取得最新 TWSE/TPEX 公司基本資料與產業對照表，寫入 TWSE 資料庫
+- **重試佇列**：檢視因網路失敗而進入重試佇列的任務，可手動觸發重試、重設已耗盡任務、清除已完成任務
 
-排程設定會儲存至 `logs/config.json`，容器重啟後自動套用。
+排程設定會儲存至 `logs/config.json`，重試佇列持久化至 `logs/retry_queue.json`，容器重啟後自動套用。
 
 ## 安裝方式
 

@@ -15,6 +15,14 @@ class CrawlError(Exception):
     """爬取資料失敗時拋出的異常。"""
 
 
+class NetworkError(CrawlError):
+    """網路連線失敗時拋出的異常。
+
+    用於區分可重試的網路問題（ConnectionError、Timeout）
+    與其他不可重試的爬取錯誤。
+    """
+
+
 class DataUploadBase(ABC):
     """資料上傳抽象基類。
 
@@ -62,6 +70,8 @@ class DataUploadBase(ABC):
             response.raise_for_status()
             json_data = response.json()["data"]
             df = pd.DataFrame(json_data)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise NetworkError(f"日期 {date} 網路連線失敗：{e}") from e
         except (requests.RequestException, KeyError, ValueError) as e:
             raise CrawlError(f"日期 {date} 爬取失敗：{e}") from e
         return df
@@ -188,6 +198,8 @@ class DataUploadBase(ABC):
         else:
             try:
                 df = self.craw_data(date)
+            except NetworkError:
+                raise
             except CrawlError as e:
                 logger.error(str(e))
                 return

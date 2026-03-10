@@ -7,6 +7,7 @@ import CNYESNewsUpload from './components/CNYESNewsUpload'
 import PTTNewsUpload from './components/PTTNewsUpload'
 import MoneyUDNNewsUpload from './components/MoneyUDNNewsUpload'
 import CompanyInfoUpload from './components/CompanyInfoUpload'
+import RetryQueue from './components/RetryQueue'
 
 function App() {
   return (
@@ -19,6 +20,7 @@ function App() {
         <ManualUpload />
         <div className="side-panels">
           <ScheduleManager />
+          <RetryQueue />
           <QuarterRevenueUpload />
           <TDCCUpload />
           <CompanyInfoUpload />
