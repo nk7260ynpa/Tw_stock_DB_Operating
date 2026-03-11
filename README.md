@@ -15,6 +15,7 @@
 - **PTT 新聞**：從爬蟲取得 PTT 股版新聞，metadata 存入 MySQL，全文存為 md 檔（`data_upload/ptt_news.py`）
 - **MoneyUDN 新聞**：從爬蟲取得經濟日報（聯合新聞網）新聞，metadata 存入 MySQL，全文存為 md 檔（`data_upload/moneyudn_news.py`）
 - **公司產業對照**：從爬蟲取得 TWSE/TPEX 公司基本資料與產業對照表，寫入 TWSE 資料庫（`data_upload/company_info.py`）
+- **YT 逐字稿**：從「游庭皓的財經皓角」YouTube 頻道取得直播影片，透過 Gemini API 提取逐字稿，metadata 存入 MySQL，全文存為 md 檔（`data_upload/yt_transcript.py`）
 - **網路失敗重試佇列**：排程任務因網路中斷失敗時自動加入重試佇列，每小時檢查網路並重試，最多 5 次（`retry_queue.py`）
 
 ## 支援的資料來源
@@ -33,6 +34,7 @@
 | PTT News | PTT 股版新聞（metadata 存於 NEWS.PTT，全文存為 md 檔） |
 | MoneyUDN News | 經濟日報新聞（metadata 存於 NEWS.MoneyUDN，全文存為 md 檔） |
 | CompanyInfo | 公司產業對照（存放於 TWSE 資料庫的 CompanyInfo 和 IndustryMap 表） |
+| YT Transcript | YouTube 逐字稿（metadata 存於 NEWS.YTTranscript，全文存為 md 檔） |
 
 ## 專案結構
 
@@ -61,7 +63,8 @@ Tw_stock_DB_Operating/
 │   ├── cnyes_news.py         # CNYES 鉅亨網新聞
 │   ├── ptt_news.py           # PTT 股版新聞
 │   ├── moneyudn_news.py     # MoneyUDN 經濟日報新聞
-│   └── company_info.py      # 公司產業對照
+│   ├── company_info.py      # 公司產業對照
+│   └── yt_transcript.py     # YouTube 逐字稿（Gemini API）
 ├── frontend/                 # React 前端原始碼（Vite）
 │   ├── package.json
 │   ├── vite.config.js
@@ -79,7 +82,8 @@ Tw_stock_DB_Operating/
 │           ├── PTTNewsUpload.jsx
 │           ├── MoneyUDNNewsUpload.jsx
 │           ├── CompanyInfoUpload.jsx
-│           └── RetryQueue.jsx
+│           ├── RetryQueue.jsx
+│           └── YTTranscriptUpload.jsx
 ├── docker/                   # Docker 設定
 │   ├── build.sh              # 建立 Docker image 腳本
 │   ├── Dockerfile            # Multi-stage build（Node + Python）
@@ -110,6 +114,8 @@ Tw_stock_DB_Operating/
 │   ├── test_web_server_moneyudn.py
 │   ├── test_company_info.py
 │   ├── test_web_server_company_info.py
+│   ├── test_yt_transcript.py
+│   ├── test_web_server_yt_transcript.py
 │   └── test_retry_queue.py
 └── logs/                     # 日誌資料夾
 ```
@@ -145,7 +151,7 @@ docker run -d --name tw_stock_db_operating \
   --network db_network \
   -p 8080:8080 \
   -v $(pwd)/logs:/workspace/logs \
-  nk7260ynpa/tw_stock_db_operating:2.2.0
+  nk7260ynpa/tw_stock_db_operating:2.3.0
 ```
 
 ### 4. 使用 docker-compose 啟動服務
@@ -157,7 +163,7 @@ docker compose -f docker/docker-compose.yaml up -d
 ### 5. 執行單元測試
 
 ```bash
-docker run --rm nk7260ynpa/tw_stock_db_operating:2.2.0 python -m pytest test/
+docker run --rm nk7260ynpa/tw_stock_db_operating:2.3.0 python -m pytest test/
 ```
 
 ## 命令列參數（upload.py）
@@ -185,6 +191,7 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:2.2.0 python -m pytest test/
 - **PTT 新聞**：選擇日期範圍上傳 PTT 股版新聞，metadata 寫入 MySQL，全文存為 md 檔，每日排程自動抓取當日新聞
 - **MoneyUDN 新聞**：選擇日期範圍上傳經濟日報新聞，metadata 寫入 MySQL，全文存為 md 檔，每日排程自動抓取當日新聞
 - **公司產業對照**：一鍵從爬蟲取得最新 TWSE/TPEX 公司基本資料與產業對照表，寫入 TWSE 資料庫
+- **YT 逐字稿**：選擇日期抓取「游庭皓的財經皓角」YouTube 直播影片逐字稿（透過 Gemini API），metadata 寫入 MySQL，全文存為 md 檔，每日排程自動抓取當日逐字稿
 - **重試佇列**：檢視因網路失敗而進入重試佇列的任務，可手動觸發重試、重設已耗盡任務、清除已完成任務
 
 排程設定會儲存至 `logs/config.json`，重試佇列持久化至 `logs/retry_queue.json`，容器重啟後自動套用。
@@ -212,8 +219,8 @@ pip install -e ".[dev]"
 推送版本 tag 時自動觸發：
 
 ```bash
-git tag v2.2.0
-git push origin v2.2.0
+git tag v2.3.0
+git push origin v2.3.0
 ```
 
 Pipeline 會自動：

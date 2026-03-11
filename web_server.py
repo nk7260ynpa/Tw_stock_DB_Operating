@@ -5,6 +5,7 @@
 """
 
 import os
+import re
 import json
 import uuid
 import time
@@ -16,7 +17,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 
 import schedule as schedule_lib
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from easydict import EasyDict
@@ -34,6 +35,7 @@ from data_upload.cnyes_news import CNYESNewsUploader
 from data_upload.ptt_news import PTTNewsUploader
 from data_upload.moneyudn_news import MoneyUDNNewsUploader
 from data_upload.company_info import CompanyInfoUploader
+from data_upload.yt_transcript import YTTranscriptUploader
 from retry_queue import RetryQueue, is_network_error, check_network_available
 from routers import MySQLRouter
 
@@ -73,14 +75,29 @@ schedule_lock = threading.Lock()
 # 網路失敗重試佇列
 retry_queue: RetryQueue | None = None
 
+# Gemini API key（從檔案讀取）
+GEMINI_API_KEY: str | None = None
+
+
+def _validate_date_format(date_str):
+    """驗證日期格式是否為 YYYY-MM-DD。
+
+    Args:
+        date_str: 日期字串。
+
+    Returns:
+        bool: 格式正確回傳 True。
+    """
+    return bool(re.match(r"^\d{4}-\d{2}-\d{2}$", date_str))
+
 
 def load_config():
     """讀取設定檔。
 
     Returns:
         dict: 設定內容，包含 schedule_time、tdcc_schedule、
-            ctee_schedule、cnyes_schedule、ptt_schedule
-            和 moneyudn_schedule 欄位。
+            ctee_schedule、cnyes_schedule、ptt_schedule、
+            moneyudn_schedule 和 yt_transcript_schedule 欄位。
     """
     default = {
         "schedule_time": "20:07",
@@ -89,6 +106,7 @@ def load_config():
         "cnyes_schedule": {"time": "21:30"},
         "ptt_schedule": {"time": "22:00"},
         "moneyudn_schedule": {"time": "22:30"},
+        "yt_transcript_schedule": {"time": "19:05"},
     }
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -115,6 +133,9 @@ def load_config():
         # 向後相容：舊 config 可能沒有 moneyudn_schedule
         if "moneyudn_schedule" not in config:
             config["moneyudn_schedule"] = default["moneyudn_schedule"]
+        # 向後相容：舊 config 可能沒有 yt_transcript_schedule
+        if "yt_transcript_schedule" not in config:
+            config["yt_transcript_schedule"] = default["yt_transcript_schedule"]
         return config
     return default
 
@@ -132,8 +153,9 @@ def save_config(config):
 def setup_schedule(
     schedule_time, tdcc_schedule=None, ctee_schedule=None,
     cnyes_schedule=None, ptt_schedule=None, moneyudn_schedule=None,
+    yt_transcript_schedule=None,
 ):
-    """設定每日排程（含 TDCC、CTEE、CNYES、PTT、MoneyUDN 每日檢查）。
+    """設定每日排程（含 TDCC、CTEE、CNYES、PTT、MoneyUDN、YT 逐字稿每日檢查）。
 
     Args:
         schedule_time (str): 每日資料上傳排程時間，格式為 HH:MM。
@@ -146,6 +168,8 @@ def setup_schedule(
         ptt_schedule (dict | None): PTT 新聞每日排程設定，
             包含 time（HH:MM）。
         moneyudn_schedule (dict | None): MoneyUDN 新聞每日排程設定，
+            包含 time（HH:MM）。
+        yt_transcript_schedule (dict | None): YT 逐字稿每日排程設定，
             包含 time（HH:MM）。
     """
     with schedule_lock:
@@ -197,6 +221,13 @@ def setup_schedule(
             logger.info(
                 "MoneyUDN 新聞每日排程已設定為 %s", moneyudn_time
             )
+
+        if yt_transcript_schedule:
+            yt_time = yt_transcript_schedule.get("time", "19:05")
+            schedule_lib.every().day.at(yt_time).do(
+                run_yt_transcript_scheduled
+            )
+            logger.info("YT 逐字稿每日排程已設定為 %s", yt_time)
 
         # 每小時執行重試佇列
         schedule_lib.every(1).hours.do(process_retry_queue)
@@ -1028,6 +1059,68 @@ def run_company_info_upload_job(job_id):
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
 
 
+def run_yt_transcript_scheduled():
+    """排程觸發的 YT 逐字稿上傳。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_id = str(uuid.uuid4())[:8]
+
+    with jobs_lock:
+        upload_jobs[job_id] = {
+            "job_id": job_id,
+            "type": "yt_transcript",
+            "status": "pending",
+            "date": today,
+            "title": None,
+            "errors": [],
+            "created_at": datetime.now().isoformat(),
+            "finished_at": None,
+            "scheduled": True,
+        }
+
+    t = threading.Thread(
+        target=run_yt_transcript_upload_job,
+        args=(job_id, today),
+        daemon=True,
+    )
+    t.start()
+    logger.info("YT 逐字稿排程任務已建立 %s", job_id)
+
+
+def run_yt_transcript_upload_job(job_id, date):
+    """執行 YT 逐字稿上傳任務（背景執行緒）。
+
+    Args:
+        job_id: 任務 ID。
+        date: 日期字串（YYYY-MM-DD）。
+    """
+    with jobs_lock:
+        upload_jobs[job_id]["status"] = "running"
+
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
+        uploader = YTTranscriptUploader(conn, GEMINI_API_KEY)
+        result = uploader.upload(date)
+        conn.close()
+
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = (
+                "completed" if result["status"] in ("success", "skipped")
+                else "failed"
+            )
+            upload_jobs[job_id]["title"] = result.get("title")
+            if result.get("error"):
+                upload_jobs[job_id]["error"] = result["error"]
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        logger.info("YT 逐字稿任務完成 %s (%s)", job_id, result["status"])
+
+    except Exception as e:
+        logger.error("YT 逐字稿任務失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+
 # Pydantic 請求模型
 class UploadRequest(BaseModel):
     """手動上傳請求。"""
@@ -1096,14 +1189,39 @@ class MoneyUDNNewsScheduleRequest(BaseModel):
     time: str
 
 
+class YTTranscriptUploadRequest(BaseModel):
+    """YT 逐字稿上傳請求。"""
+    date: str
+
+
+class YTTranscriptScheduleRequest(BaseModel):
+    """YT 逐字稿每日排程更新請求。"""
+    time: str
+
+
 # FastAPI 應用
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """應用程式生命週期管理。"""
     global retry_queue
+    global GEMINI_API_KEY
     retry_queue = RetryQueue(LOG_DIR / "retry_queue.json")
     set_retry_queue(retry_queue)
     logger.info("重試佇列已初始化。")
+
+    try:
+        gemini_key_path = Path("/workspace/GeminiAPI")
+        if gemini_key_path.exists():
+            GEMINI_API_KEY = gemini_key_path.read_text(
+                encoding="utf-8"
+            ).strip()
+            logger.info("Gemini API key 已載入。")
+        else:
+            logger.warning(
+                "Gemini API key 檔案不存在，YT 逐字稿功能將無法使用。"
+            )
+    except Exception as e:
+        logger.error("載入 Gemini API key 失敗: %s", e)
 
     config = load_config()
     setup_schedule(
@@ -1113,6 +1231,7 @@ async def lifespan(app: FastAPI):
         config.get("cnyes_schedule"),
         config.get("ptt_schedule"),
         config.get("moneyudn_schedule"),
+        config.get("yt_transcript_schedule"),
     )
 
     t = threading.Thread(target=scheduler_thread, daemon=True)
@@ -1257,6 +1376,7 @@ def update_schedule(req: ScheduleRequest):
         config.get("cnyes_schedule"),
         config.get("ptt_schedule"),
         config.get("moneyudn_schedule"),
+        config.get("yt_transcript_schedule"),
     )
 
     logger.info("排程時間已更新為 %s", req.time)
@@ -1495,6 +1615,7 @@ def update_tdcc_schedule(req: TDCCScheduleRequest):
         config.get("cnyes_schedule"),
         config.get("ptt_schedule"),
         config.get("moneyudn_schedule"),
+        config.get("yt_transcript_schedule"),
     )
 
     logger.info("TDCC 每日排程已更新為 %s", req.time)
@@ -1628,6 +1749,7 @@ def update_ctee_news_schedule(req: CTEENewsScheduleRequest):
         config.get("cnyes_schedule"),
         config.get("ptt_schedule"),
         config.get("moneyudn_schedule"),
+        config.get("yt_transcript_schedule"),
     )
 
     logger.info("CTEE 新聞每日排程已更新為 %s", req.time)
@@ -1761,6 +1883,7 @@ def update_cnyes_news_schedule(req: CNYESNewsScheduleRequest):
         config["cnyes_schedule"],
         config.get("ptt_schedule"),
         config.get("moneyudn_schedule"),
+        config.get("yt_transcript_schedule"),
     )
 
     logger.info("CNYES 新聞每日排程已更新為 %s", req.time)
@@ -1894,6 +2017,7 @@ def update_ptt_news_schedule(req: PTTNewsScheduleRequest):
         config.get("cnyes_schedule"),
         config["ptt_schedule"],
         config.get("moneyudn_schedule"),
+        config.get("yt_transcript_schedule"),
     )
 
     logger.info("PTT 新聞每日排程已更新為 %s", req.time)
@@ -2027,6 +2151,7 @@ def update_moneyudn_news_schedule(req: MoneyUDNNewsScheduleRequest):
         config.get("cnyes_schedule"),
         config.get("ptt_schedule"),
         config["moneyudn_schedule"],
+        config.get("yt_transcript_schedule"),
     )
 
     logger.info("MoneyUDN 新聞每日排程已更新為 %s", req.time)
@@ -2034,6 +2159,173 @@ def update_moneyudn_news_schedule(req: MoneyUDNNewsScheduleRequest):
         "time": req.time,
         "message": f"MoneyUDN 新聞每日排程已更新為 {req.time}",
     }
+
+
+# YT 逐字稿 API 端點
+@app.post("/api/yt-transcript/upload")
+def create_yt_transcript_upload(req: YTTranscriptUploadRequest):
+    """建立 YT 逐字稿上傳任務。
+
+    Args:
+        req: 包含日期的請求。
+
+    Returns:
+        dict: 任務 ID 與初始狀態。
+    """
+    if not _validate_date_format(req.date):
+        raise HTTPException(400, "日期格式錯誤，請使用 YYYY-MM-DD")
+
+    if not GEMINI_API_KEY:
+        raise HTTPException(503, "Gemini API key 未設定，無法使用此功能")
+
+    with jobs_lock:
+        running_jobs = [
+            j for j in upload_jobs.values()
+            if j["status"] == "running"
+        ]
+        if running_jobs:
+            raise HTTPException(
+                409, "已有任務正在執行中，請等待完成後再提交"
+            )
+
+    job_id = str(uuid.uuid4())[:8]
+
+    with jobs_lock:
+        upload_jobs[job_id] = {
+            "job_id": job_id,
+            "type": "yt_transcript",
+            "status": "pending",
+            "date": req.date,
+            "title": None,
+            "errors": [],
+            "created_at": datetime.now().isoformat(),
+            "finished_at": None,
+        }
+
+    t = threading.Thread(
+        target=run_yt_transcript_upload_job,
+        args=(job_id, req.date),
+        daemon=True,
+    )
+    t.start()
+
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/yt-transcript/uploaded")
+def list_uploaded_yt_transcript():
+    """列出已成功的 YT 逐字稿日期。
+
+    Returns:
+        dict: 包含 uploaded 欄位的已上傳日期清單（最近 50 筆）。
+    """
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
+        rows = conn.execute(
+            text(
+                "SELECT Date FROM YTTranscript "
+                "WHERE Status = 'success' "
+                "ORDER BY Date DESC LIMIT 50"
+            )
+        ).fetchall()
+        conn.close()
+        uploaded = [str(row[0]) for row in rows]
+        return {"uploaded": uploaded}
+    except Exception as e:
+        logger.error("查詢已上傳 YT 逐字稿日期失敗：%s", e)
+        return {"uploaded": []}
+
+
+@app.get("/api/yt-transcript/schedule")
+def get_yt_transcript_schedule():
+    """取得 YT 逐字稿每日排程設定。
+
+    Returns:
+        dict: 包含 time 欄位的排程資訊。
+    """
+    config = load_config()
+    yt = config.get("yt_transcript_schedule", {"time": "19:05"})
+    return {"time": yt["time"]}
+
+
+@app.put("/api/yt-transcript/schedule")
+def update_yt_transcript_schedule(req: YTTranscriptScheduleRequest):
+    """更新 YT 逐字稿每日排程設定。
+
+    Args:
+        req: 包含 time 的請求。
+
+    Returns:
+        dict: 更新後的排程設定與訊息。
+    """
+    try:
+        time_parts = req.time.split(":")
+        hour = int(time_parts[0])
+        minute = int(time_parts[1])
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError
+    except (ValueError, IndexError):
+        raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
+
+    config = load_config()
+    config["yt_transcript_schedule"] = {"time": req.time}
+    save_config(config)
+    setup_schedule(
+        config["schedule_time"],
+        config.get("tdcc_schedule"),
+        config.get("ctee_schedule"),
+        config.get("cnyes_schedule"),
+        config.get("ptt_schedule"),
+        config.get("moneyudn_schedule"),
+        config["yt_transcript_schedule"],
+    )
+
+    logger.info("YT 逐字稿每日排程已更新為 %s", req.time)
+    return {
+        "time": req.time,
+        "message": f"YT 逐字稿每日排程已更新為 {req.time}",
+    }
+
+
+@app.get("/api/yt-transcript/status")
+def get_yt_transcript_status(
+    date: str = Query(description="日期，格式 YYYY-MM-DD"),
+):
+    """查詢指定日期的 YT 逐字稿抓取狀態。
+
+    Args:
+        date: 日期字串（YYYY-MM-DD）。
+
+    Returns:
+        dict: 包含逐字稿狀態資訊。
+    """
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
+        row = conn.execute(
+            text(
+                "SELECT Date, Title, url, Duration, ContentFile, "
+                "Status, ErrorMessage FROM YTTranscript WHERE Date = :date"
+            ),
+            {"date": date},
+        ).fetchone()
+        conn.close()
+
+        if not row:
+            return {"exists": False}
+
+        return {
+            "exists": True,
+            "date": str(row[0]),
+            "title": row[1],
+            "url": row[2],
+            "duration": row[3],
+            "content_file": row[4],
+            "status": row[5],
+            "error_message": row[6],
+        }
+    except Exception as e:
+        logger.error("查詢 YT 逐字稿狀態失敗: %s", e)
+        return {"exists": False}
 
 
 # 公司產業對照 API 端點

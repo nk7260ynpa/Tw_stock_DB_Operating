@@ -8,6 +8,7 @@ import PTTNewsUpload from './components/PTTNewsUpload'
 import MoneyUDNNewsUpload from './components/MoneyUDNNewsUpload'
 import CompanyInfoUpload from './components/CompanyInfoUpload'
 import RetryQueue from './components/RetryQueue'
+import YTTranscriptUpload from './components/YTTranscriptUpload'
 
 function App() {
   return (
@@ -28,6 +29,7 @@ function App() {
           <CNYESNewsUpload />
           <PTTNewsUpload />
           <MoneyUDNNewsUpload />
+          <YTTranscriptUpload />
         </div>
       </main>
     </div>
