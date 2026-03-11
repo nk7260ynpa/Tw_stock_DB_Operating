@@ -1,12 +1,16 @@
 """YouTube 逐字稿上傳模組。
 
 從 YouTube 取得「游庭皓的財經皓角」直播影片，
-使用 Gemini API 提取逐字稿，並儲存至檔案系統及 MySQL。
+使用 yt-dlp 抓取自動字幕並解析為 Markdown 格式逐字稿，
+儲存至檔案系統及 MySQL。
 """
 
+import glob as glob_mod
 import json
 import logging
+import re
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -20,8 +24,8 @@ NEWS_CONTENT_BASE = Path("/workspace/NewsContents/YT")
 # YouTube 頻道直播播放清單
 CHANNEL_STREAMS_URL = "https://www.youtube.com/@yutinghaofinance/streams"
 
-# Gemini API key 檔案路徑
-GEMINI_API_KEY_PATH = Path("/workspace/GeminiAPI")
+# VTT 解析相關常數
+_LINES_PER_PARAGRAPH = 10
 
 
 class YTTranscriptUploader:
@@ -29,32 +33,90 @@ class YTTranscriptUploader:
 
     1. 用 yt-dlp 取得最新直播影片列表
     2. 篩選目標日期的影片
-    3. 用 Gemini API 提取逐字稿
+    3. 用 yt-dlp 下載自動字幕並解析為 Markdown
     4. 儲存至檔案系統
     5. 寫入 metadata 至 MySQL
     """
 
-    def __init__(self, conn, gemini_api_key=None):
+    def __init__(self, conn):
         """初始化。
 
         Args:
             conn: SQLAlchemy 連線物件（NEWS 資料庫）。
-            gemini_api_key: Gemini API key（若為 None 則從檔案讀取）。
         """
         self.conn = conn
-        if gemini_api_key:
-            self.api_key = gemini_api_key
-        else:
-            self.api_key = self._load_api_key()
 
     @staticmethod
-    def _load_api_key():
-        """從檔案讀取 Gemini API key。"""
-        if GEMINI_API_KEY_PATH.exists():
-            return GEMINI_API_KEY_PATH.read_text(encoding="utf-8").strip()
-        raise FileNotFoundError(
-            f"Gemini API key 檔案不存在: {GEMINI_API_KEY_PATH}"
+    def _match_video_date(video, target_date):
+        """比對影片是否屬於目標日期。
+
+        依序嘗試：
+        1. upload_date 欄位（YYYYMMDD）
+        2. 標題中的日期（支援 YYYY/M/D 和英文月份格式）
+
+        Args:
+            video (dict): yt-dlp 回傳的影片 metadata。
+            target_date (str): 目標日期（YYYY-MM-DD）。
+
+        Returns:
+            bool: 匹配則回傳 True。
+        """
+        # 解析目標日期
+        try:
+            target_dt = datetime.strptime(target_date, "%Y-%m-%d")
+        except ValueError:
+            return False
+
+        # 方法 1：upload_date 欄位
+        upload_date = video.get("upload_date", "")
+        if upload_date and len(upload_date) == 8:
+            formatted = (
+                f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}"
+            )
+            if formatted == target_date:
+                return True
+
+        title = video.get("title", "")
+
+        # 方法 2：標題中的 YYYY/M/D 格式（如 "2026/3/11(二)"）
+        match = re.search(r"(\d{4})/(\d{1,2})/(\d{1,2})", title)
+        if match:
+            try:
+                title_dt = datetime(
+                    int(match.group(1)),
+                    int(match.group(2)),
+                    int(match.group(3)),
+                )
+                if title_dt.date() == target_dt.date():
+                    return True
+            except ValueError:
+                pass
+
+        # 方法 3：英文月份格式（如 "March 11, 2026"）
+        month_names = {
+            "january": 1, "february": 2, "march": 3, "april": 4,
+            "may": 5, "june": 6, "july": 7, "august": 8,
+            "september": 9, "october": 10, "november": 11, "december": 12,
+        }
+        match = re.search(
+            r"(January|February|March|April|May|June|July|August|"
+            r"September|October|November|December)"
+            r"\s+(\d{1,2}),?\s+(\d{4})",
+            title,
+            re.IGNORECASE,
         )
+        if match:
+            try:
+                month = month_names[match.group(1).lower()]
+                day = int(match.group(2))
+                year = int(match.group(3))
+                title_dt = datetime(year, month, day)
+                if title_dt.date() == target_dt.date():
+                    return True
+            except (ValueError, KeyError):
+                pass
+
+        return False
 
     def get_latest_stream_url(self, target_date):
         """用 yt-dlp 取得最新直播影片，篩選目標日期。
@@ -91,32 +153,32 @@ class YTTranscriptUploader:
                 except json.JSONDecodeError:
                     continue
 
-                # 檢查上傳日期是否匹配目標日期
-                upload_date = video.get("upload_date", "")
-                if upload_date:
-                    # yt-dlp 的 upload_date 格式為 YYYYMMDD
-                    formatted = (
-                        f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}"
+                # 檢查日期是否匹配目標日期
+                if not self._match_video_date(video, target_date):
+                    continue
+
+                video_url = video.get("url") or video.get("id", "")
+                if video_url and not video_url.startswith("http"):
+                    video_url = (
+                        f"https://www.youtube.com/watch?v={video_url}"
                     )
-                    if formatted == target_date:
-                        video_url = video.get("url") or video.get("id", "")
-                        if video_url and not video_url.startswith("http"):
-                            video_url = f"https://www.youtube.com/watch?v={video_url}"
-                        title = video.get("title", "")
-                        duration = video.get("duration")
-                        duration_str = ""
-                        if duration:
-                            hours = int(duration) // 3600
-                            minutes = (int(duration) % 3600) // 60
-                            seconds = int(duration) % 60
-                            if hours > 0:
-                                duration_str = f"{hours}:{minutes:02d}:{seconds:02d}"
-                            else:
-                                duration_str = f"{minutes}:{seconds:02d}"
-                        logger.info(
-                            "找到目標日期 %s 的影片: %s", target_date, title
+                title = video.get("title", "")
+                duration = video.get("duration")
+                duration_str = ""
+                if duration:
+                    hours = int(duration) // 3600
+                    minutes = (int(duration) % 3600) // 60
+                    seconds = int(duration) % 60
+                    if hours > 0:
+                        duration_str = (
+                            f"{hours}:{minutes:02d}:{seconds:02d}"
                         )
-                        return video_url, title, duration_str
+                    else:
+                        duration_str = f"{minutes}:{seconds:02d}"
+                logger.info(
+                    "找到目標日期 %s 的影片: %s", target_date, title
+                )
+                return video_url, title, duration_str
 
             logger.info("未找到目標日期 %s 的直播影片。", target_date)
             return None, None, None
@@ -129,7 +191,10 @@ class YTTranscriptUploader:
             return None, None, None
 
     def extract_transcript(self, video_url):
-        """用 Gemini API 提取逐字稿。
+        """用 yt-dlp 下載自動字幕並解析為 Markdown 逐字稿。
+
+        優先嘗試繁體中文字幕（zh-Hant, zh-TW, zh），
+        若無則嘗試英文字幕（en）。
 
         Args:
             video_url: YouTube 影片 URL。
@@ -138,36 +203,156 @@ class YTTranscriptUploader:
             str: 逐字稿 Markdown 內容，失敗時回傳 None。
         """
         try:
-            import google.generativeai as genai
-
-            genai.configure(api_key=self.api_key)
-
-            model = genai.GenerativeModel("gemini-2.0-flash")
-
-            prompt = (
-                "請將以下 YouTube 影片的內容轉為詳細的逐字稿。"
-                "請用繁體中文輸出，保留講者的原始用語和語氣。"
-                "使用 Markdown 格式，以主題段落分段，"
-                "每個段落加上適當的標題。"
-                "不需要加入時間戳記。"
-                f"\n\n影片網址：{video_url}"
-            )
-
-            response = model.generate_content(prompt)
-            transcript = response.text
-
-            if transcript:
-                logger.info(
-                    "逐字稿提取成功，長度: %d 字元", len(transcript)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                # 嘗試繁中字幕
+                vtt_content = self._download_subtitle(
+                    video_url, tmpdir, "zh-Hant,zh-TW,zh"
                 )
+
+                # 若無繁中，嘗試英文
+                if not vtt_content:
+                    logger.info("無繁體中文字幕，嘗試英文字幕")
+                    vtt_content = self._download_subtitle(
+                        video_url, tmpdir, "en"
+                    )
+
+                if not vtt_content:
+                    logger.warning("影片無可用的自動字幕: %s", video_url)
+                    return None
+
+                transcript = self._parse_vtt(vtt_content)
+                if transcript:
+                    logger.info(
+                        "逐字稿提取成功，長度: %d 字元", len(transcript)
+                    )
                 return transcript
 
-            logger.warning("Gemini API 回傳空內容")
+        except Exception as e:
+            logger.error("字幕提取失敗: %s", e)
             return None
 
-        except Exception as e:
-            logger.error("Gemini API 提取逐字稿失敗: %s", e)
+    @staticmethod
+    def _download_subtitle(video_url, tmpdir, sub_lang):
+        """用 yt-dlp 下載指定語言的自動字幕。
+
+        Args:
+            video_url: YouTube 影片 URL。
+            tmpdir: 暫存目錄路徑。
+            sub_lang: 字幕語言代碼（逗號分隔多語言）。
+
+        Returns:
+            str: VTT 字幕內容，無字幕時回傳 None。
+        """
+        output_template = f"{tmpdir}/sub"
+        result = subprocess.run(
+            [
+                "yt-dlp",
+                "--write-auto-sub",
+                "--sub-lang", sub_lang,
+                "--skip-download",
+                "--sub-format", "vtt",
+                "-o", output_template,
+                video_url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        if result.returncode != 0:
+            logger.debug(
+                "yt-dlp 字幕下載失敗 (lang=%s): %s",
+                sub_lang, result.stderr,
+            )
             return None
+
+        # 尋找產出的 .vtt 檔案
+        vtt_files = glob_mod.glob(f"{tmpdir}/*.vtt")
+        if not vtt_files:
+            return None
+
+        vtt_path = Path(vtt_files[0])
+        return vtt_path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _parse_vtt(vtt_content):
+        """解析 VTT 字幕內容為 Markdown 格式純文字。
+
+        處理步驟：
+        1. 去除 WEBVTT header 與 metadata
+        2. 去除時間戳行
+        3. 去除 HTML 標籤（<c>, </c>, <00:00:01.234> 等）
+        4. 去除 WebVTT 樣式標記（align:start position:0% 等）
+        5. 去除序號行（純數字行）
+        6. 去除連續重複行（YouTube 自動字幕 cue overlap 產生）
+        7. 整合為 Markdown 段落
+
+        Args:
+            vtt_content: VTT 字幕檔案的原始內容。
+
+        Returns:
+            str: 整理後的 Markdown 格式逐字稿，內容為空時回傳 None。
+        """
+        lines = vtt_content.split("\n")
+
+        # 跳過 WEBVTT header（空行之前的內容）
+        start_idx = 0
+        for i, line in enumerate(lines):
+            if line.strip() == "" and i > 0:
+                start_idx = i + 1
+                break
+
+        # 時間戳行的正規表達式
+        timestamp_re = re.compile(
+            r"^\d{2}:\d{2}:\d{2}\.\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}\.\d{3}"
+        )
+        # HTML 標籤（<c>, </c>, <00:00:01.234> 等）
+        html_tag_re = re.compile(r"<[^>]+>")
+        # WebVTT 樣式標記
+        style_re = re.compile(
+            r"\b(?:align|position|size|line|vertical)\s*:\s*\S+"
+        )
+        # 純數字行（cue 序號）
+        digit_re = re.compile(r"^\d+$")
+
+        cleaned_lines = []
+        prev_line = ""
+
+        for line in lines[start_idx:]:
+            stripped = line.strip()
+
+            # 跳過空行、時間戳行、純數字行
+            if not stripped:
+                continue
+            if timestamp_re.match(stripped):
+                continue
+            if digit_re.match(stripped):
+                continue
+
+            # 移除 HTML 標籤
+            cleaned = html_tag_re.sub("", stripped)
+            # 移除 WebVTT 樣式標記
+            cleaned = style_re.sub("", cleaned).strip()
+
+            if not cleaned:
+                continue
+
+            # 去除連續重複行（YouTube 自動字幕 overlap）
+            if cleaned == prev_line:
+                continue
+            prev_line = cleaned
+            cleaned_lines.append(cleaned)
+
+        if not cleaned_lines:
+            return None
+
+        # 組合為段落（每 N 行一段，用空行分隔）
+        paragraphs = []
+        for i in range(0, len(cleaned_lines), _LINES_PER_PARAGRAPH):
+            chunk = cleaned_lines[i:i + _LINES_PER_PARAGRAPH]
+            paragraphs.append("".join(chunk))
+
+        return "# 逐字稿\n\n" + "\n\n".join(paragraphs) + "\n"
 
     def save_transcript(self, content, date):
         """儲存逐字稿至檔案系統。
@@ -297,7 +482,7 @@ class YTTranscriptUploader:
         # 提取逐字稿
         transcript = self.extract_transcript(video_url)
         if not transcript:
-            error_msg = "Gemini API 提取逐字稿失敗"
+            error_msg = "字幕提取失敗（影片無可用字幕）"
             self.update_db(
                 date, title, video_url, duration, None, "failed", error_msg
             )

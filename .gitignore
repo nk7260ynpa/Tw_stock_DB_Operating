@@ -219,4 +219,3 @@ __marimo__/
 logs/*
 !logs/.gitkeep
 .DS_Store
-GeminiAPI

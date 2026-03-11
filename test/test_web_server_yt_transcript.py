@@ -23,8 +23,6 @@ class TestYTTranscriptAPI(unittest.TestCase):
     @patch("web_server.threading.Thread")
     def test_create_upload_success(self, mock_thread):
         """測試成功建立 YT 逐字稿上傳任務。"""
-        import web_server
-        web_server.GEMINI_API_KEY = "test-key"
         mock_thread.return_value.start = MagicMock()
 
         res = self.client.post(
@@ -37,24 +35,9 @@ class TestYTTranscriptAPI(unittest.TestCase):
         self.assertIn("job_id", data)
         self.assertEqual(data["status"], "pending")
 
-    def test_create_upload_no_gemini_key(self):
-        """測試 Gemini API key 未設定時回傳 503。"""
-        import web_server
-        web_server.GEMINI_API_KEY = None
-
-        res = self.client.post(
-            "/api/yt-transcript/upload",
-            json={"date": "2026-03-11"},
-        )
-
-        self.assertEqual(res.status_code, 503)
-
     @patch("web_server.threading.Thread")
     def test_create_upload_invalid_date(self, mock_thread):
         """測試無效日期格式。"""
-        import web_server
-        web_server.GEMINI_API_KEY = "test-key"
-
         res = self.client.post(
             "/api/yt-transcript/upload",
             json={"date": "invalid"},
@@ -66,7 +49,6 @@ class TestYTTranscriptAPI(unittest.TestCase):
     def test_rejects_when_running(self, mock_thread):
         """測試已有執行中任務時拒絕新任務。"""
         import web_server
-        web_server.GEMINI_API_KEY = "test-key"
         mock_thread.return_value.start = MagicMock()
 
         web_server.upload_jobs["existing"] = {
@@ -85,7 +67,6 @@ class TestYTTranscriptAPI(unittest.TestCase):
     def test_job_has_correct_type(self, mock_thread):
         """測試建立的任務類型正確。"""
         import web_server
-        web_server.GEMINI_API_KEY = "test-key"
         mock_thread.return_value.start = MagicMock()
 
         res = self.client.post(

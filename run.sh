@@ -38,5 +38,4 @@ docker run -d \
   -p 8080:8080 \
   -v "${LOG_DIR}:/workspace/logs" \
   -v "${NEWS_CONTENTS_DIR}:/workspace/NewsContents" \
-  -v "${SCRIPT_DIR}/GeminiAPI:/workspace/GeminiAPI" \
   "${IMAGE_NAME}:${IMAGE_TAG}"

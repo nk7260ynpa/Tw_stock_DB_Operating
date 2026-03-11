@@ -75,8 +75,6 @@ schedule_lock = threading.Lock()
 # 網路失敗重試佇列
 retry_queue: RetryQueue | None = None
 
-# Gemini API key（從檔案讀取）
-GEMINI_API_KEY: str | None = None
 
 
 def _validate_date_format(date_str):
@@ -1098,7 +1096,7 @@ def run_yt_transcript_upload_job(job_id, date):
 
     try:
         conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        uploader = YTTranscriptUploader(conn, GEMINI_API_KEY)
+        uploader = YTTranscriptUploader(conn)
         result = uploader.upload(date)
         conn.close()
 
@@ -1204,24 +1202,9 @@ class YTTranscriptScheduleRequest(BaseModel):
 async def lifespan(app: FastAPI):
     """應用程式生命週期管理。"""
     global retry_queue
-    global GEMINI_API_KEY
     retry_queue = RetryQueue(LOG_DIR / "retry_queue.json")
     set_retry_queue(retry_queue)
     logger.info("重試佇列已初始化。")
-
-    try:
-        gemini_key_path = Path("/workspace/GeminiAPI")
-        if gemini_key_path.exists():
-            GEMINI_API_KEY = gemini_key_path.read_text(
-                encoding="utf-8"
-            ).strip()
-            logger.info("Gemini API key 已載入。")
-        else:
-            logger.warning(
-                "Gemini API key 檔案不存在，YT 逐字稿功能將無法使用。"
-            )
-    except Exception as e:
-        logger.error("載入 Gemini API key 失敗: %s", e)
 
     config = load_config()
     setup_schedule(
@@ -2174,9 +2157,6 @@ def create_yt_transcript_upload(req: YTTranscriptUploadRequest):
     """
     if not _validate_date_format(req.date):
         raise HTTPException(400, "日期格式錯誤，請使用 YYYY-MM-DD")
-
-    if not GEMINI_API_KEY:
-        raise HTTPException(503, "Gemini API key 未設定，無法使用此功能")
 
     with jobs_lock:
         running_jobs = [

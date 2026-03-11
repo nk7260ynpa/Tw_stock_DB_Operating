@@ -23,7 +23,6 @@ dependencies = [
     "schedule",
     "sqlalchemy",
     "uvicorn[standard]",
-    "google-generativeai",
     "yt-dlp",
 ]
 
