@@ -1,20 +1,19 @@
 """YouTube 逐字稿上傳模組。
 
 從 YouTube 取得「游庭皓的財經皓角」直播影片，
-使用 yt-dlp 抓取自動字幕並解析為 Markdown 格式逐字稿，
+使用 youtube-transcript-api 抓取字幕並整理為 Markdown 格式逐字稿，
 儲存至檔案系統及 MySQL。
 """
 
-import glob as glob_mod
 import json
 import logging
 import re
 import subprocess
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import text
+from youtube_transcript_api import YouTubeTranscriptApi
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +23,7 @@ NEWS_CONTENT_BASE = Path("/workspace/NewsContents/YT")
 # YouTube 頻道直播播放清單
 CHANNEL_STREAMS_URL = "https://www.youtube.com/@yutinghaofinance/streams"
 
-# VTT 解析相關常數
+# 逐字稿段落合併行數
 _LINES_PER_PARAGRAPH = 10
 
 
@@ -33,7 +32,7 @@ class YTTranscriptUploader:
 
     1. 用 yt-dlp 取得最新直播影片列表
     2. 篩選目標日期的影片
-    3. 用 yt-dlp 下載自動字幕並解析為 Markdown
+    3. 用 youtube-transcript-api 抓取字幕並整理為 Markdown
     4. 儲存至檔案系統
     5. 寫入 metadata 至 MySQL
     """
@@ -190,10 +189,28 @@ class YTTranscriptUploader:
             logger.error("取得直播列表失敗: %s", e)
             return None, None, None
 
-    def extract_transcript(self, video_url):
-        """用 yt-dlp 下載自動字幕並解析為 Markdown 逐字稿。
+    @staticmethod
+    def _extract_video_id(video_url):
+        """從 YouTube URL 提取影片 ID。
 
-        優先嘗試繁體中文字幕（zh-Hant, zh-TW, zh），
+        Args:
+            video_url: YouTube 影片 URL。
+
+        Returns:
+            str: 影片 ID，無法提取時回傳 None。
+        """
+        match = re.search(r"[?&]v=([a-zA-Z0-9_-]{11})", video_url)
+        if match:
+            return match.group(1)
+        match = re.search(r"youtu\.be/([a-zA-Z0-9_-]{11})", video_url)
+        if match:
+            return match.group(1)
+        return None
+
+    def extract_transcript(self, video_url):
+        """用 youtube-transcript-api 抓取字幕並整理為 Markdown 逐字稿。
+
+        優先嘗試繁體中文字幕（zh-TW, zh-Hant, zh），
         若無則嘗試英文字幕（en）。
 
         Args:
@@ -202,154 +219,54 @@ class YTTranscriptUploader:
         Returns:
             str: 逐字稿 Markdown 內容，失敗時回傳 None。
         """
+        video_id = self._extract_video_id(video_url)
+        if not video_id:
+            logger.error("無法從 URL 提取影片 ID: %s", video_url)
+            return None
+
         try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                # 嘗試繁中字幕
-                vtt_content = self._download_subtitle(
-                    video_url, tmpdir, "zh-Hant,zh-TW,zh"
-                )
+            api = YouTubeTranscriptApi()
+            transcript = api.fetch(
+                video_id,
+                languages=["zh-TW", "zh-Hant", "zh", "en"],
+            )
 
-                # 若無繁中，嘗試英文
-                if not vtt_content:
-                    logger.info("無繁體中文字幕，嘗試英文字幕")
-                    vtt_content = self._download_subtitle(
-                        video_url, tmpdir, "en"
-                    )
+            snippets = [
+                snippet.text.replace("\n", " ")
+                for snippet in transcript
+                if snippet.text.strip()
+            ]
 
-                if not vtt_content:
-                    logger.warning("影片無可用的自動字幕: %s", video_url)
-                    return None
+            if not snippets:
+                logger.warning("影片字幕內容為空: %s", video_url)
+                return None
 
-                transcript = self._parse_vtt(vtt_content)
-                if transcript:
-                    logger.info(
-                        "逐字稿提取成功，長度: %d 字元", len(transcript)
-                    )
-                return transcript
+            result = self._format_transcript(snippets)
+            logger.info(
+                "逐字稿提取成功，共 %d 段，長度: %d 字元",
+                len(snippets), len(result),
+            )
+            return result
 
         except Exception as e:
             logger.error("字幕提取失敗: %s", e)
             return None
 
     @staticmethod
-    def _download_subtitle(video_url, tmpdir, sub_lang):
-        """用 yt-dlp 下載指定語言的自動字幕。
+    def _format_transcript(snippets):
+        """將字幕片段整理為 Markdown 格式。
+
+        每 N 個片段合併為一段，用空行分隔。
 
         Args:
-            video_url: YouTube 影片 URL。
-            tmpdir: 暫存目錄路徑。
-            sub_lang: 字幕語言代碼（逗號分隔多語言）。
+            snippets: 字幕文字片段列表。
 
         Returns:
-            str: VTT 字幕內容，無字幕時回傳 None。
+            str: Markdown 格式逐字稿。
         """
-        output_template = f"{tmpdir}/sub"
-        result = subprocess.run(
-            [
-                "yt-dlp",
-                "--write-auto-sub",
-                "--sub-lang", sub_lang,
-                "--skip-download",
-                "--sub-format", "vtt",
-                "-o", output_template,
-                video_url,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-
-        if result.returncode != 0:
-            logger.debug(
-                "yt-dlp 字幕下載失敗 (lang=%s): %s",
-                sub_lang, result.stderr,
-            )
-            return None
-
-        # 尋找產出的 .vtt 檔案
-        vtt_files = glob_mod.glob(f"{tmpdir}/*.vtt")
-        if not vtt_files:
-            return None
-
-        vtt_path = Path(vtt_files[0])
-        return vtt_path.read_text(encoding="utf-8")
-
-    @staticmethod
-    def _parse_vtt(vtt_content):
-        """解析 VTT 字幕內容為 Markdown 格式純文字。
-
-        處理步驟：
-        1. 去除 WEBVTT header 與 metadata
-        2. 去除時間戳行
-        3. 去除 HTML 標籤（<c>, </c>, <00:00:01.234> 等）
-        4. 去除 WebVTT 樣式標記（align:start position:0% 等）
-        5. 去除序號行（純數字行）
-        6. 去除連續重複行（YouTube 自動字幕 cue overlap 產生）
-        7. 整合為 Markdown 段落
-
-        Args:
-            vtt_content: VTT 字幕檔案的原始內容。
-
-        Returns:
-            str: 整理後的 Markdown 格式逐字稿，內容為空時回傳 None。
-        """
-        lines = vtt_content.split("\n")
-
-        # 跳過 WEBVTT header（空行之前的內容）
-        start_idx = 0
-        for i, line in enumerate(lines):
-            if line.strip() == "" and i > 0:
-                start_idx = i + 1
-                break
-
-        # 時間戳行的正規表達式
-        timestamp_re = re.compile(
-            r"^\d{2}:\d{2}:\d{2}\.\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}\.\d{3}"
-        )
-        # HTML 標籤（<c>, </c>, <00:00:01.234> 等）
-        html_tag_re = re.compile(r"<[^>]+>")
-        # WebVTT 樣式標記
-        style_re = re.compile(
-            r"\b(?:align|position|size|line|vertical)\s*:\s*\S+"
-        )
-        # 純數字行（cue 序號）
-        digit_re = re.compile(r"^\d+$")
-
-        cleaned_lines = []
-        prev_line = ""
-
-        for line in lines[start_idx:]:
-            stripped = line.strip()
-
-            # 跳過空行、時間戳行、純數字行
-            if not stripped:
-                continue
-            if timestamp_re.match(stripped):
-                continue
-            if digit_re.match(stripped):
-                continue
-
-            # 移除 HTML 標籤
-            cleaned = html_tag_re.sub("", stripped)
-            # 移除 WebVTT 樣式標記
-            cleaned = style_re.sub("", cleaned).strip()
-
-            if not cleaned:
-                continue
-
-            # 去除連續重複行（YouTube 自動字幕 overlap）
-            if cleaned == prev_line:
-                continue
-            prev_line = cleaned
-            cleaned_lines.append(cleaned)
-
-        if not cleaned_lines:
-            return None
-
-        # 組合為段落（每 N 行一段，用空行分隔）
         paragraphs = []
-        for i in range(0, len(cleaned_lines), _LINES_PER_PARAGRAPH):
-            chunk = cleaned_lines[i:i + _LINES_PER_PARAGRAPH]
+        for i in range(0, len(snippets), _LINES_PER_PARAGRAPH):
+            chunk = snippets[i:i + _LINES_PER_PARAGRAPH]
             paragraphs.append("".join(chunk))
 
         return "# 逐字稿\n\n" + "\n\n".join(paragraphs) + "\n"

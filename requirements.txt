@@ -13,4 +13,5 @@ requests
 schedule
 sqlalchemy
 uvicorn[standard]
+youtube-transcript-api
 yt-dlp
