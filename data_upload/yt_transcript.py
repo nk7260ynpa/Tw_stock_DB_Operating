@@ -120,6 +120,9 @@ class YTTranscriptUploader:
     def get_latest_stream_url(self, target_date):
         """用 yt-dlp 取得最新直播影片，篩選目標日期。
 
+        先以 flat-playlist 快速取得影片列表並篩選日期，
+        再以單一影片查詢取得中文標題（hl=zh-TW）。
+
         Args:
             target_date: 目標日期字串（YYYY-MM-DD）。
 
@@ -156,24 +159,18 @@ class YTTranscriptUploader:
                 if not self._match_video_date(video, target_date):
                     continue
 
-                video_url = video.get("url") or video.get("id", "")
-                if video_url and not video_url.startswith("http"):
-                    video_url = (
-                        f"https://www.youtube.com/watch?v={video_url}"
-                    )
-                title = video.get("title", "")
-                duration = video.get("duration")
-                duration_str = ""
-                if duration:
-                    hours = int(duration) // 3600
-                    minutes = (int(duration) % 3600) // 60
-                    seconds = int(duration) % 60
-                    if hours > 0:
-                        duration_str = (
-                            f"{hours}:{minutes:02d}:{seconds:02d}"
-                        )
-                    else:
-                        duration_str = f"{minutes}:{seconds:02d}"
+                video_id = video.get("id") or video.get("url", "")
+                video_url = (
+                    f"https://www.youtube.com/watch?v={video_id}"
+                    if video_id and not video_id.startswith("http")
+                    else video_id
+                )
+
+                # 取得中文標題與精確時長
+                title, duration_str = self._fetch_video_detail(
+                    video_url, video
+                )
+
                 logger.info(
                     "找到目標日期 %s 的影片: %s", target_date, title
                 )
@@ -188,6 +185,55 @@ class YTTranscriptUploader:
         except Exception as e:
             logger.error("取得直播列表失敗: %s", e)
             return None, None, None
+
+    @staticmethod
+    def _fetch_video_detail(video_url, fallback):
+        """取得單一影片的中文標題與時長。
+
+        使用 yt-dlp 搭配 hl=zh-TW 取得中文標題，
+        失敗時回退使用 flat-playlist 的資料。
+
+        Args:
+            video_url: YouTube 影片 URL。
+            fallback: flat-playlist 回傳的原始 metadata dict。
+
+        Returns:
+            tuple: (title, duration_str)。
+        """
+        title = fallback.get("title", "")
+        duration = fallback.get("duration")
+
+        try:
+            result = subprocess.run(
+                [
+                    "yt-dlp",
+                    "--dump-json",
+                    "--no-download",
+                    "--extractor-args", "youtube:hl=zh-TW",
+                    video_url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                detail = json.loads(result.stdout.strip())
+                title = detail.get("title", title)
+                duration = detail.get("duration", duration)
+        except Exception as e:
+            logger.warning("取得影片詳細資訊失敗，使用 fallback: %s", e)
+
+        duration_str = ""
+        if duration:
+            hours = int(duration) // 3600
+            minutes = (int(duration) % 3600) // 60
+            seconds = int(duration) % 60
+            if hours > 0:
+                duration_str = f"{hours}:{minutes:02d}:{seconds:02d}"
+            else:
+                duration_str = f"{minutes}:{seconds:02d}"
+
+        return title, duration_str
 
     @staticmethod
     def _extract_video_id(video_url):
@@ -352,24 +398,6 @@ class YTTranscriptUploader:
         except Exception as e:
             logger.error("YTTranscript DB 更新失敗: %s", e)
 
-    @staticmethod
-    def _chinese_title(date):
-        """根據日期產生中文標題。
-
-        Args:
-            date: 日期字串（YYYY-MM-DD）。
-
-        Returns:
-            str: 中文標題，如「2026/3/11(三) 游庭皓的財經皓角」。
-        """
-        weekdays = ["一", "二", "三", "四", "五", "六", "日"]
-        try:
-            dt = datetime.strptime(date, "%Y-%m-%d")
-            weekday = weekdays[dt.weekday()]
-            return f"{dt.year}/{dt.month}/{dt.day}({weekday}) 游庭皓的財經皓角"
-        except ValueError:
-            return f"{date} 游庭皓的財經皓角"
-
     def upload(self, date):
         """執行指定日期的 YT 逐字稿上傳流程。
 
@@ -399,7 +427,7 @@ class YTTranscriptUploader:
         self.update_db(date, None, "", None, None, "pending")
 
         # 取得影片 URL
-        video_url, _yt_title, duration = self.get_latest_stream_url(date)
+        video_url, title, duration = self.get_latest_stream_url(date)
         if not video_url:
             error_msg = f"未找到 {date} 的直播影片"
             self.update_db(date, None, "", None, None, "failed", error_msg)
@@ -410,9 +438,6 @@ class YTTranscriptUploader:
                 "title": None,
                 "error": error_msg,
             }
-
-        # 使用中文標題取代 YouTube 原始標題
-        title = self._chinese_title(date)
 
         # 更新 DB 為 pending（帶影片資訊）
         self.update_db(date, title, video_url, duration, None, "pending")

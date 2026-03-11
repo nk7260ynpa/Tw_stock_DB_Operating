@@ -273,23 +273,6 @@ class TestYTTranscriptUploader(unittest.TestCase):
                     saved_path.read_text(encoding="utf-8"), "# 測試內容"
                 )
 
-    # --- _chinese_title ---
-
-    def test_chinese_title_weekday(self):
-        """測試中文標題產生（含星期）。"""
-        title = YTTranscriptUploader._chinese_title("2026-03-11")
-        self.assertEqual(title, "2026/3/11(三) 游庭皓的財經皓角")
-
-    def test_chinese_title_monday(self):
-        """測試中文標題（星期一）。"""
-        title = YTTranscriptUploader._chinese_title("2026-03-09")
-        self.assertEqual(title, "2026/3/9(一) 游庭皓的財經皓角")
-
-    def test_chinese_title_invalid_date(self):
-        """測試無效日期格式仍回傳標題。"""
-        title = YTTranscriptUploader._chinese_title("invalid")
-        self.assertEqual(title, "invalid 游庭皓的財經皓角")
-
     # --- upload 流程 ---
 
     @patch.object(YTTranscriptUploader, "check_existing", return_value=True)
@@ -355,7 +338,7 @@ class TestYTTranscriptUploader(unittest.TestCase):
         """測試完整上傳流程成功。"""
         result = self.uploader.upload("2026-03-11")
         self.assertEqual(result["status"], "success")
-        self.assertEqual(result["title"], "2026/3/11(三) 游庭皓的財經皓角")
+        self.assertEqual(result["title"], "測試標題")
         self.assertIsNone(result["error"])
 
     def test_duration_format_no_hours(self):
