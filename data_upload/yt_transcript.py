@@ -352,6 +352,24 @@ class YTTranscriptUploader:
         except Exception as e:
             logger.error("YTTranscript DB 更新失敗: %s", e)
 
+    @staticmethod
+    def _chinese_title(date):
+        """根據日期產生中文標題。
+
+        Args:
+            date: 日期字串（YYYY-MM-DD）。
+
+        Returns:
+            str: 中文標題，如「2026/3/11(三) 游庭皓的財經皓角」。
+        """
+        weekdays = ["一", "二", "三", "四", "五", "六", "日"]
+        try:
+            dt = datetime.strptime(date, "%Y-%m-%d")
+            weekday = weekdays[dt.weekday()]
+            return f"{dt.year}/{dt.month}/{dt.day}({weekday}) 游庭皓的財經皓角"
+        except ValueError:
+            return f"{date} 游庭皓的財經皓角"
+
     def upload(self, date):
         """執行指定日期的 YT 逐字稿上傳流程。
 
@@ -381,7 +399,7 @@ class YTTranscriptUploader:
         self.update_db(date, None, "", None, None, "pending")
 
         # 取得影片 URL
-        video_url, title, duration = self.get_latest_stream_url(date)
+        video_url, _yt_title, duration = self.get_latest_stream_url(date)
         if not video_url:
             error_msg = f"未找到 {date} 的直播影片"
             self.update_db(date, None, "", None, None, "failed", error_msg)
@@ -392,6 +410,9 @@ class YTTranscriptUploader:
                 "title": None,
                 "error": error_msg,
             }
+
+        # 使用中文標題取代 YouTube 原始標題
+        title = self._chinese_title(date)
 
         # 更新 DB 為 pending（帶影片資訊）
         self.update_db(date, title, video_url, duration, None, "pending")
