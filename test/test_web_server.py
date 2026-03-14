@@ -234,10 +234,10 @@ class TestAPIEndpoints(unittest.TestCase):
 
         self.assertEqual(res.status_code, 400)
 
-    @patch("web_server.threading.Thread")
-    def test_create_upload_success(self, mock_thread):
+    @patch("web_server.job_queue")
+    def test_create_upload_success(self, mock_queue):
         """測試成功建立上傳任務。"""
-        mock_thread.return_value.start = MagicMock()
+        mock_queue.enqueue.return_value = 0
 
         res = self.client.post(
             "/api/upload",
@@ -251,7 +251,7 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertIn("job_id", data)
-        self.assertEqual(data["status"], "pending")
+        self.assertEqual(data["status"], "queued")
 
     def test_create_upload_empty_databases(self):
         """測試未選擇資料庫時被拒絕。"""
@@ -305,12 +305,12 @@ class TestAPIEndpoints(unittest.TestCase):
 
         self.assertEqual(res.status_code, 400)
 
-    @patch("web_server.threading.Thread")
-    def test_create_upload_rejects_when_running(self, mock_thread):
-        """測試已有執行中任務時拒絕新任務。"""
+    @patch("web_server.job_queue")
+    def test_create_upload_queues_when_running(self, mock_queue):
+        """測試已有執行中任務時排入佇列。"""
         import web_server
 
-        mock_thread.return_value.start = MagicMock()
+        mock_queue.enqueue.return_value = 1
 
         web_server.upload_jobs["existing"] = {
             "job_id": "existing",
@@ -326,7 +326,10 @@ class TestAPIEndpoints(unittest.TestCase):
             },
         )
 
-        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["status"], "queued")
+        self.assertIn("queue_position", data)
 
     def test_list_upload_jobs_empty(self):
         """測試無任務時回傳空清單。"""
@@ -335,12 +338,10 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json(), [])
 
-    @patch("web_server.threading.Thread")
-    def test_list_upload_jobs_with_data(self, mock_thread):
+    @patch("web_server.job_queue")
+    def test_list_upload_jobs_with_data(self, mock_queue):
         """測試有任務時回傳任務清單。"""
-        import web_server
-
-        mock_thread.return_value.start = MagicMock()
+        mock_queue.enqueue.return_value = 0
 
         self.client.post(
             "/api/upload",
@@ -362,12 +363,10 @@ class TestAPIEndpoints(unittest.TestCase):
 
         self.assertEqual(res.status_code, 404)
 
-    @patch("web_server.threading.Thread")
-    def test_get_upload_status_found(self, mock_thread):
+    @patch("web_server.job_queue")
+    def test_get_upload_status_found(self, mock_queue):
         """測試查詢已存在的任務回傳正確狀態。"""
-        import web_server
-
-        mock_thread.return_value.start = MagicMock()
+        mock_queue.enqueue.return_value = 0
 
         create_res = self.client.post(
             "/api/upload",

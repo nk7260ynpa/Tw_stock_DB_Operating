@@ -20,10 +20,10 @@ class TestQuarterRevenueAPI(unittest.TestCase):
         import web_server
         web_server.upload_jobs.clear()
 
-    @patch("web_server.threading.Thread")
-    def test_create_quarter_revenue_upload_success(self, mock_thread):
+    @patch("web_server.job_queue")
+    def test_create_quarter_revenue_upload_success(self, mock_queue):
         """測試成功建立季度營業收入抓取任務。"""
-        mock_thread.return_value.start = MagicMock()
+        mock_queue.enqueue.return_value = 0
 
         res = self.client.post(
             "/api/quarter-revenue/upload",
@@ -33,7 +33,7 @@ class TestQuarterRevenueAPI(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertIn("job_id", data)
-        self.assertEqual(data["status"], "pending")
+        self.assertEqual(data["status"], "queued")
 
     def test_invalid_quarter(self):
         """測試無效季度被拒絕。"""
@@ -71,12 +71,12 @@ class TestQuarterRevenueAPI(unittest.TestCase):
 
         self.assertEqual(res.status_code, 400)
 
-    @patch("web_server.threading.Thread")
-    def test_rejects_when_running(self, mock_thread):
-        """測試已有執行中任務時拒絕新任務。"""
+    @patch("web_server.job_queue")
+    def test_queues_when_running(self, mock_queue):
+        """測試已有執行中任務時排入佇列。"""
         import web_server
 
-        mock_thread.return_value.start = MagicMock()
+        mock_queue.enqueue.return_value = 1
 
         web_server.upload_jobs["existing"] = {
             "job_id": "existing",
@@ -88,7 +88,10 @@ class TestQuarterRevenueAPI(unittest.TestCase):
             json={"year": 113, "quarter": 1},
         )
 
-        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["status"], "queued")
+        self.assertIn("queue_position", data)
 
     @patch("web_server.MySQLRouter")
     def test_list_uploaded_quarters(self, mock_router_cls):

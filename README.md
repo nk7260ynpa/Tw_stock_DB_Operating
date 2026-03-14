@@ -45,6 +45,7 @@ Tw_stock_DB_Operating/
 ├── upload.py                 # 批次上傳入口程式
 ├── DailyUpload.py            # 每日排程上傳
 ├── retry_queue.py            # 網路失敗重試佇列
+├── job_queue.py              # 任務佇列（FIFO 排隊機制）
 ├── pyproject.toml            # Python 專案定義（PEP 621）
 ├── requirements.txt          # Docker 環境釘版依賴
 ├── run.sh                    # 啟動主程式腳本
@@ -116,7 +117,8 @@ Tw_stock_DB_Operating/
 │   ├── test_web_server_company_info.py
 │   ├── test_yt_transcript.py
 │   ├── test_web_server_yt_transcript.py
-│   └── test_retry_queue.py
+│   ├── test_retry_queue.py
+│   └── test_job_queue.py
 └── logs/                     # 日誌資料夾
 ```
 
@@ -193,6 +195,7 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:2.3.0 python -m pytest test/
 - **公司產業對照**：一鍵從爬蟲取得最新 TWSE/TPEX 公司基本資料與產業對照表，寫入 TWSE 資料庫
 - **YT 逐字稿**：選擇日期抓取「游庭皓的財經皓角」YouTube 直播影片逐字稿（透過 yt-dlp 下載自動字幕），metadata 寫入 MySQL，全文存為 md 檔，每日排程自動抓取當日逐字稿
 - **重試佇列**：檢視因網路失敗而進入重試佇列的任務，可手動觸發重試、重設已耗盡任務、清除已完成任務
+- **任務佇列**：所有上傳任務透過 FIFO 佇列管理，同一時間只執行一個任務，其餘排隊等待，前端顯示排隊位置
 
 排程設定會儲存至 `logs/config.json`，重試佇列持久化至 `logs/retry_queue.json`，容器重啟後自動套用。
 

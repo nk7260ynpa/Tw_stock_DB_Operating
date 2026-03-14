@@ -10,7 +10,7 @@ function CompanyInfoUpload() {
   const [error, setError] = useState('')
 
   const hasRunningJob = jobs.some(
-    (j) => j.status === 'running' || j.status === 'pending'
+    (j) => j.status === 'running' || j.status === 'pending' || j.status === 'queued'
   )
 
   const fetchStatus = useCallback(async () => {
@@ -75,6 +75,7 @@ function CompanyInfoUpload() {
 
   const statusLabel = {
     pending: '等待中',
+    queued: '排隊中',
     running: '上傳中',
     completed: '已完成',
     failed: '失敗',
@@ -101,7 +102,7 @@ function CompanyInfoUpload() {
         {hasRunningJob ? (
           <>
             <span className="spinner" />
-            更新中...
+            任務排隊/執行中...
           </>
         ) : (
           '更新公司產業對照'
@@ -120,6 +121,8 @@ function CompanyInfoUpload() {
                 <span className={`badge badge-${job.status}`}>
                   {job.status === 'running' && <span className="spinner" />}
                   {statusLabel[job.status] || job.status}
+                  {job.queue_position !== undefined && job.status === 'queued' &&
+                    ` (第 ${job.queue_position} 位)`}
                 </span>
               </div>
               {job.status === 'completed' && (

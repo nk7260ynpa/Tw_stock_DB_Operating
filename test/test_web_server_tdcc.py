@@ -20,24 +20,24 @@ class TestTDCCAPI(unittest.TestCase):
         import web_server
         web_server.upload_jobs.clear()
 
-    @patch("web_server.threading.Thread")
-    def test_create_tdcc_upload_success(self, mock_thread):
+    @patch("web_server.job_queue")
+    def test_create_tdcc_upload_success(self, mock_queue):
         """測試成功建立 TDCC 上傳任務。"""
-        mock_thread.return_value.start = MagicMock()
+        mock_queue.enqueue.return_value = 0
 
         res = self.client.post("/api/tdcc/upload")
 
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertIn("job_id", data)
-        self.assertEqual(data["status"], "pending")
+        self.assertEqual(data["status"], "queued")
 
-    @patch("web_server.threading.Thread")
-    def test_rejects_when_running(self, mock_thread):
-        """測試已有執行中任務時拒絕新任務。"""
+    @patch("web_server.job_queue")
+    def test_queues_when_running(self, mock_queue):
+        """測試已有執行中任務時排入佇列。"""
         import web_server
 
-        mock_thread.return_value.start = MagicMock()
+        mock_queue.enqueue.return_value = 1
 
         web_server.upload_jobs["existing"] = {
             "job_id": "existing",
@@ -46,7 +46,10 @@ class TestTDCCAPI(unittest.TestCase):
 
         res = self.client.post("/api/tdcc/upload")
 
-        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["status"], "queued")
+        self.assertIn("queue_position", data)
 
     @patch("web_server.MySQLRouter")
     def test_list_uploaded_tdcc(self, mock_router_cls):

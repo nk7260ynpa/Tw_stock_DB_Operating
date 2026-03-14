@@ -75,6 +75,10 @@ schedule_lock = threading.Lock()
 # 網路失敗重試佇列
 retry_queue: RetryQueue | None = None
 
+# 任務佇列
+from job_queue import JobQueue
+job_queue: JobQueue | None = None
+
 
 
 def _validate_date_format(date_str):
@@ -437,7 +441,7 @@ def run_ctee_news_scheduled():
         upload_jobs[job_id] = {
             "job_id": job_id,
             "type": "ctee_news",
-            "status": "pending",
+            "status": "queued",
             "date": today,
             "record_count": 0,
             "file_count": 0,
@@ -447,12 +451,7 @@ def run_ctee_news_scheduled():
             "scheduled": True,
         }
 
-    t = threading.Thread(
-        target=run_ctee_news_hours_job,
-        args=(job_id, 24),
-        daemon=True,
-    )
-    t.start()
+    job_queue.enqueue(job_id, run_ctee_news_hours_job, (job_id, 24))
     logger.info("CTEE 新聞排程任務已建立 %s（hours=24）", job_id)
 
 
@@ -569,7 +568,7 @@ def run_cnyes_news_scheduled():
         upload_jobs[job_id] = {
             "job_id": job_id,
             "type": "cnyes_news",
-            "status": "pending",
+            "status": "queued",
             "date": today,
             "record_count": 0,
             "file_count": 0,
@@ -579,12 +578,7 @@ def run_cnyes_news_scheduled():
             "scheduled": True,
         }
 
-    t = threading.Thread(
-        target=run_cnyes_news_hours_job,
-        args=(job_id, 24),
-        daemon=True,
-    )
-    t.start()
+    job_queue.enqueue(job_id, run_cnyes_news_hours_job, (job_id, 24))
     logger.info("CNYES 新聞排程任務已建立 %s（hours=24）", job_id)
 
 
@@ -701,7 +695,7 @@ def run_ptt_news_scheduled():
         upload_jobs[job_id] = {
             "job_id": job_id,
             "type": "ptt_news",
-            "status": "pending",
+            "status": "queued",
             "date": today,
             "record_count": 0,
             "file_count": 0,
@@ -711,12 +705,7 @@ def run_ptt_news_scheduled():
             "scheduled": True,
         }
 
-    t = threading.Thread(
-        target=run_ptt_news_hours_job,
-        args=(job_id, 24),
-        daemon=True,
-    )
-    t.start()
+    job_queue.enqueue(job_id, run_ptt_news_hours_job, (job_id, 24))
     logger.info("PTT 新聞排程任務已建立 %s（hours=24）", job_id)
 
 
@@ -833,7 +822,7 @@ def run_moneyudn_news_scheduled():
         upload_jobs[job_id] = {
             "job_id": job_id,
             "type": "moneyudn_news",
-            "status": "pending",
+            "status": "queued",
             "date": today,
             "record_count": 0,
             "file_count": 0,
@@ -843,12 +832,7 @@ def run_moneyudn_news_scheduled():
             "scheduled": True,
         }
 
-    t = threading.Thread(
-        target=run_moneyudn_news_hours_job,
-        args=(job_id, 24),
-        daemon=True,
-    )
-    t.start()
+    job_queue.enqueue(job_id, run_moneyudn_news_hours_job, (job_id, 24))
     logger.info("MoneyUDN 新聞排程任務已建立 %s（hours=24）", job_id)
 
 
@@ -964,7 +948,7 @@ def run_tdcc_scheduled():
         upload_jobs[job_id] = {
             "job_id": job_id,
             "type": "tdcc",
-            "status": "pending",
+            "status": "queued",
             "record_count": 0,
             "errors": [],
             "created_at": datetime.now().isoformat(),
@@ -972,12 +956,7 @@ def run_tdcc_scheduled():
             "scheduled": True,
         }
 
-    t = threading.Thread(
-        target=run_tdcc_upload_job,
-        args=(job_id,),
-        daemon=True,
-    )
-    t.start()
+    job_queue.enqueue(job_id, run_tdcc_upload_job, (job_id,))
     logger.info("TDCC 排程任務已建立 %s", job_id)
 
 
@@ -1066,7 +1045,7 @@ def run_yt_transcript_scheduled():
         upload_jobs[job_id] = {
             "job_id": job_id,
             "type": "yt_transcript",
-            "status": "pending",
+            "status": "queued",
             "date": today,
             "title": None,
             "errors": [],
@@ -1075,12 +1054,7 @@ def run_yt_transcript_scheduled():
             "scheduled": True,
         }
 
-    t = threading.Thread(
-        target=run_yt_transcript_upload_job,
-        args=(job_id, today),
-        daemon=True,
-    )
-    t.start()
+    job_queue.enqueue(job_id, run_yt_transcript_upload_job, (job_id, today))
     logger.info("YT 逐字稿排程任務已建立 %s", job_id)
 
 
@@ -1201,10 +1175,17 @@ class YTTranscriptScheduleRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """應用程式生命週期管理。"""
-    global retry_queue
+    global retry_queue, job_queue
     retry_queue = RetryQueue(LOG_DIR / "retry_queue.json")
     set_retry_queue(retry_queue)
     logger.info("重試佇列已初始化。")
+
+    job_queue = JobQueue(upload_jobs, jobs_lock)
+    consumer_thread = threading.Thread(
+        target=job_queue.consumer_loop, daemon=True
+    )
+    consumer_thread.start()
+    logger.info("任務佇列已初始化。")
 
     config = load_config()
     setup_schedule(
@@ -1237,16 +1218,6 @@ def create_upload(req: UploadRequest):
     Returns:
         dict: 任務 ID 與初始狀態。
     """
-    # 檢查是否有正在執行的任務
-    with jobs_lock:
-        running_jobs = [
-            j for j in upload_jobs.values() if j["status"] == "running"
-        ]
-        if running_jobs:
-            raise HTTPException(
-                409, "已有上傳任務正在執行中，請等待完成後再提交"
-            )
-
     # 驗證資料庫名稱
     for db in req.databases:
         if db not in DB_NAMES:
@@ -1269,7 +1240,7 @@ def create_upload(req: UploadRequest):
     with jobs_lock:
         upload_jobs[job_id] = {
             "job_id": job_id,
-            "status": "pending",
+            "status": "queued",
             "start_date": req.start_date,
             "end_date": req.end_date,
             "databases": req.databases,
@@ -1282,14 +1253,12 @@ def create_upload(req: UploadRequest):
             "finished_at": None,
         }
 
-    t = threading.Thread(
-        target=run_upload_job,
-        args=(job_id, req.start_date, req.end_date, req.databases),
-        daemon=True,
+    position = job_queue.enqueue(
+        job_id, run_upload_job,
+        (job_id, req.start_date, req.end_date, req.databases),
     )
-    t.start()
 
-    return {"job_id": job_id, "status": "pending"}
+    return {"job_id": job_id, "status": "queued", "queue_position": position}
 
 
 @app.get("/api/upload/jobs")
@@ -1423,23 +1392,13 @@ def create_quarter_revenue_upload(req: QuarterRevenueRequest):
     if not (80 <= req.year <= 200):
         raise HTTPException(400, "年份必須為 80-200（民國年）")
 
-    with jobs_lock:
-        running_jobs = [
-            j for j in upload_jobs.values()
-            if j["status"] == "running"
-        ]
-        if running_jobs:
-            raise HTTPException(
-                409, "已有任務正在執行中，請等待完成後再提交"
-            )
-
     job_id = str(uuid.uuid4())[:8]
 
     with jobs_lock:
         upload_jobs[job_id] = {
             "job_id": job_id,
             "type": "quarter_revenue",
-            "status": "pending",
+            "status": "queued",
             "year": req.year,
             "quarter": req.quarter,
             "record_count": 0,
@@ -1448,14 +1407,12 @@ def create_quarter_revenue_upload(req: QuarterRevenueRequest):
             "finished_at": None,
         }
 
-    t = threading.Thread(
-        target=run_quarter_revenue_job,
-        args=(job_id, req.year, req.quarter),
-        daemon=True,
+    position = job_queue.enqueue(
+        job_id, run_quarter_revenue_job,
+        (job_id, req.year, req.quarter),
     )
-    t.start()
 
-    return {"job_id": job_id, "status": "pending"}
+    return {"job_id": job_id, "status": "queued", "queue_position": position}
 
 
 @app.get("/api/quarter-revenue/uploaded")
@@ -1498,37 +1455,24 @@ def create_tdcc_upload():
     Returns:
         dict: 任務 ID 與初始狀態。
     """
-    with jobs_lock:
-        running_jobs = [
-            j for j in upload_jobs.values()
-            if j["status"] == "running"
-        ]
-        if running_jobs:
-            raise HTTPException(
-                409, "已有任務正在執行中，請等待完成後再提交"
-            )
-
     job_id = str(uuid.uuid4())[:8]
 
     with jobs_lock:
         upload_jobs[job_id] = {
             "job_id": job_id,
             "type": "tdcc",
-            "status": "pending",
+            "status": "queued",
             "record_count": 0,
             "errors": [],
             "created_at": datetime.now().isoformat(),
             "finished_at": None,
         }
 
-    t = threading.Thread(
-        target=run_tdcc_upload_job,
-        args=(job_id,),
-        daemon=True,
+    position = job_queue.enqueue(
+        job_id, run_tdcc_upload_job, (job_id,),
     )
-    t.start()
 
-    return {"job_id": job_id, "status": "pending"}
+    return {"job_id": job_id, "status": "queued", "queue_position": position}
 
 
 @app.get("/api/tdcc/uploaded")
@@ -1628,23 +1572,13 @@ def create_ctee_news_upload(req: CTEENewsUploadRequest):
     except ValueError:
         raise HTTPException(400, "日期格式錯誤，請使用 YYYY-MM-DD")
 
-    with jobs_lock:
-        running_jobs = [
-            j for j in upload_jobs.values()
-            if j["status"] == "running"
-        ]
-        if running_jobs:
-            raise HTTPException(
-                409, "已有任務正在執行中，請等待完成後再提交"
-            )
-
     job_id = str(uuid.uuid4())[:8]
 
     with jobs_lock:
         upload_jobs[job_id] = {
             "job_id": job_id,
             "type": "ctee_news",
-            "status": "pending",
+            "status": "queued",
             "start_date": req.start_date,
             "end_date": req.end_date,
             "date": req.start_date,
@@ -1655,14 +1589,12 @@ def create_ctee_news_upload(req: CTEENewsUploadRequest):
             "finished_at": None,
         }
 
-    t = threading.Thread(
-        target=run_ctee_news_upload_job,
-        args=(job_id, req.start_date, req.end_date),
-        daemon=True,
+    position = job_queue.enqueue(
+        job_id, run_ctee_news_upload_job,
+        (job_id, req.start_date, req.end_date),
     )
-    t.start()
 
-    return {"job_id": job_id, "status": "pending"}
+    return {"job_id": job_id, "status": "queued", "queue_position": position}
 
 
 @app.get("/api/ctee-news/uploaded")
@@ -1762,23 +1694,13 @@ def create_cnyes_news_upload(req: CNYESNewsUploadRequest):
     except ValueError:
         raise HTTPException(400, "日期格式錯誤，請使用 YYYY-MM-DD")
 
-    with jobs_lock:
-        running_jobs = [
-            j for j in upload_jobs.values()
-            if j["status"] == "running"
-        ]
-        if running_jobs:
-            raise HTTPException(
-                409, "已有任務正在執行中，請等待完成後再提交"
-            )
-
     job_id = str(uuid.uuid4())[:8]
 
     with jobs_lock:
         upload_jobs[job_id] = {
             "job_id": job_id,
             "type": "cnyes_news",
-            "status": "pending",
+            "status": "queued",
             "start_date": req.start_date,
             "end_date": req.end_date,
             "date": req.start_date,
@@ -1789,14 +1711,12 @@ def create_cnyes_news_upload(req: CNYESNewsUploadRequest):
             "finished_at": None,
         }
 
-    t = threading.Thread(
-        target=run_cnyes_news_upload_job,
-        args=(job_id, req.start_date, req.end_date),
-        daemon=True,
+    position = job_queue.enqueue(
+        job_id, run_cnyes_news_upload_job,
+        (job_id, req.start_date, req.end_date),
     )
-    t.start()
 
-    return {"job_id": job_id, "status": "pending"}
+    return {"job_id": job_id, "status": "queued", "queue_position": position}
 
 
 @app.get("/api/cnyes-news/uploaded")
@@ -1896,23 +1816,13 @@ def create_ptt_news_upload(req: PTTNewsUploadRequest):
     except ValueError:
         raise HTTPException(400, "日期格式錯誤，請使用 YYYY-MM-DD")
 
-    with jobs_lock:
-        running_jobs = [
-            j for j in upload_jobs.values()
-            if j["status"] == "running"
-        ]
-        if running_jobs:
-            raise HTTPException(
-                409, "已有任務正在執行中，請等待完成後再提交"
-            )
-
     job_id = str(uuid.uuid4())[:8]
 
     with jobs_lock:
         upload_jobs[job_id] = {
             "job_id": job_id,
             "type": "ptt_news",
-            "status": "pending",
+            "status": "queued",
             "start_date": req.start_date,
             "end_date": req.end_date,
             "date": req.start_date,
@@ -1923,14 +1833,12 @@ def create_ptt_news_upload(req: PTTNewsUploadRequest):
             "finished_at": None,
         }
 
-    t = threading.Thread(
-        target=run_ptt_news_upload_job,
-        args=(job_id, req.start_date, req.end_date),
-        daemon=True,
+    position = job_queue.enqueue(
+        job_id, run_ptt_news_upload_job,
+        (job_id, req.start_date, req.end_date),
     )
-    t.start()
 
-    return {"job_id": job_id, "status": "pending"}
+    return {"job_id": job_id, "status": "queued", "queue_position": position}
 
 
 @app.get("/api/ptt-news/uploaded")
@@ -2030,23 +1938,13 @@ def create_moneyudn_news_upload(req: MoneyUDNNewsUploadRequest):
     except ValueError:
         raise HTTPException(400, "日期格式錯誤，請使用 YYYY-MM-DD")
 
-    with jobs_lock:
-        running_jobs = [
-            j for j in upload_jobs.values()
-            if j["status"] == "running"
-        ]
-        if running_jobs:
-            raise HTTPException(
-                409, "已有任務正在執行中，請等待完成後再提交"
-            )
-
     job_id = str(uuid.uuid4())[:8]
 
     with jobs_lock:
         upload_jobs[job_id] = {
             "job_id": job_id,
             "type": "moneyudn_news",
-            "status": "pending",
+            "status": "queued",
             "start_date": req.start_date,
             "end_date": req.end_date,
             "date": req.start_date,
@@ -2057,14 +1955,12 @@ def create_moneyudn_news_upload(req: MoneyUDNNewsUploadRequest):
             "finished_at": None,
         }
 
-    t = threading.Thread(
-        target=run_moneyudn_news_upload_job,
-        args=(job_id, req.start_date, req.end_date),
-        daemon=True,
+    position = job_queue.enqueue(
+        job_id, run_moneyudn_news_upload_job,
+        (job_id, req.start_date, req.end_date),
     )
-    t.start()
 
-    return {"job_id": job_id, "status": "pending"}
+    return {"job_id": job_id, "status": "queued", "queue_position": position}
 
 
 @app.get("/api/moneyudn-news/uploaded")
@@ -2158,23 +2054,13 @@ def create_yt_transcript_upload(req: YTTranscriptUploadRequest):
     if not _validate_date_format(req.date):
         raise HTTPException(400, "日期格式錯誤，請使用 YYYY-MM-DD")
 
-    with jobs_lock:
-        running_jobs = [
-            j for j in upload_jobs.values()
-            if j["status"] == "running"
-        ]
-        if running_jobs:
-            raise HTTPException(
-                409, "已有任務正在執行中，請等待完成後再提交"
-            )
-
     job_id = str(uuid.uuid4())[:8]
 
     with jobs_lock:
         upload_jobs[job_id] = {
             "job_id": job_id,
             "type": "yt_transcript",
-            "status": "pending",
+            "status": "queued",
             "date": req.date,
             "title": None,
             "errors": [],
@@ -2182,14 +2068,11 @@ def create_yt_transcript_upload(req: YTTranscriptUploadRequest):
             "finished_at": None,
         }
 
-    t = threading.Thread(
-        target=run_yt_transcript_upload_job,
-        args=(job_id, req.date),
-        daemon=True,
+    position = job_queue.enqueue(
+        job_id, run_yt_transcript_upload_job, (job_id, req.date),
     )
-    t.start()
 
-    return {"job_id": job_id, "status": "pending"}
+    return {"job_id": job_id, "status": "queued", "queue_position": position}
 
 
 @app.get("/api/yt-transcript/uploaded")
@@ -2316,23 +2199,13 @@ def create_company_info_upload():
     Returns:
         dict: 任務 ID 與初始狀態。
     """
-    with jobs_lock:
-        running_jobs = [
-            j for j in upload_jobs.values()
-            if j["status"] == "running"
-        ]
-        if running_jobs:
-            raise HTTPException(
-                409, "已有任務正在執行中，請等待完成後再提交"
-            )
-
     job_id = str(uuid.uuid4())[:8]
 
     with jobs_lock:
         upload_jobs[job_id] = {
             "job_id": job_id,
             "type": "company_info",
-            "status": "pending",
+            "status": "queued",
             "company_info_count": 0,
             "industry_map_count": 0,
             "errors": [],
@@ -2340,14 +2213,11 @@ def create_company_info_upload():
             "finished_at": None,
         }
 
-    t = threading.Thread(
-        target=run_company_info_upload_job,
-        args=(job_id,),
-        daemon=True,
+    position = job_queue.enqueue(
+        job_id, run_company_info_upload_job, (job_id,),
     )
-    t.start()
 
-    return {"job_id": job_id, "status": "pending"}
+    return {"job_id": job_id, "status": "queued", "queue_position": position}
 
 
 @app.get("/api/company-info/status")

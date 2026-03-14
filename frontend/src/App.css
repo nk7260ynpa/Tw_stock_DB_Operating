@@ -240,6 +240,11 @@ body {
   color: var(--color-error);
 }
 
+.badge-queued {
+  background: #fffbeb;
+  color: #d97706;
+}
+
 /* Jobs list */
 .jobs-section {
   margin-top: 24px;

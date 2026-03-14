@@ -16,7 +16,7 @@ function YTTranscriptUpload() {
   const [scheduleMsg, setScheduleMsg] = useState('')
 
   const hasRunningJob = jobs.some(
-    (j) => j.status === 'running' || j.status === 'pending'
+    (j) => j.status === 'running' || j.status === 'pending' || j.status === 'queued'
   )
 
   const fetchUploaded = useCallback(async () => {
@@ -113,6 +113,7 @@ function YTTranscriptUpload() {
 
   const statusLabel = {
     pending: '等待中',
+    queued: '排隊中',
     running: '處理中',
     completed: '已完成',
     failed: '失敗',
@@ -144,7 +145,7 @@ function YTTranscriptUpload() {
         {hasRunningJob ? (
           <>
             <span className="spinner" />
-            處理中...
+            任務排隊/執行中...
           </>
         ) : (
           '開始抓取'
@@ -206,6 +207,8 @@ function YTTranscriptUpload() {
                 <span className={`badge badge-${job.status}`}>
                   {job.status === 'running' && <span className="spinner" />}
                   {statusLabel[job.status] || job.status}
+                  {job.queue_position !== undefined && job.status === 'queued' &&
+                    ` (第 ${job.queue_position} 位)`}
                 </span>
               </div>
               {job.error && (
