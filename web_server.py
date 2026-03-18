@@ -36,6 +36,7 @@ from data_upload.ptt_news import PTTNewsUploader
 from data_upload.moneyudn_news import MoneyUDNNewsUploader
 from data_upload.company_info import CompanyInfoUploader
 from data_upload.yt_transcript import YTTranscriptUploader
+from data_upload.oil_price import OilPriceUploader
 from retry_queue import RetryQueue, is_network_error, check_network_available
 from routers import MySQLRouter
 
@@ -99,7 +100,8 @@ def load_config():
     Returns:
         dict: 設定內容，包含 schedule_time、tdcc_schedule、
             ctee_schedule、cnyes_schedule、ptt_schedule、
-            moneyudn_schedule 和 yt_transcript_schedule 欄位。
+            moneyudn_schedule、yt_transcript_schedule
+            和 oil_price_schedule 欄位。
     """
     default = {
         "schedule_time": "20:07",
@@ -109,6 +111,7 @@ def load_config():
         "ptt_schedule": {"time": "22:00"},
         "moneyudn_schedule": {"time": "22:30"},
         "yt_transcript_schedule": {"time": "19:05"},
+        "oil_price_schedule": {"time": "07:00"},
     }
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -138,6 +141,9 @@ def load_config():
         # 向後相容：舊 config 可能沒有 yt_transcript_schedule
         if "yt_transcript_schedule" not in config:
             config["yt_transcript_schedule"] = default["yt_transcript_schedule"]
+        # 向後相容：舊 config 可能沒有 oil_price_schedule
+        if "oil_price_schedule" not in config:
+            config["oil_price_schedule"] = default["oil_price_schedule"]
         return config
     return default
 
@@ -155,9 +161,9 @@ def save_config(config):
 def setup_schedule(
     schedule_time, tdcc_schedule=None, ctee_schedule=None,
     cnyes_schedule=None, ptt_schedule=None, moneyudn_schedule=None,
-    yt_transcript_schedule=None,
+    yt_transcript_schedule=None, oil_price_schedule=None,
 ):
-    """設定每日排程（含 TDCC、CTEE、CNYES、PTT、MoneyUDN、YT 逐字稿每日檢查）。
+    """設定每日排程（含各資料來源每日檢查）。
 
     Args:
         schedule_time (str): 每日資料上傳排程時間，格式為 HH:MM。
@@ -172,6 +178,8 @@ def setup_schedule(
         moneyudn_schedule (dict | None): MoneyUDN 新聞每日排程設定，
             包含 time（HH:MM）。
         yt_transcript_schedule (dict | None): YT 逐字稿每日排程設定，
+            包含 time（HH:MM）。
+        oil_price_schedule (dict | None): 原油價格每日排程設定，
             包含 time（HH:MM）。
     """
     with schedule_lock:
@@ -230,6 +238,13 @@ def setup_schedule(
                 run_yt_transcript_scheduled
             )
             logger.info("YT 逐字稿每日排程已設定為 %s", yt_time)
+
+        if oil_price_schedule:
+            oil_time = oil_price_schedule.get("time", "07:00")
+            schedule_lib.every().day.at(oil_time).do(
+                run_oil_price_scheduled
+            )
+            logger.info("原油價格每日排程已設定為 %s", oil_time)
 
         # 每小時執行重試佇列
         schedule_lib.every(1).hours.do(process_retry_queue)
@@ -348,6 +363,14 @@ def _execute_retry_task(task):
         conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
         uploader = TDCCUploader(conn, CRAWLERHOST)
         uploader.upload()
+        conn.close()
+
+    elif task.task_type == "oil_price":
+        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
+        uploader = OilPriceUploader(conn, CRAWLERHOST)
+        date = task.params.get("date")
+        if date:
+            uploader.upload(date)
         conn.close()
 
     else:
@@ -1093,6 +1116,101 @@ def run_yt_transcript_upload_job(job_id, date):
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
 
 
+def run_oil_price_scheduled():
+    """排程觸發的原油價格上傳（過去 7 天補抓）。"""
+    job_id = str(uuid.uuid4())[:8]
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # 補抓過去 7 天（美國市場可能有延遲）
+    start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    with jobs_lock:
+        upload_jobs[job_id] = {
+            "job_id": job_id,
+            "type": "oil_price",
+            "status": "queued",
+            "start_date": start_date,
+            "end_date": today,
+            "date": today,
+            "record_count": 0,
+            "errors": [],
+            "created_at": datetime.now().isoformat(),
+            "finished_at": None,
+            "scheduled": True,
+        }
+
+    job_queue.enqueue(
+        job_id, run_oil_price_upload_job,
+        (job_id, start_date, today),
+    )
+    logger.info("原油價格排程任務已建立 %s（%s ~ %s）", job_id, start_date, today)
+
+
+def run_oil_price_upload_job(job_id, start_date, end_date):
+    """執行原油價格上傳任務（背景執行緒）。
+
+    支援日期範圍上傳，依序處理每一天的資料。
+
+    Args:
+        job_id (str): 任務 ID。
+        start_date (str): 起始日期（YYYY-MM-DD）。
+        end_date (str): 結束日期（YYYY-MM-DD）。
+    """
+    with jobs_lock:
+        upload_jobs[job_id]["status"] = "running"
+
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
+        uploader = OilPriceUploader(conn, CRAWLERHOST)
+
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+
+        total_records = 0
+        current = start_dt
+
+        while current <= end_dt:
+            date_str = current.strftime("%Y-%m-%d")
+            with jobs_lock:
+                upload_jobs[job_id]["date"] = date_str
+
+            result = uploader.upload(date_str)
+            total_records += result["record_count"]
+            current += timedelta(days=1)
+
+        conn.close()
+
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "completed"
+            upload_jobs[job_id]["record_count"] = total_records
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        logger.info(
+            "原油價格任務完成 %s（共 %d 筆）",
+            job_id, total_records,
+        )
+
+    except NetworkError as e:
+        logger.warning("原油價格任務網路失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        if retry_queue is not None:
+            retry_queue.add(
+                "oil_price",
+                {"date": upload_jobs[job_id].get("date", end_date)},
+                str(e),
+                created_by_job_id=job_id,
+            )
+
+    except Exception as e:
+        logger.error("原油價格任務失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+
 # Pydantic 請求模型
 class UploadRequest(BaseModel):
     """手動上傳請求。"""
@@ -1171,6 +1289,17 @@ class YTTranscriptScheduleRequest(BaseModel):
     time: str
 
 
+class OilPriceUploadRequest(BaseModel):
+    """原油價格上傳請求。"""
+    start_date: str
+    end_date: str
+
+
+class OilPriceScheduleRequest(BaseModel):
+    """原油價格每日排程更新請求。"""
+    time: str
+
+
 # FastAPI 應用
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1196,6 +1325,7 @@ async def lifespan(app: FastAPI):
         config.get("ptt_schedule"),
         config.get("moneyudn_schedule"),
         config.get("yt_transcript_schedule"),
+        config.get("oil_price_schedule"),
     )
 
     t = threading.Thread(target=scheduler_thread, daemon=True)
@@ -1329,6 +1459,7 @@ def update_schedule(req: ScheduleRequest):
         config.get("ptt_schedule"),
         config.get("moneyudn_schedule"),
         config.get("yt_transcript_schedule"),
+        config.get("oil_price_schedule"),
     )
 
     logger.info("排程時間已更新為 %s", req.time)
@@ -1543,6 +1674,7 @@ def update_tdcc_schedule(req: TDCCScheduleRequest):
         config.get("ptt_schedule"),
         config.get("moneyudn_schedule"),
         config.get("yt_transcript_schedule"),
+        config.get("oil_price_schedule"),
     )
 
     logger.info("TDCC 每日排程已更新為 %s", req.time)
@@ -1665,6 +1797,7 @@ def update_ctee_news_schedule(req: CTEENewsScheduleRequest):
         config.get("ptt_schedule"),
         config.get("moneyudn_schedule"),
         config.get("yt_transcript_schedule"),
+        config.get("oil_price_schedule"),
     )
 
     logger.info("CTEE 新聞每日排程已更新為 %s", req.time)
@@ -1787,6 +1920,7 @@ def update_cnyes_news_schedule(req: CNYESNewsScheduleRequest):
         config.get("ptt_schedule"),
         config.get("moneyudn_schedule"),
         config.get("yt_transcript_schedule"),
+        config.get("oil_price_schedule"),
     )
 
     logger.info("CNYES 新聞每日排程已更新為 %s", req.time)
@@ -1909,6 +2043,7 @@ def update_ptt_news_schedule(req: PTTNewsScheduleRequest):
         config["ptt_schedule"],
         config.get("moneyudn_schedule"),
         config.get("yt_transcript_schedule"),
+        config.get("oil_price_schedule"),
     )
 
     logger.info("PTT 新聞每日排程已更新為 %s", req.time)
@@ -2031,6 +2166,7 @@ def update_moneyudn_news_schedule(req: MoneyUDNNewsScheduleRequest):
         config.get("ptt_schedule"),
         config["moneyudn_schedule"],
         config.get("yt_transcript_schedule"),
+        config.get("oil_price_schedule"),
     )
 
     logger.info("MoneyUDN 新聞每日排程已更新為 %s", req.time)
@@ -2141,6 +2277,7 @@ def update_yt_transcript_schedule(req: YTTranscriptScheduleRequest):
         config.get("ptt_schedule"),
         config.get("moneyudn_schedule"),
         config["yt_transcript_schedule"],
+        config.get("oil_price_schedule"),
     )
 
     logger.info("YT 逐字稿每日排程已更新為 %s", req.time)
@@ -2189,6 +2326,128 @@ def get_yt_transcript_status(
     except Exception as e:
         logger.error("查詢 YT 逐字稿狀態失敗: %s", e)
         return {"exists": False}
+
+
+# 原油價格 API 端點
+@app.post("/api/oil-price/upload")
+def create_oil_price_upload(req: OilPriceUploadRequest):
+    """建立原油價格上傳任務。
+
+    Args:
+        req: 包含起始日期與結束日期的請求。
+
+    Returns:
+        dict: 任務 ID 與初始狀態。
+    """
+    # 驗證日期格式
+    try:
+        start = datetime.strptime(req.start_date, "%Y-%m-%d")
+        end = datetime.strptime(req.end_date, "%Y-%m-%d")
+        if end < start:
+            raise HTTPException(400, "結束日期不能早於起始日期")
+    except ValueError:
+        raise HTTPException(400, "日期格式錯誤，請使用 YYYY-MM-DD")
+
+    job_id = str(uuid.uuid4())[:8]
+
+    with jobs_lock:
+        upload_jobs[job_id] = {
+            "job_id": job_id,
+            "type": "oil_price",
+            "status": "queued",
+            "start_date": req.start_date,
+            "end_date": req.end_date,
+            "date": req.start_date,
+            "record_count": 0,
+            "errors": [],
+            "created_at": datetime.now().isoformat(),
+            "finished_at": None,
+        }
+
+    position = job_queue.enqueue(
+        job_id, run_oil_price_upload_job,
+        (job_id, req.start_date, req.end_date),
+    )
+
+    return {"job_id": job_id, "status": "queued", "queue_position": position}
+
+
+@app.get("/api/oil-price/uploaded")
+def list_uploaded_oil_price():
+    """列出已上傳的原油價格日期。
+
+    Returns:
+        dict: 包含 uploaded 欄位的已上傳日期清單（最近 50 筆）。
+    """
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
+
+        rows = conn.execute(
+            text(
+                "SELECT Date FROM OilPriceUploaded "
+                "ORDER BY Date DESC LIMIT 50"
+            )
+        ).fetchall()
+        conn.close()
+
+        uploaded = [str(row[0]) for row in rows]
+        return {"uploaded": uploaded}
+
+    except Exception as e:
+        logger.error("查詢已上傳原油價格日期失敗：%s", e)
+        return {"uploaded": []}
+
+
+@app.get("/api/oil-price/schedule")
+def get_oil_price_schedule():
+    """取得原油價格每日排程設定。
+
+    Returns:
+        dict: 包含 time 欄位的排程資訊。
+    """
+    config = load_config()
+    oil = config.get("oil_price_schedule", {"time": "07:00"})
+    return {"time": oil["time"]}
+
+
+@app.put("/api/oil-price/schedule")
+def update_oil_price_schedule(req: OilPriceScheduleRequest):
+    """更新原油價格每日排程設定。
+
+    Args:
+        req: 包含 time 的請求。
+
+    Returns:
+        dict: 更新後的排程設定與訊息。
+    """
+    try:
+        time_parts = req.time.split(":")
+        hour = int(time_parts[0])
+        minute = int(time_parts[1])
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError
+    except (ValueError, IndexError):
+        raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
+
+    config = load_config()
+    config["oil_price_schedule"] = {"time": req.time}
+    save_config(config)
+    setup_schedule(
+        config["schedule_time"],
+        config.get("tdcc_schedule"),
+        config.get("ctee_schedule"),
+        config.get("cnyes_schedule"),
+        config.get("ptt_schedule"),
+        config.get("moneyudn_schedule"),
+        config.get("yt_transcript_schedule"),
+        config["oil_price_schedule"],
+    )
+
+    logger.info("原油價格每日排程已更新為 %s", req.time)
+    return {
+        "time": req.time,
+        "message": f"原油價格每日排程已更新為 {req.time}",
+    }
 
 
 # 公司產業對照 API 端點

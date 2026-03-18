@@ -9,6 +9,7 @@ import MoneyUDNNewsUpload from './components/MoneyUDNNewsUpload'
 import CompanyInfoUpload from './components/CompanyInfoUpload'
 import RetryQueue from './components/RetryQueue'
 import YTTranscriptUpload from './components/YTTranscriptUpload'
+import OilPriceUpload from './components/OilPriceUpload'
 
 function App() {
   return (
@@ -30,6 +31,7 @@ function App() {
           <PTTNewsUpload />
           <MoneyUDNNewsUpload />
           <YTTranscriptUpload />
+          <OilPriceUpload />
         </div>
       </main>
     </div>
