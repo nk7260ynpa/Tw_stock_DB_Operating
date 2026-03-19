@@ -17,6 +17,9 @@
 - **公司產業對照**：從爬蟲取得 TWSE/TPEX 公司基本資料與產業對照表，寫入 TWSE 資料庫（`data_upload/company_info.py`）
 - **YT 逐字稿**：從「游庭皓的財經皓角」YouTube 頻道取得直播影片，透過 yt-dlp 下載自動字幕並解析為 Markdown 逐字稿，metadata 存入 MySQL，全文存為 md 檔（`data_upload/yt_transcript.py`）
 - **原油價格**：從爬蟲取得國際原油價格（WTI/Brent），metadata 存入 SPECIAL_INFO 資料庫的 OilPrice 表（`data_upload/oil_price.py`）
+- **黃金價格**：從爬蟲取得國際黃金期貨價格，metadata 存入 SPECIAL_INFO 資料庫的 GoldPrice 表（`data_upload/gold_price.py`）
+- **比特幣價格**：從爬蟲取得比特幣價格，metadata 存入 SPECIAL_INFO 資料庫的 BitcoinPrice 表（`data_upload/bitcoin_price.py`）
+- **匯率**：從爬蟲取得匯率資料（USDTWD/JPYTWD），metadata 存入 SPECIAL_INFO 資料庫的 CurrencyPrice 表（`data_upload/currency_price.py`）
 - **網路失敗重試佇列**：排程任務因網路中斷失敗時自動加入重試佇列，每小時檢查網路並重試，最多 5 次（`retry_queue.py`）
 
 ## 支援的資料來源
@@ -37,6 +40,9 @@
 | CompanyInfo | 公司產業對照（存放於 TWSE 資料庫的 CompanyInfo 和 IndustryMap 表） |
 | YT Transcript | YouTube 逐字稿（metadata 存於 NEWS.YTTranscript，全文存為 md 檔） |
 | OilPrice | 國際原油價格（WTI/Brent，存放於 SPECIAL_INFO 資料庫的 OilPrice 表） |
+| GoldPrice | 國際黃金期貨價格（存放於 SPECIAL_INFO 資料庫的 GoldPrice 表） |
+| BitcoinPrice | 比特幣價格（存放於 SPECIAL_INFO 資料庫的 BitcoinPrice 表） |
+| CurrencyPrice | 匯率資料（USDTWD/JPYTWD，存放於 SPECIAL_INFO 資料庫的 CurrencyPrice 表） |
 
 ## 專案結構
 
@@ -68,7 +74,10 @@ Tw_stock_DB_Operating/
 │   ├── moneyudn_news.py     # MoneyUDN 經濟日報新聞
 │   ├── company_info.py      # 公司產業對照
 │   ├── yt_transcript.py     # YouTube 逐字稿（yt-dlp 自動字幕）
-│   └── oil_price.py         # 國際原油價格（WTI/Brent）
+│   ├── oil_price.py         # 國際原油價格（WTI/Brent）
+│   ├── gold_price.py        # 國際黃金期貨價格
+│   ├── bitcoin_price.py     # 比特幣價格
+│   └── currency_price.py    # 匯率資料（USDTWD/JPYTWD）
 ├── frontend/                 # React 前端原始碼（Vite）
 │   ├── package.json
 │   ├── vite.config.js
@@ -123,6 +132,12 @@ Tw_stock_DB_Operating/
 │   ├── test_web_server_yt_transcript.py
 │   ├── test_oil_price.py
 │   ├── test_web_server_oil_price.py
+│   ├── test_gold_price.py
+│   ├── test_web_server_gold_price.py
+│   ├── test_bitcoin_price.py
+│   ├── test_web_server_bitcoin_price.py
+│   ├── test_currency_price.py
+│   ├── test_web_server_currency_price.py
 │   ├── test_retry_queue.py
 │   └── test_job_queue.py
 └── logs/                     # 日誌資料夾
@@ -159,7 +174,7 @@ docker run -d --name tw_stock_db_operating \
   --network db_network \
   -p 8080:8080 \
   -v $(pwd)/logs:/workspace/logs \
-  nk7260ynpa/tw_stock_db_operating:2.4.0
+  nk7260ynpa/tw_stock_db_operating:2.5.0
 ```
 
 ### 4. 使用 docker-compose 啟動服務
@@ -171,7 +186,7 @@ docker compose -f docker/docker-compose.yaml up -d
 ### 5. 執行單元測試
 
 ```bash
-docker run --rm nk7260ynpa/tw_stock_db_operating:2.4.0 python -m pytest test/
+docker run --rm nk7260ynpa/tw_stock_db_operating:2.5.0 python -m pytest test/
 ```
 
 ## 命令列參數（upload.py）
@@ -201,6 +216,9 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:2.4.0 python -m pytest test/
 - **公司產業對照**：一鍵從爬蟲取得最新 TWSE/TPEX 公司基本資料與產業對照表，寫入 TWSE 資料庫
 - **YT 逐字稿**：選擇日期抓取「游庭皓的財經皓角」YouTube 直播影片逐字稿（透過 yt-dlp 下載自動字幕），metadata 寫入 MySQL，全文存為 md 檔，每日排程自動抓取當日逐字稿
 - **原油價格**：選擇日期範圍上傳國際原油價格（WTI/Brent），資料寫入 SPECIAL_INFO 資料庫，每日排程 07:00 自動抓取（美國市場收盤後台灣早上資料已可取得）
+- **黃金價格**：選擇日期範圍上傳國際黃金期貨價格，資料寫入 SPECIAL_INFO 資料庫，每日排程 07:05 自動抓取
+- **比特幣價格**：選擇日期範圍上傳比特幣價格，資料寫入 SPECIAL_INFO 資料庫，每日排程 07:10 自動抓取
+- **匯率**：選擇日期範圍上傳匯率資料（USDTWD/JPYTWD），資料寫入 SPECIAL_INFO 資料庫，每日排程 07:15 自動抓取
 - **重試佇列**：檢視因網路失敗而進入重試佇列的任務，可手動觸發重試、重設已耗盡任務、清除已完成任務
 - **任務佇列**：所有上傳任務透過 FIFO 佇列管理，同一時間只執行一個任務，其餘排隊等待，前端顯示排隊位置
 

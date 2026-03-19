@@ -11,7 +11,7 @@ services:
       - db_network
 
   tw_stocker_daily_upload:
-    image: nk7260ynpa/tw_stock_db_operating:2.4.0
+    image: nk7260ynpa/tw_stock_db_operating:2.5.0
     container_name: tw_stocker_daily_upload
     ports:
       - "8080:8080"
