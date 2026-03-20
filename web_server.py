@@ -40,6 +40,7 @@ from data_upload.oil_price import OilPriceUploader
 from data_upload.gold_price import GoldPriceUploader
 from data_upload.bitcoin_price import BitcoinPriceUploader
 from data_upload.currency_price import CurrencyPriceUploader
+from data_upload.indices_price import IndicesPriceUploader
 from retry_queue import RetryQueue, is_network_error, check_network_available
 from routers import MySQLRouter
 
@@ -105,7 +106,8 @@ def load_config():
             ctee_schedule、cnyes_schedule、ptt_schedule、
             moneyudn_schedule、yt_transcript_schedule、
             oil_price_schedule、gold_price_schedule、
-            bitcoin_price_schedule 和 currency_price_schedule 欄位。
+            bitcoin_price_schedule、currency_price_schedule
+            和 indices_price_schedule 欄位。
     """
     default = {
         "schedule_time": "20:07",
@@ -119,6 +121,7 @@ def load_config():
         "gold_price_schedule": {"time": "07:05"},
         "bitcoin_price_schedule": {"time": "07:10"},
         "currency_price_schedule": {"time": "07:15"},
+        "indices_price_schedule": {"time": "07:20"},
     }
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -160,6 +163,9 @@ def load_config():
         # 向後相容：舊 config 可能沒有 currency_price_schedule
         if "currency_price_schedule" not in config:
             config["currency_price_schedule"] = default["currency_price_schedule"]
+        # 向後相容：舊 config 可能沒有 indices_price_schedule
+        if "indices_price_schedule" not in config:
+            config["indices_price_schedule"] = default["indices_price_schedule"]
         return config
     return default
 
@@ -179,7 +185,7 @@ def setup_schedule(
     cnyes_schedule=None, ptt_schedule=None, moneyudn_schedule=None,
     yt_transcript_schedule=None, oil_price_schedule=None,
     gold_price_schedule=None, bitcoin_price_schedule=None,
-    currency_price_schedule=None,
+    currency_price_schedule=None, indices_price_schedule=None,
 ):
     """設定每日排程（含各資料來源每日檢查）。
 
@@ -204,6 +210,8 @@ def setup_schedule(
         bitcoin_price_schedule (dict | None): 比特幣價格每日排程設定，
             包含 time（HH:MM）。
         currency_price_schedule (dict | None): 匯率每日排程設定，
+            包含 time（HH:MM）。
+        indices_price_schedule (dict | None): 股市指數價格每日排程設定，
             包含 time（HH:MM）。
     """
     with schedule_lock:
@@ -290,6 +298,13 @@ def setup_schedule(
                 run_currency_price_scheduled
             )
             logger.info("匯率每日排程已設定為 %s", currency_time)
+
+        if indices_price_schedule:
+            indices_time = indices_price_schedule.get("time", "07:20")
+            schedule_lib.every().day.at(indices_time).do(
+                run_indices_price_scheduled
+            )
+            logger.info("股市指數價格每日排程已設定為 %s", indices_time)
 
         # 每小時執行重試佇列
         schedule_lib.every(1).hours.do(process_retry_queue)
@@ -437,6 +452,14 @@ def _execute_retry_task(task):
     elif task.task_type == "currency_price":
         conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
         uploader = CurrencyPriceUploader(conn, CRAWLERHOST)
+        date = task.params.get("date")
+        if date:
+            uploader.upload(date)
+        conn.close()
+
+    elif task.task_type == "indices_price":
+        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
+        uploader = IndicesPriceUploader(conn, CRAWLERHOST)
         date = task.params.get("date")
         if date:
             uploader.upload(date)
@@ -1571,6 +1594,104 @@ def run_currency_price_upload_job(job_id, start_date, end_date):
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
 
 
+def run_indices_price_scheduled():
+    """排程觸發的股市指數價格上傳（過去 7 天補抓）。"""
+    job_id = str(uuid.uuid4())[:8]
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # 補抓過去 7 天（美國市場可能有延遲）
+    start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    with jobs_lock:
+        upload_jobs[job_id] = {
+            "job_id": job_id,
+            "type": "indices_price",
+            "status": "queued",
+            "start_date": start_date,
+            "end_date": today,
+            "date": today,
+            "record_count": 0,
+            "errors": [],
+            "created_at": datetime.now().isoformat(),
+            "finished_at": None,
+            "scheduled": True,
+        }
+
+    job_queue.enqueue(
+        job_id, run_indices_price_upload_job,
+        (job_id, start_date, today),
+    )
+    logger.info(
+        "股市指數價格排程任務已建立 %s（%s ~ %s）",
+        job_id, start_date, today,
+    )
+
+
+def run_indices_price_upload_job(job_id, start_date, end_date):
+    """執行股市指數價格上傳任務（背景執行緒）。
+
+    支援日期範圍上傳，依序處理每一天的資料。
+
+    Args:
+        job_id (str): 任務 ID。
+        start_date (str): 起始日期（YYYY-MM-DD）。
+        end_date (str): 結束日期（YYYY-MM-DD）。
+    """
+    with jobs_lock:
+        upload_jobs[job_id]["status"] = "running"
+
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
+        uploader = IndicesPriceUploader(conn, CRAWLERHOST)
+
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+
+        total_records = 0
+        current = start_dt
+
+        while current <= end_dt:
+            date_str = current.strftime("%Y-%m-%d")
+            with jobs_lock:
+                upload_jobs[job_id]["date"] = date_str
+
+            result = uploader.upload(date_str)
+            total_records += result["record_count"]
+            current += timedelta(days=1)
+
+        conn.close()
+
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "completed"
+            upload_jobs[job_id]["record_count"] = total_records
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        logger.info(
+            "股市指數價格任務完成 %s（共 %d 筆）",
+            job_id, total_records,
+        )
+
+    except NetworkError as e:
+        logger.warning("股市指數價格任務網路失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        if retry_queue is not None:
+            retry_queue.add(
+                "indices_price",
+                {"date": upload_jobs[job_id].get("date", end_date)},
+                str(e),
+                created_by_job_id=job_id,
+            )
+
+    except Exception as e:
+        logger.error("股市指數價格任務失敗 %s: %s", job_id, e)
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+
 # Pydantic 請求模型
 class UploadRequest(BaseModel):
     """手動上傳請求。"""
@@ -1693,6 +1814,17 @@ class CurrencyPriceScheduleRequest(BaseModel):
     time: str
 
 
+class IndicesPriceUploadRequest(BaseModel):
+    """股市指數價格上傳請求。"""
+    start_date: str
+    end_date: str
+
+
+class IndicesPriceScheduleRequest(BaseModel):
+    """股市指數價格每日排程更新請求。"""
+    time: str
+
+
 # FastAPI 應用
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1722,6 +1854,7 @@ async def lifespan(app: FastAPI):
         config.get("gold_price_schedule"),
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
+        config.get("indices_price_schedule"),
     )
 
     t = threading.Thread(target=scheduler_thread, daemon=True)
@@ -1859,6 +1992,7 @@ def update_schedule(req: ScheduleRequest):
         config.get("gold_price_schedule"),
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
+        config.get("indices_price_schedule"),
     )
 
     logger.info("排程時間已更新為 %s", req.time)
@@ -2077,6 +2211,7 @@ def update_tdcc_schedule(req: TDCCScheduleRequest):
         config.get("gold_price_schedule"),
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
+        config.get("indices_price_schedule"),
     )
 
     logger.info("TDCC 每日排程已更新為 %s", req.time)
@@ -2203,6 +2338,7 @@ def update_ctee_news_schedule(req: CTEENewsScheduleRequest):
         config.get("gold_price_schedule"),
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
+        config.get("indices_price_schedule"),
     )
 
     logger.info("CTEE 新聞每日排程已更新為 %s", req.time)
@@ -2329,6 +2465,7 @@ def update_cnyes_news_schedule(req: CNYESNewsScheduleRequest):
         config.get("gold_price_schedule"),
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
+        config.get("indices_price_schedule"),
     )
 
     logger.info("CNYES 新聞每日排程已更新為 %s", req.time)
@@ -2455,6 +2592,7 @@ def update_ptt_news_schedule(req: PTTNewsScheduleRequest):
         config.get("gold_price_schedule"),
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
+        config.get("indices_price_schedule"),
     )
 
     logger.info("PTT 新聞每日排程已更新為 %s", req.time)
@@ -2581,6 +2719,7 @@ def update_moneyudn_news_schedule(req: MoneyUDNNewsScheduleRequest):
         config.get("gold_price_schedule"),
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
+        config.get("indices_price_schedule"),
     )
 
     logger.info("MoneyUDN 新聞每日排程已更新為 %s", req.time)
@@ -2695,6 +2834,7 @@ def update_yt_transcript_schedule(req: YTTranscriptScheduleRequest):
         config.get("gold_price_schedule"),
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
+        config.get("indices_price_schedule"),
     )
 
     logger.info("YT 逐字稿每日排程已更新為 %s", req.time)
@@ -2861,6 +3001,7 @@ def update_oil_price_schedule(req: OilPriceScheduleRequest):
         config.get("gold_price_schedule"),
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
+        config.get("indices_price_schedule"),
     )
 
     logger.info("原油價格每日排程已更新為 %s", req.time)
@@ -2986,6 +3127,7 @@ def update_gold_price_schedule(req: GoldPriceScheduleRequest):
         config["gold_price_schedule"],
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
+        config.get("indices_price_schedule"),
     )
 
     logger.info("黃金價格每日排程已更新為 %s", req.time)
@@ -3111,6 +3253,7 @@ def update_bitcoin_price_schedule(req: BitcoinPriceScheduleRequest):
         config.get("gold_price_schedule"),
         config["bitcoin_price_schedule"],
         config.get("currency_price_schedule"),
+        config.get("indices_price_schedule"),
     )
 
     logger.info("比特幣價格每日排程已更新為 %s", req.time)
@@ -3236,12 +3379,139 @@ def update_currency_price_schedule(req: CurrencyPriceScheduleRequest):
         config.get("gold_price_schedule"),
         config.get("bitcoin_price_schedule"),
         config["currency_price_schedule"],
+        config.get("indices_price_schedule"),
     )
 
     logger.info("匯率每日排程已更新為 %s", req.time)
     return {
         "time": req.time,
         "message": f"匯率每日排程已更新為 {req.time}",
+    }
+
+
+# 股市指數價格 API 端點
+@app.post("/api/indices-price/upload")
+def create_indices_price_upload(req: IndicesPriceUploadRequest):
+    """建立股市指數價格上傳任務。
+
+    Args:
+        req: 包含起始日期與結束日期的請求。
+
+    Returns:
+        dict: 任務 ID 與初始狀態。
+    """
+    # 驗證日期格式
+    try:
+        start = datetime.strptime(req.start_date, "%Y-%m-%d")
+        end = datetime.strptime(req.end_date, "%Y-%m-%d")
+        if end < start:
+            raise HTTPException(400, "結束日期不能早於起始日期")
+    except ValueError:
+        raise HTTPException(400, "日期格式錯誤，請使用 YYYY-MM-DD")
+
+    job_id = str(uuid.uuid4())[:8]
+
+    with jobs_lock:
+        upload_jobs[job_id] = {
+            "job_id": job_id,
+            "type": "indices_price",
+            "status": "queued",
+            "start_date": req.start_date,
+            "end_date": req.end_date,
+            "date": req.start_date,
+            "record_count": 0,
+            "errors": [],
+            "created_at": datetime.now().isoformat(),
+            "finished_at": None,
+        }
+
+    position = job_queue.enqueue(
+        job_id, run_indices_price_upload_job,
+        (job_id, req.start_date, req.end_date),
+    )
+
+    return {"job_id": job_id, "status": "queued", "queue_position": position}
+
+
+@app.get("/api/indices-price/uploaded")
+def list_uploaded_indices_price():
+    """列出已上傳的股市指數價格日期。
+
+    Returns:
+        dict: 包含 uploaded 欄位的已上傳日期清單（最近 50 筆）。
+    """
+    try:
+        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
+
+        rows = conn.execute(
+            text(
+                "SELECT Date FROM IndicesPriceUploaded "
+                "ORDER BY Date DESC LIMIT 50"
+            )
+        ).fetchall()
+        conn.close()
+
+        uploaded = [str(row[0]) for row in rows]
+        return {"uploaded": uploaded}
+
+    except Exception as e:
+        logger.error("查詢已上傳股市指數價格日期失敗：%s", e)
+        return {"uploaded": []}
+
+
+@app.get("/api/indices-price/schedule")
+def get_indices_price_schedule():
+    """取得股市指數價格每日排程設定。
+
+    Returns:
+        dict: 包含 time 欄位的排程資訊。
+    """
+    config = load_config()
+    indices = config.get("indices_price_schedule", {"time": "07:20"})
+    return {"time": indices["time"]}
+
+
+@app.put("/api/indices-price/schedule")
+def update_indices_price_schedule(req: IndicesPriceScheduleRequest):
+    """更新股市指數價格每日排程設定。
+
+    Args:
+        req: 包含 time 的請求。
+
+    Returns:
+        dict: 更新後的排程設定與訊息。
+    """
+    try:
+        time_parts = req.time.split(":")
+        hour = int(time_parts[0])
+        minute = int(time_parts[1])
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError
+    except (ValueError, IndexError):
+        raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
+
+    config = load_config()
+    config["indices_price_schedule"] = {"time": req.time}
+    save_config(config)
+    setup_schedule(
+        config["schedule_time"],
+        config.get("tdcc_schedule"),
+        config.get("ctee_schedule"),
+        config.get("cnyes_schedule"),
+        config.get("ptt_schedule"),
+        config.get("moneyudn_schedule"),
+        config.get("yt_transcript_schedule"),
+        config.get("oil_price_schedule"),
+        config.get("gold_price_schedule"),
+        config.get("bitcoin_price_schedule"),
+        config.get("currency_price_schedule"),
+        config["indices_price_schedule"],
+    )
+
+    logger.info("股市指數價格每日排程已更新為 %s", req.time)
+    return {
+        "time": req.time,
+        "message": f"股市指數價格每日排程已更新為 {req.time}",
     }
 
 

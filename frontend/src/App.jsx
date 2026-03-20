@@ -10,6 +10,7 @@ import CompanyInfoUpload from './components/CompanyInfoUpload'
 import RetryQueue from './components/RetryQueue'
 import YTTranscriptUpload from './components/YTTranscriptUpload'
 import OilPriceUpload from './components/OilPriceUpload'
+import IndicesPriceUpload from './components/IndicesPriceUpload'
 
 function App() {
   return (
@@ -32,6 +33,7 @@ function App() {
           <MoneyUDNNewsUpload />
           <YTTranscriptUpload />
           <OilPriceUpload />
+          <IndicesPriceUpload />
         </div>
       </main>
     </div>
