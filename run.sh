@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE_NAME="nk7260ynpa/tw_stock_db_operating"
-IMAGE_TAG="2.7.0"
+IMAGE_TAG="2.6.0"
 CONTAINER_NAME="tw_stock_db_operating"
 LOG_DIR="${SCRIPT_DIR}/logs"
 
@@ -27,24 +27,15 @@ fi
 
 echo "啟動 Docker container: ${CONTAINER_NAME}"
 
-# NewsContents 目錄用於存放新聞全文
+# NewsContents 目錄用於存放 CTEE 新聞全文
 NEWS_CONTENTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)/Tw_stock_DB/NewsContents"
 mkdir -p "${NEWS_CONTENTS_DIR}"
-
-# AI 摘要輸出目錄
-YT_NEWS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)/Tw_stock_news/YTNews"
-DAILY_NEWS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)/Tw_stock_news/DailyNews"
-mkdir -p "${YT_NEWS_DIR}"
-mkdir -p "${DAILY_NEWS_DIR}"
 
 docker run -d \
   --name "${CONTAINER_NAME}" \
   --network db_network \
   --restart always \
   -p 8080:8080 \
-  -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \
   -v "${LOG_DIR}:/workspace/logs" \
   -v "${NEWS_CONTENTS_DIR}:/workspace/NewsContents" \
-  -v "${YT_NEWS_DIR}:/workspace/YTNews" \
-  -v "${DAILY_NEWS_DIR}:/workspace/DailyNews" \
   "${IMAGE_NAME}:${IMAGE_TAG}"

@@ -41,8 +41,6 @@ from data_upload.gold_price import GoldPriceUploader
 from data_upload.bitcoin_price import BitcoinPriceUploader
 from data_upload.currency_price import CurrencyPriceUploader
 from data_upload.indices_price import IndicesPriceUploader
-from ai_summary.yt_summary import YTSummaryGenerator
-from ai_summary.news_summary import NewsSummaryGenerator
 from retry_queue import RetryQueue, is_network_error, check_network_available
 from routers import MySQLRouter
 
@@ -108,9 +106,8 @@ def load_config():
             ctee_schedule、cnyes_schedule、ptt_schedule、
             moneyudn_schedule、yt_transcript_schedule、
             oil_price_schedule、gold_price_schedule、
-            bitcoin_price_schedule、currency_price_schedule、
-            indices_price_schedule、yt_summary_schedule
-            和 news_summary_schedule 欄位。
+            bitcoin_price_schedule、currency_price_schedule
+            和 indices_price_schedule 欄位。
     """
     default = {
         "schedule_time": "20:07",
@@ -125,8 +122,6 @@ def load_config():
         "bitcoin_price_schedule": {"time": "07:10"},
         "currency_price_schedule": {"time": "07:15"},
         "indices_price_schedule": {"time": "07:20"},
-        "yt_summary_schedule": {"time": "19:15"},
-        "news_summary_schedule": {"time": "20:03"},
     }
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -171,12 +166,6 @@ def load_config():
         # 向後相容：舊 config 可能沒有 indices_price_schedule
         if "indices_price_schedule" not in config:
             config["indices_price_schedule"] = default["indices_price_schedule"]
-        # 向後相容：舊 config 可能沒有 yt_summary_schedule
-        if "yt_summary_schedule" not in config:
-            config["yt_summary_schedule"] = default["yt_summary_schedule"]
-        # 向後相容：舊 config 可能沒有 news_summary_schedule
-        if "news_summary_schedule" not in config:
-            config["news_summary_schedule"] = default["news_summary_schedule"]
         return config
     return default
 
@@ -197,7 +186,6 @@ def setup_schedule(
     yt_transcript_schedule=None, oil_price_schedule=None,
     gold_price_schedule=None, bitcoin_price_schedule=None,
     currency_price_schedule=None, indices_price_schedule=None,
-    yt_summary_schedule=None, news_summary_schedule=None,
 ):
     """設定每日排程（含各資料來源每日檢查）。
 
@@ -224,10 +212,6 @@ def setup_schedule(
         currency_price_schedule (dict | None): 匯率每日排程設定，
             包含 time（HH:MM）。
         indices_price_schedule (dict | None): 股市指數價格每日排程設定，
-            包含 time（HH:MM）。
-        yt_summary_schedule (dict | None): YT 精華摘要每日排程設定，
-            包含 time（HH:MM）。
-        news_summary_schedule (dict | None): 每日新聞摘要排程設定，
             包含 time（HH:MM）。
     """
     with schedule_lock:
@@ -321,20 +305,6 @@ def setup_schedule(
                 run_indices_price_scheduled
             )
             logger.info("股市指數價格每日排程已設定為 %s", indices_time)
-
-        if yt_summary_schedule:
-            yt_sum_time = yt_summary_schedule.get("time", "19:15")
-            schedule_lib.every().day.at(yt_sum_time).do(
-                run_yt_summary_scheduled
-            )
-            logger.info("YT 精華摘要每日排程已設定為 %s", yt_sum_time)
-
-        if news_summary_schedule:
-            news_sum_time = news_summary_schedule.get("time", "20:03")
-            schedule_lib.every().day.at(news_sum_time).do(
-                run_news_summary_scheduled
-            )
-            logger.info("每日新聞摘要每日排程已設定為 %s", news_sum_time)
 
         # 每小時執行重試佇列
         schedule_lib.every(1).hours.do(process_retry_queue)
@@ -1722,108 +1692,6 @@ def run_indices_price_upload_job(job_id, start_date, end_date):
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
 
 
-def run_yt_summary_scheduled():
-    """排程觸發的 YT 精華摘要產生。"""
-    today = datetime.now().strftime("%Y-%m-%d")
-    job_id = str(uuid.uuid4())[:8]
-    with jobs_lock:
-        upload_jobs[job_id] = {
-            "job_id": job_id,
-            "type": "yt_summary",
-            "status": "queued",
-            "date": today,
-            "errors": [],
-            "created_at": datetime.now().isoformat(),
-            "finished_at": None,
-            "scheduled": True,
-        }
-    job_queue.enqueue(job_id, run_yt_summary_job, (job_id, today))
-    logger.info("YT 精華摘要排程任務已建立 %s", job_id)
-
-
-def run_yt_summary_job(job_id, date):
-    """執行 YT 精華摘要任務（背景執行緒）。
-
-    Args:
-        job_id (str): 任務 ID。
-        date (str): 日期字串（YYYY-MM-DD）。
-    """
-    with jobs_lock:
-        upload_jobs[job_id]["status"] = "running"
-    try:
-        generator = YTSummaryGenerator()
-        result = generator.run(date)
-        with jobs_lock:
-            upload_jobs[job_id]["status"] = (
-                "completed" if result["status"] in ("success", "skipped")
-                else "failed"
-            )
-            if result.get("output_path"):
-                upload_jobs[job_id]["output_path"] = result["output_path"]
-            if result.get("error"):
-                upload_jobs[job_id]["error"] = result["error"]
-            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-        logger.info("YT 精華摘要任務完成 %s (%s)", job_id, result["status"])
-    except Exception as e:
-        logger.error("YT 精華摘要任務失敗 %s: %s", job_id, e)
-        with jobs_lock:
-            upload_jobs[job_id]["status"] = "failed"
-            upload_jobs[job_id]["error"] = str(e)
-            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-
-
-def run_news_summary_scheduled():
-    """排程觸發的每日新聞摘要產生。"""
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    job_id = str(uuid.uuid4())[:8]
-    with jobs_lock:
-        upload_jobs[job_id] = {
-            "job_id": job_id,
-            "type": "news_summary",
-            "status": "queued",
-            "date": yesterday,
-            "errors": [],
-            "created_at": datetime.now().isoformat(),
-            "finished_at": None,
-            "scheduled": True,
-        }
-    job_queue.enqueue(job_id, run_news_summary_job, (job_id, yesterday))
-    logger.info("每日新聞摘要排程任務已建立 %s（date=%s）", job_id, yesterday)
-
-
-def run_news_summary_job(job_id, date):
-    """執行每日新聞摘要任務（背景執行緒）。
-
-    Args:
-        job_id (str): 任務 ID。
-        date (str): 日期字串（YYYY-MM-DD）。
-    """
-    with jobs_lock:
-        upload_jobs[job_id]["status"] = "running"
-    try:
-        generator = NewsSummaryGenerator()
-        result = generator.run(date)
-        with jobs_lock:
-            upload_jobs[job_id]["status"] = (
-                "completed" if result["status"] in ("success", "skipped")
-                else "failed"
-            )
-            if result.get("output_path"):
-                upload_jobs[job_id]["output_path"] = result["output_path"]
-            if result.get("stats"):
-                upload_jobs[job_id]["stats"] = result["stats"]
-            if result.get("error"):
-                upload_jobs[job_id]["error"] = result["error"]
-            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-        logger.info("每日新聞摘要任務完成 %s (%s)", job_id, result["status"])
-    except Exception as e:
-        logger.error("每日新聞摘要任務失敗 %s: %s", job_id, e)
-        with jobs_lock:
-            upload_jobs[job_id]["status"] = "failed"
-            upload_jobs[job_id]["error"] = str(e)
-            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-
-
 # Pydantic 請求模型
 class UploadRequest(BaseModel):
     """手動上傳請求。"""
@@ -1957,26 +1825,6 @@ class IndicesPriceScheduleRequest(BaseModel):
     time: str
 
 
-class YTSummaryGenerateRequest(BaseModel):
-    """YT 精華摘要手動觸發請求。"""
-    date: str
-
-
-class YTSummaryScheduleRequest(BaseModel):
-    """YT 精華摘要排程更新請求。"""
-    time: str
-
-
-class NewsSummaryGenerateRequest(BaseModel):
-    """每日新聞摘要手動觸發請求。"""
-    date: str
-
-
-class NewsSummaryScheduleRequest(BaseModel):
-    """每日新聞摘要排程更新請求。"""
-    time: str
-
-
 # FastAPI 應用
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -2007,8 +1855,6 @@ async def lifespan(app: FastAPI):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
-        config.get("yt_summary_schedule"),
-        config.get("news_summary_schedule"),
     )
 
     t = threading.Thread(target=scheduler_thread, daemon=True)
@@ -2147,8 +1993,6 @@ def update_schedule(req: ScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
-        config.get("yt_summary_schedule"),
-        config.get("news_summary_schedule"),
     )
 
     logger.info("排程時間已更新為 %s", req.time)
@@ -2368,8 +2212,6 @@ def update_tdcc_schedule(req: TDCCScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
-        config.get("yt_summary_schedule"),
-        config.get("news_summary_schedule"),
     )
 
     logger.info("TDCC 每日排程已更新為 %s", req.time)
@@ -2497,8 +2339,6 @@ def update_ctee_news_schedule(req: CTEENewsScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
-        config.get("yt_summary_schedule"),
-        config.get("news_summary_schedule"),
     )
 
     logger.info("CTEE 新聞每日排程已更新為 %s", req.time)
@@ -2626,8 +2466,6 @@ def update_cnyes_news_schedule(req: CNYESNewsScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
-        config.get("yt_summary_schedule"),
-        config.get("news_summary_schedule"),
     )
 
     logger.info("CNYES 新聞每日排程已更新為 %s", req.time)
@@ -2755,8 +2593,6 @@ def update_ptt_news_schedule(req: PTTNewsScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
-        config.get("yt_summary_schedule"),
-        config.get("news_summary_schedule"),
     )
 
     logger.info("PTT 新聞每日排程已更新為 %s", req.time)
@@ -2884,8 +2720,6 @@ def update_moneyudn_news_schedule(req: MoneyUDNNewsScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
-        config.get("yt_summary_schedule"),
-        config.get("news_summary_schedule"),
     )
 
     logger.info("MoneyUDN 新聞每日排程已更新為 %s", req.time)
@@ -3001,8 +2835,6 @@ def update_yt_transcript_schedule(req: YTTranscriptScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
-        config.get("yt_summary_schedule"),
-        config.get("news_summary_schedule"),
     )
 
     logger.info("YT 逐字稿每日排程已更新為 %s", req.time)
@@ -3170,8 +3002,6 @@ def update_oil_price_schedule(req: OilPriceScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
-        config.get("yt_summary_schedule"),
-        config.get("news_summary_schedule"),
     )
 
     logger.info("原油價格每日排程已更新為 %s", req.time)
@@ -3298,8 +3128,6 @@ def update_gold_price_schedule(req: GoldPriceScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
-        config.get("yt_summary_schedule"),
-        config.get("news_summary_schedule"),
     )
 
     logger.info("黃金價格每日排程已更新為 %s", req.time)
@@ -3426,8 +3254,6 @@ def update_bitcoin_price_schedule(req: BitcoinPriceScheduleRequest):
         config["bitcoin_price_schedule"],
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
-        config.get("yt_summary_schedule"),
-        config.get("news_summary_schedule"),
     )
 
     logger.info("比特幣價格每日排程已更新為 %s", req.time)
@@ -3554,8 +3380,6 @@ def update_currency_price_schedule(req: CurrencyPriceScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config["currency_price_schedule"],
         config.get("indices_price_schedule"),
-        config.get("yt_summary_schedule"),
-        config.get("news_summary_schedule"),
     )
 
     logger.info("匯率每日排程已更新為 %s", req.time)
@@ -3682,8 +3506,6 @@ def update_indices_price_schedule(req: IndicesPriceScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config["indices_price_schedule"],
-        config.get("yt_summary_schedule"),
-        config.get("news_summary_schedule"),
     )
 
     logger.info("股市指數價格每日排程已更新為 %s", req.time)
@@ -3831,248 +3653,6 @@ def remove_retry_task(task_id: str):
     if not retry_queue.remove(task_id):
         raise HTTPException(404, "任務不存在")
     return {"message": "任務已移除"}
-
-
-# YT 精華摘要 API 端點
-@app.post("/api/yt-summary/generate")
-def create_yt_summary(req: YTSummaryGenerateRequest):
-    """手動觸發 YT 精華摘要產生。
-
-    Args:
-        req: 包含日期的請求。
-
-    Returns:
-        dict: 任務 ID 與初始狀態。
-    """
-    if not _validate_date_format(req.date):
-        raise HTTPException(400, "日期格式錯誤，請使用 YYYY-MM-DD")
-
-    job_id = str(uuid.uuid4())[:8]
-
-    with jobs_lock:
-        upload_jobs[job_id] = {
-            "job_id": job_id,
-            "type": "yt_summary",
-            "status": "queued",
-            "date": req.date,
-            "errors": [],
-            "created_at": datetime.now().isoformat(),
-            "finished_at": None,
-        }
-
-    position = job_queue.enqueue(
-        job_id, run_yt_summary_job, (job_id, req.date),
-    )
-
-    return {"job_id": job_id, "status": "queued", "queue_position": position}
-
-
-@app.get("/api/yt-summary/generated")
-def list_generated_yt_summary():
-    """列出已產生的 YT 精華摘要日期。
-
-    掃描 /workspace/YTNews/ 目錄下的 .md 檔案，
-    從檔名萃取日期並回傳最近 50 筆。
-
-    Returns:
-        dict: 包含 generated 欄位的日期清單（降冪排序）。
-    """
-    try:
-        yt_news_dir = Path("/workspace/YTNews")
-        if not yt_news_dir.exists():
-            return {"generated": []}
-
-        dates = []
-        for f in yt_news_dir.glob("*.md"):
-            stem = f.stem
-            if re.match(r"^\d{4}-\d{2}-\d{2}$", stem):
-                dates.append(stem)
-
-        dates.sort(reverse=True)
-        return {"generated": dates[:50]}
-
-    except Exception as e:
-        logger.error("掃描 YT 精華摘要目錄失敗：%s", e)
-        return {"generated": []}
-
-
-@app.get("/api/yt-summary/schedule")
-def get_yt_summary_schedule():
-    """取得 YT 精華摘要每日排程設定。
-
-    Returns:
-        dict: 包含 time 欄位的排程資訊。
-    """
-    config = load_config()
-    yt_sum = config.get("yt_summary_schedule", {"time": "19:15"})
-    return {"time": yt_sum["time"]}
-
-
-@app.put("/api/yt-summary/schedule")
-def update_yt_summary_schedule(req: YTSummaryScheduleRequest):
-    """更新 YT 精華摘要每日排程設定。
-
-    Args:
-        req: 包含 time 的請求。
-
-    Returns:
-        dict: 更新後的排程設定與訊息。
-    """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
-        raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
-
-    config = load_config()
-    config["yt_summary_schedule"] = {"time": req.time}
-    save_config(config)
-    setup_schedule(
-        config["schedule_time"],
-        config.get("tdcc_schedule"),
-        config.get("ctee_schedule"),
-        config.get("cnyes_schedule"),
-        config.get("ptt_schedule"),
-        config.get("moneyudn_schedule"),
-        config.get("yt_transcript_schedule"),
-        config.get("oil_price_schedule"),
-        config.get("gold_price_schedule"),
-        config.get("bitcoin_price_schedule"),
-        config.get("currency_price_schedule"),
-        config.get("indices_price_schedule"),
-        config["yt_summary_schedule"],
-        config.get("news_summary_schedule"),
-    )
-
-    logger.info("YT 精華摘要每日排程已更新為 %s", req.time)
-    return {
-        "time": req.time,
-        "message": f"YT 精華摘要每日排程已更新為 {req.time}",
-    }
-
-
-# 每日新聞摘要 API 端點
-@app.post("/api/news-summary/generate")
-def create_news_summary(req: NewsSummaryGenerateRequest):
-    """手動觸發每日新聞摘要產生。
-
-    Args:
-        req: 包含日期的請求。
-
-    Returns:
-        dict: 任務 ID 與初始狀態。
-    """
-    if not _validate_date_format(req.date):
-        raise HTTPException(400, "日期格式錯誤，請使用 YYYY-MM-DD")
-
-    job_id = str(uuid.uuid4())[:8]
-
-    with jobs_lock:
-        upload_jobs[job_id] = {
-            "job_id": job_id,
-            "type": "news_summary",
-            "status": "queued",
-            "date": req.date,
-            "errors": [],
-            "created_at": datetime.now().isoformat(),
-            "finished_at": None,
-        }
-
-    position = job_queue.enqueue(
-        job_id, run_news_summary_job, (job_id, req.date),
-    )
-
-    return {"job_id": job_id, "status": "queued", "queue_position": position}
-
-
-@app.get("/api/news-summary/generated")
-def list_generated_news_summary():
-    """列出已產生的每日新聞摘要日期。
-
-    掃描 /workspace/DailyNews/ 目錄下的 .md 檔案，
-    從檔名萃取日期並回傳最近 50 筆。
-
-    Returns:
-        dict: 包含 generated 欄位的日期清單（降冪排序）。
-    """
-    try:
-        daily_news_dir = Path("/workspace/DailyNews")
-        if not daily_news_dir.exists():
-            return {"generated": []}
-
-        dates = []
-        for f in daily_news_dir.glob("*.md"):
-            stem = f.stem
-            if re.match(r"^\d{4}-\d{2}-\d{2}$", stem):
-                dates.append(stem)
-
-        dates.sort(reverse=True)
-        return {"generated": dates[:50]}
-
-    except Exception as e:
-        logger.error("掃描每日新聞摘要目錄失敗：%s", e)
-        return {"generated": []}
-
-
-@app.get("/api/news-summary/schedule")
-def get_news_summary_schedule():
-    """取得每日新聞摘要排程設定。
-
-    Returns:
-        dict: 包含 time 欄位的排程資訊。
-    """
-    config = load_config()
-    news_sum = config.get("news_summary_schedule", {"time": "20:03"})
-    return {"time": news_sum["time"]}
-
-
-@app.put("/api/news-summary/schedule")
-def update_news_summary_schedule(req: NewsSummaryScheduleRequest):
-    """更新每日新聞摘要排程設定。
-
-    Args:
-        req: 包含 time 的請求。
-
-    Returns:
-        dict: 更新後的排程設定與訊息。
-    """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
-        raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
-
-    config = load_config()
-    config["news_summary_schedule"] = {"time": req.time}
-    save_config(config)
-    setup_schedule(
-        config["schedule_time"],
-        config.get("tdcc_schedule"),
-        config.get("ctee_schedule"),
-        config.get("cnyes_schedule"),
-        config.get("ptt_schedule"),
-        config.get("moneyudn_schedule"),
-        config.get("yt_transcript_schedule"),
-        config.get("oil_price_schedule"),
-        config.get("gold_price_schedule"),
-        config.get("bitcoin_price_schedule"),
-        config.get("currency_price_schedule"),
-        config.get("indices_price_schedule"),
-        config.get("yt_summary_schedule"),
-        config["news_summary_schedule"],
-    )
-
-    logger.info("每日新聞摘要排程已更新為 %s", req.time)
-    return {
-        "time": req.time,
-        "message": f"每日新聞摘要排程已更新為 {req.time}",
-    }
 
 
 # Serve React 前端靜態檔案
