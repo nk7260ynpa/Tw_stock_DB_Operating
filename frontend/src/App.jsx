@@ -11,6 +11,8 @@ import RetryQueue from './components/RetryQueue'
 import YTTranscriptUpload from './components/YTTranscriptUpload'
 import OilPriceUpload from './components/OilPriceUpload'
 import IndicesPriceUpload from './components/IndicesPriceUpload'
+import YTSummaryGenerate from './components/YTSummaryGenerate'
+import NewsSummaryGenerate from './components/NewsSummaryGenerate'
 
 function App() {
   return (
@@ -34,6 +36,8 @@ function App() {
           <YTTranscriptUpload />
           <OilPriceUpload />
           <IndicesPriceUpload />
+          <YTSummaryGenerate />
+          <NewsSummaryGenerate />
         </div>
       </main>
     </div>

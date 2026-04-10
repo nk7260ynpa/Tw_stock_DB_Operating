@@ -21,6 +21,8 @@
 - **比特幣價格**：從爬蟲取得比特幣價格，metadata 存入 SPECIAL_INFO 資料庫的 BitcoinPrice 表（`data_upload/bitcoin_price.py`）
 - **匯率**：從爬蟲取得匯率資料（USDTWD/JPYTWD），metadata 存入 SPECIAL_INFO 資料庫的 CurrencyPrice 表（`data_upload/currency_price.py`）
 - **股市指數**：從爬蟲取得國際股市指數價格（道瓊工業指數/納斯達克指數），資料存入 SPECIAL_INFO 資料庫的 IndicesPrice 表（`data_upload/indices_price.py`）
+- **YT 精華摘要**：透過 Claude Agent SDK 讀取 YT 逐字稿並產生精華摘要，寫入 YTNews 目錄（`ai_summary/yt_summary.py`）
+- **每日新聞摘要**：查詢 MySQL 新聞資料，透過 Claude Agent SDK 產生每日新聞摘要，寫入 DailyNews 目錄（`ai_summary/news_summary.py`）
 - **網路失敗重試佇列**：排程任務因網路中斷失敗時自動加入重試佇列，每小時檢查網路並重試，最多 5 次（`retry_queue.py`）
 
 ## 支援的資料來源
@@ -45,6 +47,8 @@
 | BitcoinPrice | 比特幣價格（存放於 SPECIAL_INFO 資料庫的 BitcoinPrice 表） |
 | CurrencyPrice | 匯率資料（USDTWD/JPYTWD，存放於 SPECIAL_INFO 資料庫的 CurrencyPrice 表） |
 | IndicesPrice | 股市指數價格（DowJones/Nasdaq，存放於 SPECIAL_INFO 資料庫的 IndicesPrice 表） |
+| YT Summary | YT 精華摘要（透過 Claude Agent SDK 產生，輸出至 YTNews 目錄） |
+| News Summary | 每日新聞摘要（透過 Claude Agent SDK 產生，輸出至 DailyNews 目錄） |
 
 ## 專案結構
 
@@ -60,6 +64,11 @@ Tw_stock_DB_Operating/
 ├── requirements.txt          # Docker 環境釘版依賴
 ├── run.sh                    # 啟動主程式腳本
 ├── web_server.py             # Web 管理介面（FastAPI）
+├── ai_summary/               # AI 摘要模組（Claude Agent SDK）
+│   ├── __init__.py
+│   ├── base.py               # AISummaryBase 基底類別
+│   ├── yt_summary.py         # YT 精華摘要產生器
+│   └── news_summary.py       # 每日新聞摘要產生器
 ├── data_upload/              # 資料上傳模組
 │   ├── __init__.py
 │   ├── base.py               # DataUploadBase 抽象基類
@@ -101,7 +110,9 @@ Tw_stock_DB_Operating/
 │           ├── RetryQueue.jsx
 │           ├── YTTranscriptUpload.jsx
 │           ├── OilPriceUpload.jsx
-│           └── IndicesPriceUpload.jsx
+│           ├── IndicesPriceUpload.jsx
+│           ├── YTSummaryGenerate.jsx
+│           └── NewsSummaryGenerate.jsx
 ├── docker/                   # Docker 設定
 │   ├── build.sh              # 建立 Docker image 腳本
 │   ├── Dockerfile            # Multi-stage build（Node + Python）
@@ -144,6 +155,9 @@ Tw_stock_DB_Operating/
 │   ├── test_web_server_currency_price.py
 │   ├── test_indices_price.py
 │   ├── test_web_server_indices_price.py
+│   ├── test_yt_summary.py
+│   ├── test_news_summary.py
+│   ├── test_web_server_ai_summary.py
 │   ├── test_retry_queue.py
 │   └── test_job_queue.py
 └── logs/                     # 日誌資料夾
@@ -180,7 +194,7 @@ docker run -d --name tw_stock_db_operating \
   --network db_network \
   -p 8080:8080 \
   -v $(pwd)/logs:/workspace/logs \
-  nk7260ynpa/tw_stock_db_operating:2.6.0
+  nk7260ynpa/tw_stock_db_operating:2.7.0
 ```
 
 ### 4. 使用 docker-compose 啟動服務
@@ -192,7 +206,7 @@ docker compose -f docker/docker-compose.yaml up -d
 ### 5. 執行單元測試
 
 ```bash
-docker run --rm nk7260ynpa/tw_stock_db_operating:2.6.0 python -m pytest test/
+docker run --rm nk7260ynpa/tw_stock_db_operating:2.7.0 python -m pytest test/
 ```
 
 ## 命令列參數（upload.py）
@@ -226,6 +240,8 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:2.6.0 python -m pytest test/
 - **比特幣價格**：選擇日期範圍上傳比特幣價格，資料寫入 SPECIAL_INFO 資料庫，每日排程 07:10 自動抓取
 - **匯率**：選擇日期範圍上傳匯率資料（USDTWD/JPYTWD），資料寫入 SPECIAL_INFO 資料庫，每日排程 07:15 自動抓取
 - **股市指數**：選擇日期範圍上傳股市指數價格（道瓊工業指數/納斯達克指數），資料寫入 SPECIAL_INFO 資料庫，每日排程 07:20 自動抓取
+- **YT 精華摘要**：選擇日期產生游庭皓的財經皓角精華摘要（透過 Claude Agent SDK），每日排程 19:15 自動產生當日摘要
+- **每日新聞摘要**：選擇日期產生台股每日新聞摘要（透過 Claude Agent SDK），每日排程 20:03 自動產生昨日新聞摘要
 - **重試佇列**：檢視因網路失敗而進入重試佇列的任務，可手動觸發重試、重設已耗盡任務、清除已完成任務
 - **任務佇列**：所有上傳任務透過 FIFO 佇列管理，同一時間只執行一個任務，其餘排隊等待，前端顯示排隊位置
 
@@ -279,3 +295,4 @@ Pipeline 會自動：
 - Python 3.12.7
 - Docker
 - MySQL 資料庫（需先建立資料庫與資料表）
+- `ANTHROPIC_API_KEY` 環境變數（AI 摘要功能需要，透過 `run.sh` 自動傳入容器）
