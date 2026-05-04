@@ -191,6 +191,20 @@ class TestCrawlData(unittest.TestCase):
             self.uploader.crawl_data("2026-03-19")
 
     @patch("data_upload.indices_price.requests.get")
+    def test_crawler_error_response(self, mock_get):
+        """測試爬蟲回傳 error 時拋出 CrawlError。"""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "date": "2026-03-19",
+            "error": "無法取得任何股市指數價格資料（查詢日期：2026-03-19）",
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        with self.assertRaises(CrawlError):
+            self.uploader.crawl_data("2026-03-19")
+
+    @patch("data_upload.indices_price.requests.get")
     def test_missing_columns(self, mock_get):
         """測試缺少必要欄位拋出 CrawlError。"""
         mock_resp = MagicMock()

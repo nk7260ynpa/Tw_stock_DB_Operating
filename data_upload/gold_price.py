@@ -93,6 +93,10 @@ class GoldPriceUploader:
             ) from e
 
         result = resp.json()
+        if "error" in result:
+            raise CrawlError(
+                f"黃金價格爬蟲回傳錯誤（{date}）：{result['error']}"
+            )
         data = result.get("data")
         if not data:
             logger.info("黃金價格 %s 無資料（可能非交易日）。", date)
