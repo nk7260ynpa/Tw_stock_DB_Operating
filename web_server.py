@@ -27,7 +27,7 @@ from dataclasses import asdict
 
 from DailyUpload import daily_craw, set_retry_queue, DB_NAMES, HOST, USER, PASSWORD, CRAWLERHOST
 from upload import day_upload
-from data_upload.base import NetworkError
+from data_upload.base import CrawlError, NetworkError
 from data_upload.quarter_revenue import QuarterRevenueUploader
 from data_upload.tdcc import TDCCUploader
 from data_upload.ctee_news import CTEENewsUploader
@@ -1281,8 +1281,8 @@ def run_oil_price_upload_job(job_id, start_date, end_date):
             job_id, total_records,
         )
 
-    except NetworkError as e:
-        logger.warning("原油價格任務網路失敗 %s: %s", job_id, e)
+    except CrawlError as e:
+        logger.warning("原油價格任務爬取失敗 %s: %s", job_id, e)
         with jobs_lock:
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
@@ -1376,8 +1376,8 @@ def run_gold_price_upload_job(job_id, start_date, end_date):
             job_id, total_records,
         )
 
-    except NetworkError as e:
-        logger.warning("黃金價格任務網路失敗 %s: %s", job_id, e)
+    except CrawlError as e:
+        logger.warning("黃金價格任務爬取失敗 %s: %s", job_id, e)
         with jobs_lock:
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
@@ -1474,8 +1474,8 @@ def run_bitcoin_price_upload_job(job_id, start_date, end_date):
             job_id, total_records,
         )
 
-    except NetworkError as e:
-        logger.warning("比特幣價格任務網路失敗 %s: %s", job_id, e)
+    except CrawlError as e:
+        logger.warning("比特幣價格任務爬取失敗 %s: %s", job_id, e)
         with jobs_lock:
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
@@ -1572,8 +1572,8 @@ def run_currency_price_upload_job(job_id, start_date, end_date):
             job_id, total_records,
         )
 
-    except NetworkError as e:
-        logger.warning("匯率任務網路失敗 %s: %s", job_id, e)
+    except CrawlError as e:
+        logger.warning("匯率任務爬取失敗 %s: %s", job_id, e)
         with jobs_lock:
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
@@ -1670,8 +1670,8 @@ def run_indices_price_upload_job(job_id, start_date, end_date):
             job_id, total_records,
         )
 
-    except NetworkError as e:
-        logger.warning("股市指數價格任務網路失敗 %s: %s", job_id, e)
+    except CrawlError as e:
+        logger.warning("股市指數價格任務爬取失敗 %s: %s", job_id, e)
         with jobs_lock:
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
@@ -1864,7 +1864,14 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="台股資料管理介面", lifespan=lifespan)
+# root_path 用於 Dashboard 反向代理（/app/db-operating），讓 FastAPI 知悉外部前綴
+# 以便 OpenAPI/Swagger/redirect URL 產生時帶上正確的 base path。
+# 若 ROOT_PATH 環境變數未設定，則預設為空字串（直接存取 port 8080）。
+app = FastAPI(
+    title="台股資料管理介面",
+    lifespan=lifespan,
+    root_path=os.environ.get("ROOT_PATH", ""),
+)
 
 
 @app.post("/api/upload")
