@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../api'
 
 function IndicesPriceUpload() {
   const today = new Date().toISOString().split('T')[0]
@@ -21,7 +22,7 @@ function IndicesPriceUpload() {
 
   const fetchUploaded = useCallback(async () => {
     try {
-      const res = await fetch('/api/indices-price/uploaded')
+      const res = await apiFetch('/api/indices-price/uploaded')
       if (res.ok) {
         const data = await res.json()
         setUploaded(data.uploaded || [])
@@ -33,7 +34,7 @@ function IndicesPriceUpload() {
 
   const fetchJobs = useCallback(async () => {
     try {
-      const res = await fetch('/api/upload/jobs')
+      const res = await apiFetch('/api/upload/jobs')
       if (res.ok) {
         const data = await res.json()
         const indicesJobs = data
@@ -48,7 +49,7 @@ function IndicesPriceUpload() {
 
   const fetchSchedule = useCallback(async () => {
     try {
-      const res = await fetch('/api/indices-price/schedule')
+      const res = await apiFetch('/api/indices-price/schedule')
       if (res.ok) {
         const data = await res.json()
         setScheduleTime(data.time || '07:20')
@@ -73,7 +74,7 @@ function IndicesPriceUpload() {
     setError('')
     setSubmitting(true)
     try {
-      const res = await fetch('/api/indices-price/upload', {
+      const res = await apiFetch('/api/indices-price/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -100,7 +101,7 @@ function IndicesPriceUpload() {
     setSaving(true)
     setScheduleMsg('')
     try {
-      const res = await fetch('/api/indices-price/schedule', {
+      const res = await apiFetch('/api/indices-price/schedule', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ time: scheduleTime }),

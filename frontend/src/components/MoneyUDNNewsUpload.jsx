@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../api'
 
 function getToday() {
   return new Date().toISOString().slice(0, 10)
@@ -22,7 +23,7 @@ function MoneyUDNNewsUpload() {
 
   const fetchUploaded = useCallback(async () => {
     try {
-      const res = await fetch('/api/moneyudn-news/uploaded')
+      const res = await apiFetch('/api/moneyudn-news/uploaded')
       if (res.ok) {
         const data = await res.json()
         setUploaded(data.uploaded || [])
@@ -34,7 +35,7 @@ function MoneyUDNNewsUpload() {
 
   const fetchJobs = useCallback(async () => {
     try {
-      const res = await fetch('/api/upload/jobs')
+      const res = await apiFetch('/api/upload/jobs')
       if (res.ok) {
         const data = await res.json()
         const moneyudnJobs = data
@@ -49,7 +50,7 @@ function MoneyUDNNewsUpload() {
 
   const fetchSchedule = useCallback(async () => {
     try {
-      const res = await fetch('/api/moneyudn-news/schedule')
+      const res = await apiFetch('/api/moneyudn-news/schedule')
       if (res.ok) {
         const data = await res.json()
         setScheduleTime(data.time || '22:30')
@@ -74,7 +75,7 @@ function MoneyUDNNewsUpload() {
     setError('')
     setSubmitting(true)
     try {
-      const res = await fetch('/api/moneyudn-news/upload', {
+      const res = await apiFetch('/api/moneyudn-news/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -101,7 +102,7 @@ function MoneyUDNNewsUpload() {
     setSaving(true)
     setScheduleMsg('')
     try {
-      const res = await fetch('/api/moneyudn-news/schedule', {
+      const res = await apiFetch('/api/moneyudn-news/schedule', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ time: scheduleTime }),

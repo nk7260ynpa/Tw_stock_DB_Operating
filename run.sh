@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE_NAME="nk7260ynpa/tw_stock_db_operating"
-IMAGE_TAG="2.6.0"
+IMAGE_TAG="2.7.0"
 CONTAINER_NAME="tw_stock_db_operating"
 LOG_DIR="${SCRIPT_DIR}/logs"
 
@@ -35,7 +35,6 @@ docker run -d \
   --name "${CONTAINER_NAME}" \
   --network db_network \
   --restart always \
-  -p 8080:8080 \
   -v "${LOG_DIR}:/workspace/logs" \
   -v "${NEWS_CONTENTS_DIR}:/workspace/NewsContents" \
   "${IMAGE_NAME}:${IMAGE_TAG}"

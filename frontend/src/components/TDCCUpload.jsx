@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../api'
 
 function TDCCUpload() {
   const [uploaded, setUploaded] = useState([])
@@ -16,7 +17,7 @@ function TDCCUpload() {
 
   const fetchUploaded = useCallback(async () => {
     try {
-      const res = await fetch('/api/tdcc/uploaded')
+      const res = await apiFetch('/api/tdcc/uploaded')
       if (res.ok) {
         const data = await res.json()
         setUploaded(data.uploaded || [])
@@ -28,7 +29,7 @@ function TDCCUpload() {
 
   const fetchJobs = useCallback(async () => {
     try {
-      const res = await fetch('/api/upload/jobs')
+      const res = await apiFetch('/api/upload/jobs')
       if (res.ok) {
         const data = await res.json()
         const tdccJobs = data
@@ -43,7 +44,7 @@ function TDCCUpload() {
 
   const fetchSchedule = useCallback(async () => {
     try {
-      const res = await fetch('/api/tdcc/schedule')
+      const res = await apiFetch('/api/tdcc/schedule')
       if (res.ok) {
         const data = await res.json()
         setScheduleTime(data.time || '10:00')
@@ -68,7 +69,7 @@ function TDCCUpload() {
     setError('')
     setSubmitting(true)
     try {
-      const res = await fetch('/api/tdcc/upload', {
+      const res = await apiFetch('/api/tdcc/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
@@ -91,7 +92,7 @@ function TDCCUpload() {
     setSaving(true)
     setScheduleMsg('')
     try {
-      const res = await fetch('/api/tdcc/schedule', {
+      const res = await apiFetch('/api/tdcc/schedule', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ time: scheduleTime }),

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../api'
 
 function getToday() {
   return new Date().toISOString().slice(0, 10)
@@ -21,7 +22,7 @@ function YTTranscriptUpload() {
 
   const fetchUploaded = useCallback(async () => {
     try {
-      const res = await fetch('/api/yt-transcript/uploaded')
+      const res = await apiFetch('/api/yt-transcript/uploaded')
       if (res.ok) {
         const data = await res.json()
         setUploaded(data.uploaded || [])
@@ -31,7 +32,7 @@ function YTTranscriptUpload() {
 
   const fetchJobs = useCallback(async () => {
     try {
-      const res = await fetch('/api/upload/jobs')
+      const res = await apiFetch('/api/upload/jobs')
       if (res.ok) {
         const data = await res.json()
         const ytJobs = data
@@ -44,7 +45,7 @@ function YTTranscriptUpload() {
 
   const fetchSchedule = useCallback(async () => {
     try {
-      const res = await fetch('/api/yt-transcript/schedule')
+      const res = await apiFetch('/api/yt-transcript/schedule')
       if (res.ok) {
         const data = await res.json()
         setScheduleTime(data.time || '19:05')
@@ -67,7 +68,7 @@ function YTTranscriptUpload() {
     setError('')
     setSubmitting(true)
     try {
-      const res = await fetch('/api/yt-transcript/upload', {
+      const res = await apiFetch('/api/yt-transcript/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ date }),
@@ -91,7 +92,7 @@ function YTTranscriptUpload() {
     setSaving(true)
     setScheduleMsg('')
     try {
-      const res = await fetch('/api/yt-transcript/schedule', {
+      const res = await apiFetch('/api/yt-transcript/schedule', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ time: scheduleTime }),

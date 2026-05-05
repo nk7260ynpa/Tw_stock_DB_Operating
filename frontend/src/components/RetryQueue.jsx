@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../api'
 
 const STATUS_LABEL = {
   pending: '等待中',
@@ -34,7 +35,7 @@ function RetryQueue() {
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await fetch('/api/retry-queue')
+      const res = await apiFetch('/api/retry-queue')
       if (res.ok) {
         const json = await res.json()
         setData(json)
@@ -55,7 +56,7 @@ function RetryQueue() {
   const handleRetryAll = async () => {
     setActionMsg(null)
     try {
-      const res = await fetch('/api/retry-queue/retry-all', { method: 'POST' })
+      const res = await apiFetch('/api/retry-queue/retry-all', { method: 'POST' })
       if (res.ok) {
         const json = await res.json()
         setActionMsg({ type: 'success', text: json.message })
@@ -69,7 +70,7 @@ function RetryQueue() {
   const handleResetExhausted = async () => {
     setActionMsg(null)
     try {
-      const res = await fetch('/api/retry-queue/reset-exhausted', { method: 'POST' })
+      const res = await apiFetch('/api/retry-queue/reset-exhausted', { method: 'POST' })
       if (res.ok) {
         const json = await res.json()
         setActionMsg({ type: 'success', text: json.message })
@@ -83,7 +84,7 @@ function RetryQueue() {
   const handleClearCompleted = async () => {
     setActionMsg(null)
     try {
-      const res = await fetch('/api/retry-queue/clear', { method: 'DELETE' })
+      const res = await apiFetch('/api/retry-queue/clear', { method: 'DELETE' })
       if (res.ok) {
         const json = await res.json()
         setActionMsg({ type: 'success', text: json.message })
@@ -96,7 +97,7 @@ function RetryQueue() {
 
   const handleRemoveTask = async (taskId) => {
     try {
-      const res = await fetch(`/api/retry-queue/${taskId}`, { method: 'DELETE' })
+      const res = await apiFetch(`/api/retry-queue/${taskId}`, { method: 'DELETE' })
       if (res.ok) {
         fetchData()
       }

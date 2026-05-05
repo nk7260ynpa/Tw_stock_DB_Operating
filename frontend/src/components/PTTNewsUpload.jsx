@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../api'
 
 function getToday() {
   return new Date().toISOString().slice(0, 10)
@@ -22,7 +23,7 @@ function PTTNewsUpload() {
 
   const fetchUploaded = useCallback(async () => {
     try {
-      const res = await fetch('/api/ptt-news/uploaded')
+      const res = await apiFetch('/api/ptt-news/uploaded')
       if (res.ok) {
         const data = await res.json()
         setUploaded(data.uploaded || [])
@@ -34,7 +35,7 @@ function PTTNewsUpload() {
 
   const fetchJobs = useCallback(async () => {
     try {
-      const res = await fetch('/api/upload/jobs')
+      const res = await apiFetch('/api/upload/jobs')
       if (res.ok) {
         const data = await res.json()
         const pttJobs = data
@@ -49,7 +50,7 @@ function PTTNewsUpload() {
 
   const fetchSchedule = useCallback(async () => {
     try {
-      const res = await fetch('/api/ptt-news/schedule')
+      const res = await apiFetch('/api/ptt-news/schedule')
       if (res.ok) {
         const data = await res.json()
         setScheduleTime(data.time || '22:00')
@@ -74,7 +75,7 @@ function PTTNewsUpload() {
     setError('')
     setSubmitting(true)
     try {
-      const res = await fetch('/api/ptt-news/upload', {
+      const res = await apiFetch('/api/ptt-news/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -101,7 +102,7 @@ function PTTNewsUpload() {
     setSaving(true)
     setScheduleMsg('')
     try {
-      const res = await fetch('/api/ptt-news/schedule', {
+      const res = await apiFetch('/api/ptt-news/schedule', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ time: scheduleTime }),

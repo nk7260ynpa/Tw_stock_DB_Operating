@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { apiFetch } from '../api'
 
 function ScheduleManager() {
   const [currentTime, setCurrentTime] = useState('')
@@ -12,7 +13,7 @@ function ScheduleManager() {
 
   const fetchSchedule = async () => {
     try {
-      const res = await fetch('/api/schedule')
+      const res = await apiFetch('/api/schedule')
       if (res.ok) {
         const data = await res.json()
         setCurrentTime(data.time)
@@ -33,7 +34,7 @@ function ScheduleManager() {
     setMessage(null)
 
     try {
-      const res = await fetch('/api/schedule', {
+      const res = await apiFetch('/api/schedule', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ time: newTime }),

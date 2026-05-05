@@ -11,6 +11,8 @@ FROM python:3.12.7
 
 ENV LANG=en_US.UTF-8
 ENV TZ=Asia/Taipei
+# Dashboard 反向代理路徑（供 FastAPI 產生正確的 OpenAPI/redirect 路徑）
+ENV ROOT_PATH=/app/db-operating
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 WORKDIR /workspace

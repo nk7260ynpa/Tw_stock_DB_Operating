@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tw-stock-db-operating"
-version = "2.6.0"
+version = "2.7.0"
 description = "台股資料庫操作模組，提供資料上傳、排程與 Web 管理介面"
 requires-python = ">=3.12"
 license = "MIT"

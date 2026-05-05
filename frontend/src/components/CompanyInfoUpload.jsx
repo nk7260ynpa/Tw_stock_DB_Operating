@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../api'
 
 function CompanyInfoUpload() {
   const [status, setStatus] = useState({
@@ -15,7 +16,7 @@ function CompanyInfoUpload() {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/company-info/status')
+      const res = await apiFetch('/api/company-info/status')
       if (res.ok) {
         const data = await res.json()
         setStatus(data)
@@ -27,7 +28,7 @@ function CompanyInfoUpload() {
 
   const fetchJobs = useCallback(async () => {
     try {
-      const res = await fetch('/api/upload/jobs')
+      const res = await apiFetch('/api/upload/jobs')
       if (res.ok) {
         const data = await res.json()
         const ciJobs = data
@@ -54,7 +55,7 @@ function CompanyInfoUpload() {
     setError('')
     setSubmitting(true)
     try {
-      const res = await fetch('/api/company-info/upload', {
+      const res = await apiFetch('/api/company-info/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })

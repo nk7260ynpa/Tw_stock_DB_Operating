@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../api'
 
 function getCurrentROCYear() {
   return new Date().getFullYear() - 1911
@@ -24,7 +25,7 @@ function QuarterRevenueUpload() {
 
   const fetchUploaded = useCallback(async () => {
     try {
-      const res = await fetch('/api/quarter-revenue/uploaded')
+      const res = await apiFetch('/api/quarter-revenue/uploaded')
       if (res.ok) {
         const data = await res.json()
         setUploaded(data.uploaded || [])
@@ -36,7 +37,7 @@ function QuarterRevenueUpload() {
 
   const fetchJobs = useCallback(async () => {
     try {
-      const res = await fetch('/api/upload/jobs')
+      const res = await apiFetch('/api/upload/jobs')
       if (res.ok) {
         const data = await res.json()
         const revenueJobs = data
@@ -63,7 +64,7 @@ function QuarterRevenueUpload() {
     setError('')
     setSubmitting(true)
     try {
-      const res = await fetch('/api/quarter-revenue/upload', {
+      const res = await apiFetch('/api/quarter-revenue/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ year, quarter }),

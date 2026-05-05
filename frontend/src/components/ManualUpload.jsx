@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../api'
 
 const DB_LIST = ['TWSE', 'TPEX', 'TAIFEX', 'FAOI', 'MGTS']
 
@@ -20,7 +21,7 @@ function ManualUpload() {
 
   const fetchJobs = useCallback(async () => {
     try {
-      const res = await fetch('/api/upload/jobs')
+      const res = await apiFetch('/api/upload/jobs')
       if (res.ok) {
         const data = await res.json()
         setJobs(data.filter((j) => !j.type).reverse())
@@ -58,7 +59,7 @@ function ManualUpload() {
 
     setSubmitting(true)
     try {
-      const res = await fetch('/api/upload', {
+      const res = await apiFetch('/api/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
