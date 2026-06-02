@@ -2,7 +2,11 @@
 
 當排程任務因網路中斷失敗時，將任務加入重試佇列，
 每小時自動檢查網路狀態並重試，最多重試 5 次。
-超過上限的任務保留在佇列中供手動一鍵重新執行。
+超過上限的任務標為 exhausted，保留在佇列中供手動一鍵重新執行。
+
+針對「資料尚未發布」這類暫時性失敗（當下抓不到、隔日才會有），
+另提供「隔日重排」機制：每日將未達重排上限的 exhausted 任務
+重設為 pending 再試一輪，避免永久放棄可回補的資料。
 """
 
 import json
@@ -34,6 +38,8 @@ class RetryTask:
         status: 任務狀態（pending/retrying/success/exhausted）。
         last_retry_at: 最後一次重試時間。
         created_by_job_id: 建立此重試任務的原始排程 job ID。
+        requeue_count: 自 exhausted 被「隔日重排」重設為 pending 的次數。
+        max_requeues: 最大隔日重排次數，超過後維持 exhausted 視為永久失敗。
     """
 
     task_id: str
@@ -46,6 +52,8 @@ class RetryTask:
     status: str = "pending"
     last_retry_at: str | None = None
     created_by_job_id: str | None = None
+    requeue_count: int = 0
+    max_requeues: int = 3
 
 
 class RetryQueue:
@@ -204,6 +212,8 @@ class RetryQueue:
     def reset_exhausted(self):
         """將所有 exhausted 任務重設為 pending，retry_count 歸零。
 
+        供使用者於 Web 介面「一鍵重新執行」手動觸發，無視重排上限。
+
         Returns:
             int: 重設的任務數量。
         """
@@ -217,6 +227,52 @@ class RetryQueue:
             if count > 0:
                 self._save()
             return count
+
+    def requeue_exhausted(self):
+        """隔日重排：將未達重排上限的 exhausted 任務重設為 pending。
+
+        用於「資料尚未發布」這類暫時性失敗：當日抓不到資料被標為
+        exhausted 後，隔日資料通常已可取得，故每日將其重設為 pending
+        再試一輪。每重排一次 requeue_count +1、retry_count 歸零；
+        達 max_requeues 後維持 exhausted，視為永久失敗（如美股假日
+        永無資料），交由人工處理。
+
+        Returns:
+            tuple[int, int]: (重排筆數, 已達上限維持 exhausted 筆數)。
+        """
+        with self._lock:
+            requeued = 0
+            kept = 0
+            for task in self._tasks.values():
+                if task.status != "exhausted":
+                    continue
+                if task.requeue_count >= task.max_requeues:
+                    kept += 1
+                    continue
+                task.status = "pending"
+                task.retry_count = 0
+                task.requeue_count += 1
+                requeued += 1
+            if requeued > 0:
+                self._save()
+            return requeued, kept
+
+    def clear_exhausted(self):
+        """清除所有已放棄（exhausted）的任務。
+
+        Returns:
+            int: 清除的任務數量。
+        """
+        with self._lock:
+            to_remove = [
+                tid for tid, t in self._tasks.items()
+                if t.status == "exhausted"
+            ]
+            for tid in to_remove:
+                del self._tasks[tid]
+            if to_remove:
+                self._save()
+            return len(to_remove)
 
 
 def is_network_error(exception):

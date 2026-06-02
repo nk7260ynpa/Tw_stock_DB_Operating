@@ -72,8 +72,10 @@ class TestSetupSchedule(unittest.TestCase):
         web_server.setup_schedule("18:00")
 
         mock_schedule.clear.assert_called_once()
-        mock_schedule.every.return_value.day.at.assert_called_once_with(
-            "18:00"
+        # 每日主排程 18:00 與 exhausted 隔日重排 06:30 皆應登記
+        mock_schedule.every.return_value.day.at.assert_any_call("18:00")
+        mock_schedule.every.return_value.day.at.assert_any_call(
+            web_server.REQUEUE_EXHAUSTED_TIME
         )
 
 

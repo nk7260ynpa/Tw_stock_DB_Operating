@@ -80,6 +80,11 @@ schedule_lock = threading.Lock()
 # 網路失敗重試佇列
 retry_queue: RetryQueue | None = None
 
+# 隔日重排時間：每日將未達上限的 exhausted 任務重設為 pending 再試一輪。
+# 設於各價格排程（07:00~07:20）之前，使前一日因「資料尚未發布」而放棄的
+# 任務於資料已可取得後，能在當日重新被重試佇列處理。
+REQUEUE_EXHAUSTED_TIME = "06:30"
+
 # 任務佇列
 from job_queue import JobQueue
 job_queue: JobQueue | None = None
@@ -310,6 +315,14 @@ def setup_schedule(
         schedule_lib.every(1).hours.do(process_retry_queue)
         logger.info("重試佇列每小時排程已設定。")
 
+        # 每日隔日重排：將未達上限的 exhausted 任務重設為 pending
+        schedule_lib.every().day.at(REQUEUE_EXHAUSTED_TIME).do(
+            requeue_exhausted_scheduled
+        )
+        logger.info(
+            "exhausted 任務隔日重排已設定為 %s", REQUEUE_EXHAUSTED_TIME
+        )
+
 
 def process_retry_queue():
     """處理重試佇列中的 pending 任務。
@@ -368,6 +381,25 @@ def process_retry_queue():
             retry_queue.update_status(
                 task.task_id, "exhausted", str(e)
             )
+
+
+def requeue_exhausted_scheduled():
+    """每日隔日重排：將未達上限的 exhausted 任務重設為 pending。
+
+    針對「資料尚未發布」這類暫時性失敗，隔日資料通常已可取得，
+    故每日重排一輪，交由每小時的 process_retry_queue 重新執行。
+    達 max_requeues 上限的任務維持 exhausted，視為永久失敗。
+    """
+    global retry_queue
+    if retry_queue is None:
+        return
+
+    requeued, kept = retry_queue.requeue_exhausted()
+    if requeued or kept:
+        logger.info(
+            "隔日重排完成：重排 %d 筆 exhausted 任務，%d 筆已達上限維持 exhausted。",
+            requeued, kept,
+        )
 
 
 def _execute_retry_task(task):
@@ -3641,6 +3673,35 @@ def clear_completed_retry_tasks():
     return {
         "message": f"已清除 {count} 筆已完成任務",
         "cleared_count": count,
+    }
+
+
+@app.delete("/api/retry-queue/clear-exhausted")
+def clear_exhausted_retry_tasks():
+    """清除所有已放棄（exhausted）的重試任務。
+
+    Returns:
+        dict: 操作結果訊息與清除數量。
+    """
+    count = retry_queue.clear_exhausted()
+    return {
+        "message": f"已清除 {count} 筆 exhausted 任務",
+        "cleared_count": count,
+    }
+
+
+@app.post("/api/retry-queue/requeue-exhausted")
+def requeue_exhausted_retry_tasks():
+    """手動觸發隔日重排：將未達上限的 exhausted 任務重設為 pending。
+
+    Returns:
+        dict: 操作結果訊息與重排、維持數量。
+    """
+    requeued, kept = retry_queue.requeue_exhausted()
+    return {
+        "message": f"已重排 {requeued} 筆，{kept} 筆已達上限維持 exhausted",
+        "requeued_count": requeued,
+        "kept_count": kept,
     }
 
 

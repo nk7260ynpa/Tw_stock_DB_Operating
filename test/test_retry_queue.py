@@ -250,6 +250,158 @@ class TestRetryQueueResetExhausted(unittest.TestCase):
         self.assertEqual(count, 0)
 
 
+class TestRetryQueueRequeueExhausted(unittest.TestCase):
+    """測試 RetryQueue.requeue_exhausted 方法（隔日重排）。"""
+
+    def setUp(self):
+        """初始化測試環境。"""
+        self.tmp = tempfile.NamedTemporaryFile(
+            suffix=".json", delete=False
+        )
+        self.tmp.close()
+        self.queue = RetryQueue(self.tmp.name)
+
+    def tearDown(self):
+        """清理測試環境。"""
+        os.unlink(self.tmp.name)
+
+    def _make_exhausted(self, task_type="bitcoin_price",
+                        params=None):
+        """建立一筆 exhausted 任務並回傳 task_id。"""
+        tid = self.queue.add(
+            task_type, params or {"date": "2026-06-01"}, "no data"
+        )
+        self.queue.update_status(tid, "exhausted")
+        return tid
+
+    def test_requeue_resets_exhausted_to_pending(self):
+        """測試重排將 exhausted 重設為 pending，retry_count 歸零。"""
+        tid = self._make_exhausted()
+        for _ in range(5):
+            self.queue.update_status(tid, "retrying")
+        self.queue.update_status(tid, "exhausted")
+
+        requeued, kept = self.queue.requeue_exhausted()
+
+        self.assertEqual(requeued, 1)
+        self.assertEqual(kept, 0)
+        task = self.queue.get_all()[0]
+        self.assertEqual(task.status, "pending")
+        self.assertEqual(task.retry_count, 0)
+        self.assertEqual(task.requeue_count, 1)
+
+    def test_requeue_stops_at_max_requeues(self):
+        """測試達到 max_requeues 後維持 exhausted 不再重排。"""
+        tid = self._make_exhausted()
+
+        # 連續重排直到達上限（預設 max_requeues=3）
+        for expected in range(1, 4):
+            self.queue.update_status(tid, "exhausted")
+            requeued, kept = self.queue.requeue_exhausted()
+            self.assertEqual(requeued, 1)
+            self.assertEqual(
+                self.queue.get_all()[0].requeue_count, expected
+            )
+
+        # 第 4 次：已達上限，維持 exhausted
+        self.queue.update_status(tid, "exhausted")
+        requeued, kept = self.queue.requeue_exhausted()
+
+        self.assertEqual(requeued, 0)
+        self.assertEqual(kept, 1)
+        self.assertEqual(self.queue.get_all()[0].status, "exhausted")
+
+    def test_requeue_ignores_non_exhausted(self):
+        """測試重排不影響非 exhausted 任務。"""
+        self.queue.add("tdcc", {}, "error")  # pending
+
+        requeued, kept = self.queue.requeue_exhausted()
+
+        self.assertEqual(requeued, 0)
+        self.assertEqual(kept, 0)
+        self.assertEqual(self.queue.get_all()[0].status, "pending")
+
+
+class TestRetryQueueClearExhausted(unittest.TestCase):
+    """測試 RetryQueue.clear_exhausted 方法。"""
+
+    def setUp(self):
+        """初始化測試環境。"""
+        self.tmp = tempfile.NamedTemporaryFile(
+            suffix=".json", delete=False
+        )
+        self.tmp.close()
+        self.queue = RetryQueue(self.tmp.name)
+
+    def tearDown(self):
+        """清理測試環境。"""
+        os.unlink(self.tmp.name)
+
+    def test_clear_exhausted(self):
+        """測試清除 exhausted 任務，保留其他狀態。"""
+        tid1 = self.queue.add("bitcoin_price", {"date": "2026-06-01"},
+                              "no data")
+        tid2 = self.queue.add("tdcc", {}, "error")
+        self.queue.update_status(tid1, "exhausted")
+
+        count = self.queue.clear_exhausted()
+
+        self.assertEqual(count, 1)
+        tasks = self.queue.get_all()
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].task_id, tid2)
+
+    def test_clear_exhausted_none(self):
+        """測試沒有 exhausted 任務時回傳 0。"""
+        self.queue.add("tdcc", {}, "error")
+
+        count = self.queue.clear_exhausted()
+
+        self.assertEqual(count, 0)
+
+
+class TestRetryQueueBackwardCompat(unittest.TestCase):
+    """測試載入缺少新欄位的舊版 JSON 仍可正常運作。"""
+
+    def setUp(self):
+        """初始化測試環境。"""
+        self.tmp = tempfile.NamedTemporaryFile(
+            suffix=".json", delete=False
+        )
+        self.tmp.close()
+
+    def tearDown(self):
+        """清理測試環境。"""
+        os.unlink(self.tmp.name)
+
+    def test_load_legacy_task_without_requeue_fields(self):
+        """測試載入無 requeue_count/max_requeues 欄位的舊任務。"""
+        legacy = [{
+            "task_id": "abc12345",
+            "task_type": "bitcoin_price",
+            "params": {"date": "2026-06-01"},
+            "error_message": "no data",
+            "failed_at": "2026-06-01T07:18:04",
+            "retry_count": 0,
+            "max_retries": 5,
+            "status": "exhausted",
+            "last_retry_at": None,
+            "created_by_job_id": None,
+        }]
+        with open(self.tmp.name, "w", encoding="utf-8") as f:
+            json.dump(legacy, f)
+
+        queue = RetryQueue(self.tmp.name)
+        task = queue.get_all()[0]
+
+        # 新欄位套用預設值
+        self.assertEqual(task.requeue_count, 0)
+        self.assertEqual(task.max_requeues, 3)
+        # 重排機制對舊任務照常運作
+        requeued, kept = queue.requeue_exhausted()
+        self.assertEqual(requeued, 1)
+
+
 class TestRetryQueuePersistence(unittest.TestCase):
     """測試 RetryQueue 持久化功能。"""
 

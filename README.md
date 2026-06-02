@@ -21,7 +21,7 @@
 - **比特幣價格**：從爬蟲取得比特幣價格，metadata 存入 SPECIAL_INFO 資料庫的 BitcoinPrice 表（`data_upload/bitcoin_price.py`）
 - **匯率**：從爬蟲取得匯率資料（USDTWD/JPYTWD），metadata 存入 SPECIAL_INFO 資料庫的 CurrencyPrice 表（`data_upload/currency_price.py`）
 - **股市指數**：從爬蟲取得國際股市指數價格（道瓊工業指數/納斯達克指數），資料存入 SPECIAL_INFO 資料庫的 IndicesPrice 表（`data_upload/indices_price.py`）
-- **網路失敗重試佇列**：排程任務因網路中斷失敗時自動加入重試佇列，每小時檢查網路並重試，最多 5 次（`retry_queue.py`）
+- **失敗重試佇列**：排程任務失敗時自動加入重試佇列。網路中斷每小時檢查網路並重試，最多 5 次；非網路錯誤（如「資料尚未發布」）標為 exhausted 後，每日（預設 06:30）「隔日重排」重設為 pending 再試一輪，最多 3 次，避免永久放棄隔日才會出現的資料（`retry_queue.py`）
 
 ## 支援的資料來源
 
@@ -180,7 +180,7 @@ docker run -d --name tw_stock_db_operating \
   --network db_network \
   -p 8080:8080 \
   -v $(pwd)/logs:/workspace/logs \
-  nk7260ynpa/tw_stock_db_operating:2.6.0
+  nk7260ynpa/tw_stock_db_operating:2.8.0
 ```
 
 ### 4. 使用 docker-compose 啟動服務
@@ -192,7 +192,7 @@ docker compose -f docker/docker-compose.yaml up -d
 ### 5. 執行單元測試
 
 ```bash
-docker run --rm nk7260ynpa/tw_stock_db_operating:2.6.0 python -m pytest test/
+docker run --rm nk7260ynpa/tw_stock_db_operating:2.8.0 python -m pytest test/
 ```
 
 ## 命令列參數（upload.py）
@@ -226,7 +226,7 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:2.6.0 python -m pytest test/
 - **比特幣價格**：選擇日期範圍上傳比特幣價格，資料寫入 SPECIAL_INFO 資料庫，每日排程 07:10 自動抓取
 - **匯率**：選擇日期範圍上傳匯率資料（USDTWD/JPYTWD），資料寫入 SPECIAL_INFO 資料庫，每日排程 07:15 自動抓取
 - **股市指數**：選擇日期範圍上傳股市指數價格（道瓊工業指數/納斯達克指數），資料寫入 SPECIAL_INFO 資料庫，每日排程 07:20 自動抓取
-- **重試佇列**：檢視因網路失敗而進入重試佇列的任務，可手動觸發重試、重設已耗盡任務、清除已完成任務
+- **重試佇列**：檢視進入重試佇列的任務，可手動觸發重試、重設已耗盡（exhausted）任務、隔日重排、清除已完成或已放棄任務（exhausted 任務每日自動隔日重排，最多 3 次）
 - **任務佇列**：所有上傳任務透過 FIFO 佇列管理，同一時間只執行一個任務，其餘排隊等待，前端顯示排隊位置
 
 排程設定會儲存至 `logs/config.json`，重試佇列持久化至 `logs/retry_queue.json`，容器重啟後自動套用。
