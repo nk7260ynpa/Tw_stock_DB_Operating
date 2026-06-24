@@ -181,12 +181,26 @@ class TestCrawlData(unittest.TestCase):
             self.uploader.crawl_data("2026-03-19")
 
     @patch("data_upload.bitcoin_price.requests.get")
-    def test_crawler_error_response(self, mock_get):
-        """測試爬蟲回傳 error 時拋出 CrawlError。"""
+    def test_crawler_no_data_treated_as_non_trading_day(self, mock_get):
+        """爬蟲回傳「無法取得任何...資料」視為非交易日，回空 DataFrame。"""
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "date": "2026-03-19",
             "error": "無法取得任何比特幣價格資料（查詢日期：2026-03-19）",
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        df = self.uploader.crawl_data("2026-03-19")
+        self.assertTrue(df.empty)
+
+    @patch("data_upload.bitcoin_price.requests.get")
+    def test_crawler_other_error_raises(self, mock_get):
+        """其他 error 訊息（非「無法取得任何」）仍拋出 CrawlError。"""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "date": "2026-03-19",
+            "error": "Yahoo Finance API 連線逾時",
         }
         mock_resp.raise_for_status = MagicMock()
         mock_get.return_value = mock_resp

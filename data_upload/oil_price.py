@@ -94,8 +94,18 @@ class OilPriceUploader:
 
         result = resp.json()
         if "error" in result:
+            error_msg = result["error"]
+            # 「無法取得任何」表示 yfinance 對該日無資料（週末/假日 fallback
+            # 給上個交易日後 parse 失敗），視為非交易日，回空 DataFrame
+            # 讓 upload() 走 _record_uploaded_date 分支，避免無限 retry 循環。
+            if "無法取得任何" in error_msg:
+                logger.info(
+                    "原油價格 %s 爬蟲回報無資料（非交易日）：%s",
+                    date, error_msg,
+                )
+                return pd.DataFrame()
             raise CrawlError(
-                f"原油價格爬蟲回傳錯誤（{date}）：{result['error']}"
+                f"原油價格爬蟲回傳錯誤（{date}）：{error_msg}"
             )
         data = result.get("data")
         if not data:
