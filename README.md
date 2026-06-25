@@ -274,6 +274,16 @@ Pipeline 會自動：
 
 - `.github/workflows/docker-publish.yml`：Docker image 建置與發布
 
+### Git Remote 與鏡像
+
+本專案以自架 GitLab 為開發主線，GitHub 作為對外鏡像：
+
+- **雙 remote**：`origin` 指向 GitLab（預設推送目標），`github` 指向 GitHub。
+- **鏡像管線**（`.gitlab-ci.yml`）：feature 分支開 Merge Request 合併進 `main` 後，
+  於 `main` 觸發 `mirror-to-github`，將 `main` 推送（鏡像）到 GitHub。
+- **認證**：SSH 私鑰由 GitLab Runner 注入，名稱 `GITHUB_SSH_KEY`（其值可為金鑰檔路徑
+  或金鑰內容，管線兩者皆支援）。
+
 ## 環境需求
 
 - Python 3.12.7
