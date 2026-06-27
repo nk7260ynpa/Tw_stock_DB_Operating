@@ -88,6 +88,8 @@ Tw_stock_DB_Operating/
 │   └── src/
 │       ├── App.jsx
 │       ├── App.css
+│       ├── api.js               # API 呼叫工具（套用 Vite base 前綴）
+│       ├── constants.js         # 前端共用常數（如 MAX_UPLOADED_SHOWN）
 │       └── components/
 │           ├── ManualUpload.jsx
 │           ├── ScheduleManager.jsx
@@ -240,6 +242,10 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:latest python -m pytest test/
 > | 商品·匯率·指數 | 原油價格、股市指數 |
 >
 > 分頁切換採 React 本地 state（不使用 URL routing），以維持反向代理（`root_path=/app/db-operating`）相容性。
+>
+> 各卡片的「已上傳日期 / 已上傳季度」清單僅顯示**最新 5 筆**（依日期由新到舊，常數
+> `MAX_UPLOADED_SHOWN`，定義於 `frontend/src/constants.js`），以縮短卡片高度。此為純前端
+> 顯示限制，後端 `/api/<source>/uploaded` 與防重複上傳的 `*Uploaded` 紀錄表皆不受影響。
 
 - **手動上傳**：選擇日期範圍與資料庫，直接觸發資料上傳
 - **排程設定**：檢視與修改每日自動上傳的排程時間
