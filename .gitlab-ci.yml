@@ -1,11 +1,18 @@
-# GitLab CI/CD：在 main 打上 vX.Y.Z 版本 tag 時，把儲存庫鏡像推送到 GitHub
+# GitLab CI/CD：在 main 打上 vX.Y.Z 版本 tag 時，自動重新部署服務並把儲存庫鏡像推送到 GitHub
 #
 # ── 流程 ───────────────────────────────────────────────────────────
-#   feature 分支 → 開 Merge Request → 合併進 main（合併進 main 當下不鏡像）
-#   → 在 main 最新 commit 打上 vX.Y.Z 版本 tag → 本管線於該 tag 觸發
-#   → 將 main 與該 tag 一併推送（鏡像）到 GitHub。
+#   feature 分支 → 開 Merge Request → 合併進 main（合併進 main 當下不觸發）
+#   → 在 main 最新 commit 打上 vX.Y.Z 版本 tag → 本管線於該 tag 觸發，
+#     並行執行兩個 stage：
+#       1. deploy ─ build Docker image 並以新 image 重啟本機服務容器。
+#       2. mirror ─ 將 main 與該 tag 一併推送（鏡像）到 GitHub。
 #
-# ── 認證來源 ───────────────────────────────────────────────────────
+# ── 部署環境（deploy） ─────────────────────────────────────────────
+#   GitLab Runner 為 docker executor 且掛載 /var/run/docker.sock，job 內的
+#   `docker` 指令直接作用在「host daemon」。因此 `docker run -v <絕對 host 路徑>`
+#   會由 host daemon 解析、指向 host 上的真實目錄。服務容器一律接 db_network。
+#
+# ── 認證來源（mirror） ─────────────────────────────────────────────
 #   GITHUB_SSH_KEY  由 GitLab Runner 注入（config.toml 的 environment 或掛載）。
 #                   其值可為 SSH 私鑰的「檔案路徑」或「私鑰內容」，本管線兩者皆支援。
 #                   對應公鑰需加到 GitHub repo → Settings → Deploy keys，並勾選
@@ -15,6 +22,7 @@
 #   GIT_DEPTH: 0 取得完整歷史，避免 shallow clone 導致 GitHub 推送被拒。
 
 stages:
+  - deploy
   - mirror
 
 workflow:
@@ -22,9 +30,59 @@ workflow:
     # 僅在 main 打上 vX.Y.Z 版本 tag 時建立管線（合併進 main 當下不觸發）
     - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
 
+# ─────────────────────────────────────────────────────────────────────
+# deploy：打 vX.Y.Z tag 時，build image 並以新 image 重啟服務容器
+#
+#   本 repo 三個特例（與一般範本不同，務必留意）：
+#     1. 以「版本化 tag」跑容器：docker run 啟動的是 $IMAGE:$VERSION（非 :latest），
+#        與 run.sh 既有慣例一致；build 仍同時打 :$VERSION 與 :latest 兩個 tag。
+#     2. 共享資料夾 NewsContents 綁「絕對 host 路徑」（非具名 volume）：此目錄由
+#        db-operating 寫入、Tw_stock_news 讀取，必須與 host／其他容器看到同一份真實
+#        目錄，故用 bind mount 指向 host 的 Tw_stock_DB/NewsContents。
+#     3. logs 用「具名 volume」（只有 db-operating 自己寫，不需與外部共享）。
+#
+#   本服務無對外 publish port：Web 管理介面（容器內 8080）由 Dashboard 透過 db_network
+#   反向代理存取（ROOT_PATH=/app/db-operating，已烤入 image），故 deploy 與 run.sh 一致
+#   不加 -p。查 log 改用 `docker logs tw_stock_db_operating`。
+# ─────────────────────────────────────────────────────────────────────
+deploy:
+  stage: deploy
+  image: docker:27
+  needs: []
+  resource_group: deploy          # 序列化部署，避免同時多個 tag 互相覆蓋
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+  variables:
+    IMAGE: "nk7260ynpa/tw_stock_db_operating"
+    CONTAINER: "tw_stock_db_operating"
+    LOGS_VOLUME: "tw_stock_db_operating_logs"           # logs 具名 volume（僅本服務寫入）
+    LOGS_PATH: "/workspace/logs"
+    NEWS_PATH: "/workspace/NewsContents"
+    HOST_ROOT: "/Users/chen/AI/Tw_stock"                # 共享資料夾用的絕對 host 路徑根
+  before_script:
+    - export VERSION="${CI_COMMIT_TAG#v}"               # tag 去掉開頭 v 作為 image 版本號
+  script:
+    # 1) 先 build：同時打版本化 tag 與 latest，build 失敗則不動現役容器（安全）
+    - docker build -f docker/Dockerfile -t "$IMAGE:$VERSION" -t "$IMAGE:latest" .
+    # 2) 再移除舊容器：build 成功後才停舊容器，縮短服務中斷時間
+    - docker rm -f "$CONTAINER" || true
+    # 3) 最後以「版本化 tag」啟動新容器（特例 1）
+    - docker run -d
+        --name "$CONTAINER"
+        --restart=always
+        --network db_network
+        --volume "$LOGS_VOLUME:$LOGS_PATH"
+        --volume "${HOST_ROOT}/Tw_stock_DB/NewsContents:$NEWS_PATH"
+        "$IMAGE:$VERSION"
+    - docker image prune -f || true
+
+# ─────────────────────────────────────────────────────────────────────
+# mirror：將 main 與該 tag 一併鏡像推送到 GitHub
+# ─────────────────────────────────────────────────────────────────────
 mirror-to-github:
   stage: mirror
   image: alpine:3.20
+  needs: []                                             # 與 deploy 並行，互不阻擋
   variables:
     GIT_DEPTH: 0                                       # 完整歷史，確保可 fast-forward 推送
     GITHUB_REPO: "git@github.com:nk7260ynpa/Tw_stock_DB_Operating.git"

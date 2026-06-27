@@ -285,6 +285,30 @@ Pipeline 會自動：
 - **認證**：SSH 私鑰由 GitLab Runner 注入，名稱 `GITHUB_SSH_KEY`（其值可為金鑰檔路徑
   或金鑰內容，管線兩者皆支援）。
 
+### GitLab CI 自動部署（deploy）
+
+`.gitlab-ci.yml` 同時提供 `deploy` job，於打上 `vX.Y.Z` 版本 tag 時與 `mirror` 並行觸發
+（兩 job 皆 `needs: []`），自動 build image 並以新 image 重啟本機服務容器：
+
+- **觸發條件**：`CI_COMMIT_TAG` 符合 `^v\d+\.\d+\.\d+$`；`resource_group: deploy`
+  序列化部署，避免多個 tag 同時互相覆蓋。
+- **執行環境**：GitLab Runner 為 docker executor 並掛載 `/var/run/docker.sock`，job 內
+  `docker` 指令直接作用在 host daemon，故 `docker run -v <絕對 host 路徑>` 由 host daemon
+  解析、指向 host 真實目錄；服務容器接 `db_network`。
+- **嚴格順序**：`docker build`（同時打 `:$VERSION` 與 `:latest`）→ `docker rm -f`
+  舊容器 → `docker run` 新容器。先 build 成功才停舊容器，縮短服務中斷並避免 build 失敗時
+  服務消失。
+- **以版本化 tag 跑容器**：`docker run` 啟動的是 `$IMAGE:$VERSION`（**非 `:latest`**），
+  `$VERSION` 為 tag 去掉開頭 `v`，與 `run.sh` 既有慣例一致。
+- **NewsContents 綁絕對 host 路徑**：`-v /Users/chen/AI/Tw_stock/Tw_stock_DB/NewsContents:/workspace/NewsContents`
+  （**bind mount，非具名 volume**）。此目錄由 db-operating 寫入、Tw_stock_news 讀取，必須
+  與 host／其他容器看到同一份真實目錄。
+- **logs 用具名 volume**：`tw_stock_db_operating_logs:/workspace/logs`（只有本服務寫入，
+  不需與外部共享）。
+- **無對外 publish port**：Web 管理介面（容器內 8080）由 Dashboard 透過 `db_network`
+  反向代理存取（`ROOT_PATH=/app/db-operating`，已烤入 image），故與 `run.sh` 一致不加 `-p`。
+  查 log 改用 `docker logs tw_stock_db_operating`。
+
 ## 環境需求
 
 - Python 3.12.7
