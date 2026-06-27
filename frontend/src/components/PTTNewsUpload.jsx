@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { apiFetch } from '../api'
+import { MAX_UPLOADED_SHOWN } from '../constants'
 
 function getToday() {
   return new Date().toISOString().slice(0, 10)
@@ -205,7 +206,7 @@ function PTTNewsUpload() {
         <div className="jobs-section">
           <h3 className="jobs-title">已上傳日期</h3>
           <div className="uploaded-grid">
-            {uploaded.map((date) => (
+            {uploaded.slice(0, MAX_UPLOADED_SHOWN).map((date) => (
               <div key={date} className="uploaded-item">
                 <span>{date}</span>
               </div>

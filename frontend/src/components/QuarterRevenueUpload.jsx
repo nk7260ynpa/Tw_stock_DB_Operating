@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { apiFetch } from '../api'
+import { MAX_UPLOADED_SHOWN } from '../constants'
 
 function getCurrentROCYear() {
   return new Date().getFullYear() - 1911
@@ -159,7 +160,7 @@ function QuarterRevenueUpload() {
         <div className="jobs-section">
           <h3 className="jobs-title">已上傳季度</h3>
           <div className="uploaded-grid">
-            {uploaded.map((u) => (
+            {uploaded.slice(0, MAX_UPLOADED_SHOWN).map((u) => (
               <div key={`${u.year}-${u.quarter}`} className="uploaded-item">
                 <span>
                   民國 {u.year} 年 Q{u.quarter}
