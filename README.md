@@ -180,7 +180,7 @@ docker run -d --name tw_stock_db_operating \
   --network db_network \
   -p 8080:8080 \
   -v $(pwd)/logs:/workspace/logs \
-  nk7260ynpa/tw_stock_db_operating:2.8.0
+  nk7260ynpa/tw_stock_db_operating:latest
 ```
 
 ### 4. 使用 docker-compose 啟動服務
@@ -192,8 +192,26 @@ docker compose -f docker/docker-compose.yaml up -d
 ### 5. 執行單元測試
 
 ```bash
-docker run --rm nk7260ynpa/tw_stock_db_operating:2.8.0 python -m pytest test/
+docker run --rm nk7260ynpa/tw_stock_db_operating:latest python -m pytest test/
 ```
+
+## 版本管理（單一版本軸 = git tag）
+
+本專案以 **git tag（`vX.Y.Z`）為唯一版本真實來源**，避免「手動部署」與「CI 部署」跑出
+矛盾或倒退的版本：
+
+- **CI deploy**（`.gitlab-ci.yml`）：以 `${CI_COMMIT_TAG#v}` 為 `$VERSION`，build
+  `:$VERSION` 與 `:latest`，並以 `:$VERSION` 啟動容器。
+- **手動部署**（`run.sh`）：以 `git describe --tags --abbrev=0`（去開頭 `v`）推導
+  `IMAGE_TAG`，與 CI 同源；取不到 git／tag 時退回 `:latest`（CI build 一併打的 latest）。
+- **本機建置**（`docker/build.sh`）：同樣由 git tag 推導，並同時打 `:$VERSION` 與 `:latest`。
+- **`pyproject.toml` 的 `version`**：發版時需手動對齊到所打的 tag（例如打 `v2.9.0` 則設
+  `version = "2.9.0"`）。
+- **`docker-compose.yaml`**：開發便利用途，固定使用 `:latest`，不持有獨立版本號。
+
+> 發版規則：feature 分支合併進 `main` 後，於 `main` 最新 commit 打 annotated tag
+> `vX.Y.Z`（依變更幅度遞增），該 tag 觸發 CI build + deploy；手動 `./run.sh` 在已同步該
+> tag 的 host 上會自動取到相同版本。**請勿**再於 `run.sh`／`build.sh`／compose 硬編版本號。
 
 ## 命令列參數（upload.py）
 
@@ -299,7 +317,8 @@ Pipeline 會自動：
   舊容器 → `docker run` 新容器。先 build 成功才停舊容器，縮短服務中斷並避免 build 失敗時
   服務消失。
 - **以版本化 tag 跑容器**：`docker run` 啟動的是 `$IMAGE:$VERSION`（**非 `:latest`**），
-  `$VERSION` 為 tag 去掉開頭 `v`，與 `run.sh` 既有慣例一致。
+  `$VERSION` 為 tag 去掉開頭 `v`。`run.sh` 也由 git tag 推導出相同 `IMAGE_TAG`（同源，
+  見「版本管理」），故手動部署與 CI 部署為同一版本、不再分岔。
 - **NewsContents 綁絕對 host 路徑**：`-v /Users/chen/AI/Tw_stock/Tw_stock_DB/NewsContents:/workspace/NewsContents`
   （**bind mount，非具名 volume**）。此目錄由 db-operating 寫入、Tw_stock_news 讀取，必須
   與 host／其他容器看到同一份真實目錄。
