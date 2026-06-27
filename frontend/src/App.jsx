@@ -74,8 +74,9 @@ function App() {
             ))}
           </nav>
           <div className="tab-content" role="tabpanel">
-            {currentTab.components.map((Component) => (
-              <Component key={Component.name} />
+            {currentTab.components.map((Component, index) => (
+              // key 以「分頁鍵 + 索引」組成，避免依賴 minify 後會被改名的函式 name
+              <Component key={`${currentTab.key}-${index}`} />
             ))}
           </div>
         </div>
