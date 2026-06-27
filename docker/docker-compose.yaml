@@ -11,7 +11,8 @@ services:
       - db_network
 
   tw_stocker_daily_upload:
-    image: nk7260ynpa/tw_stock_db_operating:2.5.0
+    # 版本以 git tag 為單一版本軸；compose 為開發便利用途，固定用 :latest 避免版本分岔
+    image: nk7260ynpa/tw_stock_db_operating:latest
     container_name: tw_stocker_daily_upload
     ports:
       - "8080:8080"
