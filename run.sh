@@ -11,7 +11,7 @@ IMAGE_NAME="nk7260ynpa/tw_stock_db_operating"
 # （CI 用 ${CI_COMMIT_TAG#v}）。此處取最近的版本 tag、去掉開頭 v 作為 image 標籤，
 # 確保手動 ./run.sh 與 CI 部署同一版本、不再各自硬編而分岔。
 # 取不到（無 git 或尚無 tag）時退回 latest，與 CI build 一併打的 :latest 對齊。
-IMAGE_TAG="$(git -C "${SCRIPT_DIR}" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')" || true
+IMAGE_TAG="$(git -C "${SCRIPT_DIR}" describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null | sed 's/^v//')" || true
 [[ -n "${IMAGE_TAG}" ]] || IMAGE_TAG="latest"
 
 CONTAINER_NAME="tw_stock_db_operating"
