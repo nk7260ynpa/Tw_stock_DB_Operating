@@ -115,6 +115,20 @@ class YTTranscriptUploader:
             except (ValueError, KeyError):
                 pass
 
+        # 方法 4：英文 M/D/YYYY 格式（如 "06/26/2026 (Fri)"）
+        # 頻道部分影片以美式日期作標題，月在前、日在後、四位數年在最後。
+        match = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", title)
+        if match:
+            try:
+                month = int(match.group(1))
+                day = int(match.group(2))
+                year = int(match.group(3))
+                title_dt = datetime(year, month, day)
+                if title_dt.date() == target_dt.date():
+                    return True
+            except ValueError:
+                pass
+
         return False
 
     def get_latest_stream_url(self, target_date):

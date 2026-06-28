@@ -145,6 +145,27 @@ class TestYTTranscriptUploader(unittest.TestCase):
             YTTranscriptUploader._match_video_date(video, "2026-03-11")
         )
 
+    def test_match_video_date_us_slash_format(self):
+        """測試標題中英文 MM/DD/YYYY（美式）格式匹配。"""
+        video = {"title": "06/26/2026 (Fri) Apple Price Hikes!"}
+        self.assertTrue(
+            YTTranscriptUploader._match_video_date(video, "2026-06-26")
+        )
+
+    def test_match_video_date_us_slash_format_no_pad(self):
+        """測試標題中英文 M/D/YYYY（無前導零）格式匹配。"""
+        video = {"title": "6/15/2026 (Mon) US-Iran Truce!"}
+        self.assertTrue(
+            YTTranscriptUploader._match_video_date(video, "2026-06-15")
+        )
+
+    def test_match_video_date_us_slash_format_wrong_day(self):
+        """測試英文 MM/DD/YYYY 格式但日期不符時不匹配。"""
+        video = {"title": "06/27/2026 (Sat) Weekend Special"}
+        self.assertFalse(
+            YTTranscriptUploader._match_video_date(video, "2026-06-26")
+        )
+
     def test_match_video_date_no_match(self):
         """測試日期不匹配。"""
         video = {"upload_date": "20260310", "title": "March 10"}
