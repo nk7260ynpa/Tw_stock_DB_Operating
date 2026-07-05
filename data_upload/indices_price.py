@@ -13,6 +13,7 @@ import requests
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from data_upload import special_info_common
 from data_upload.base import CrawlError, NetworkError
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,18 @@ class IndicesPriceUploader:
     從爬蟲取得道瓊/納斯達克指數價格，
     使用 REPLACE INTO 寫入 SPECIAL_INFO 資料庫。
     資料表結構由 Tw_stock_DB 專案負責建立與管理。
+
+    股市指數為非 24/7 市場（is_continuous_market=False）：排程時間（07:20）
+    美股已收盤、資料已定案，爬蟲 fallback 即代表請求日為非交易日（如美股
+    國慶／Juneteenth 休市），故 fallback／空時標記請求日（詳見
+    special_info_common 帳本語意說明）。
     """
+
+    # 非 24/7 市場，供 special_info_common 判斷帳本語意與缺漏偵測行為。
+    is_continuous_market = False
+    price_table = "IndicesPrice"
+    uploaded_table = "IndicesPriceUploaded"
+    asset_label = "股市指數價格"
 
     def __init__(self, conn, crawler_host):
         """初始化股市指數價格上傳器。
@@ -196,8 +208,8 @@ class IndicesPriceUploader:
     def upload(self, date):
         """執行股市指數價格資料上傳流程。
 
-        從爬蟲取得指定日期資料，檢查是否已上傳，
-        若未上傳則驗證後寫入資料庫並記錄上傳日期。
+        從爬蟲取得指定日期資料，檢查帳本是否已標記，若未標記則依帳本語意
+        寫入資料庫並記帳（實際交易日；fallback／空時額外標記請求日為非交易日）。
 
         Args:
             date (str): 日期字串（YYYY-MM-DD）。
@@ -212,22 +224,39 @@ class IndicesPriceUploader:
             logger.info("股市指數價格 %s 資料已存在，跳過上傳。", date)
             return {"date": date, "record_count": 0}
 
-        df = self.crawl_data(date)
+        result = special_info_common.fetch_and_store(self, date)
+        return {"date": date, "record_count": result["record_count"]}
 
-        if df.empty:
-            # 非交易日，記錄已處理以避免重複檢查
-            self._record_uploaded_date(date)
-            logger.info("股市指數價格 %s 無資料（非交易日），已記錄。", date)
-            return {"date": date, "record_count": 0}
+    def backfill_date(self, date):
+        """回補單一日期（缺漏偵測用；不檢查帳本，套用新帳本語意）。
 
-        df = self.check_schema(df)
-        record_count = len(df)
+        Args:
+            date (str): 日期字串（YYYY-MM-DD）。
 
-        self._replace_into(df)
-        self._record_uploaded_date(date)
+        Returns:
+            dict: 包含 date、record_count 與 filled 的結果字典。
+        """
+        return special_info_common.fetch_and_store(self, date)
 
-        logger.info(
-            "股市指數價格 %s 資料已上傳，共 %d 筆。",
-            date, record_count,
-        )
-        return {"date": date, "record_count": record_count}
+    def find_missing_dates(self, days=30):
+        """找出近 N 天在價格表缺漏、需補抓的候選日期。
+
+        Args:
+            days (int): 掃描天數，預設 30。
+
+        Returns:
+            list[str]: 由舊到新排序的候選缺漏日期字串。
+        """
+        return special_info_common.find_missing_dates(self, days=days)
+
+    def backfill_missing(self, days=30, deep=False):
+        """掃描近 N 天缺漏並補抓（冪等、可重跑）。
+
+        Args:
+            days (int): 掃描天數，預設 30。
+            deep (bool): 是否先清除孤兒帳本再重驗，預設 False。
+
+        Returns:
+            dict: 補抓摘要。
+        """
+        return special_info_common.backfill_missing(self, days=days, deep=deep)
