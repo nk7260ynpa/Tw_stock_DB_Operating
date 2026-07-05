@@ -22,6 +22,7 @@
 - **匯率**：從爬蟲取得匯率資料（USDTWD/JPYTWD），metadata 存入 SPECIAL_INFO 資料庫的 CurrencyPrice 表（`data_upload/currency_price.py`）
 - **股市指數**：從爬蟲取得國際股市指數價格（道瓊工業指數/納斯達克指數），資料存入 SPECIAL_INFO 資料庫的 IndicesPrice 表（`data_upload/indices_price.py`）
 - **失敗重試佇列**：排程任務失敗時自動加入重試佇列。網路中斷每小時檢查網路並重試，最多 5 次；非網路錯誤（如「資料尚未發布」）標為 exhausted 後，每日（預設 06:30）「隔日重排」重設為 pending 再試一輪，最多 3 次，避免永久放棄隔日才會出現的資料（`retry_queue.py`）
+- **SPECIAL_INFO 缺漏自我修復**：每日（預設 08:00，與各商品 07:00~07:20 排程錯開）對原油／黃金／比特幣／匯率／股市指數掃描近 30 天缺漏並自動補回，以「問爬蟲」為交易日／休市的唯一真相來源（回傳該日自身 K 棒即補上，只回更早日期即視為非交易日）。掃描窗遠大於各商品排程的「過去 7 天」回補窗，足以自癒管線停擺數週造成的缺漏。共用邏輯於 `data_upload/special_info_common.py`，一次性修復與孤兒帳本清理入口為 `backfill_special_info.py`
 
 ## 支援的資料來源
 
@@ -54,6 +55,7 @@ Tw_stock_DB_Operating/
 ├── routers.py                # MySQLRouter 路由類別
 ├── upload.py                 # 批次上傳入口程式
 ├── DailyUpload.py            # 每日排程上傳
+├── backfill_special_info.py  # SPECIAL_INFO 缺漏一次性回補與孤兒帳本清理入口
 ├── retry_queue.py            # 網路失敗重試佇列
 ├── job_queue.py              # 任務佇列（FIFO 排隊機制）
 ├── pyproject.toml            # Python 專案定義（PEP 621）
@@ -80,7 +82,8 @@ Tw_stock_DB_Operating/
 │   ├── gold_price.py        # 國際黃金期貨價格
 │   ├── bitcoin_price.py     # 比特幣價格
 │   ├── currency_price.py    # 匯率資料（USDTWD/JPYTWD）
-│   └── indices_price.py    # 股市指數價格（DowJones/Nasdaq）
+│   ├── indices_price.py    # 股市指數價格（DowJones/Nasdaq）
+│   └── special_info_common.py # SPECIAL_INFO 價格共用邏輯（帳本語意 + 缺漏偵測補抓）
 ├── frontend/                 # React 前端原始碼（Vite）
 │   ├── package.json
 │   ├── vite.config.js
@@ -146,6 +149,8 @@ Tw_stock_DB_Operating/
 │   ├── test_web_server_currency_price.py
 │   ├── test_indices_price.py
 │   ├── test_web_server_indices_price.py
+│   ├── test_special_info_common.py       # 共用邏輯（帳本語意 + 缺漏偵測補抓）
+│   ├── test_web_server_special_info_backfill.py  # 缺漏自我修復 API 與作業
 │   ├── test_retry_queue.py
 │   └── test_job_queue.py
 └── logs/                     # 日誌資料夾
@@ -266,6 +271,46 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:latest python -m pytest test/
 - **任務佇列**：所有上傳任務透過 FIFO 佇列管理，同一時間只執行一個任務，其餘排隊等待，前端顯示排隊位置
 
 排程設定會儲存至 `logs/config.json`，重試佇列持久化至 `logs/retry_queue.json`，容器重啟後自動套用。
+
+## SPECIAL_INFO 帳本語意與缺漏自我修復
+
+原油／黃金／比特幣／匯率／股市指數五個 SPECIAL_INFO 商品的上傳器共用
+`data_upload/special_info_common.py`，重點如下。
+
+### 帳本記帳語意（防止資料掉列）
+
+`*Uploaded` 帳本只記錄「爬蟲回傳 DataFrame 內每一筆的**實際交易日**」；
+**請求日**僅在下列情況才額外標記已完成：
+
+1. 取得的最新實際日期 == 請求日（真的拿到當日資料）；或
+2. 該商品**非 24/7**（原油／黃金／匯率／股市指數）且爬蟲回 fallback（更早
+   日期）或空（確定請求日為非交易日）。
+
+各上傳器以類別屬性 `is_continuous_market` 區分兩種行為：**比特幣為 True**
+（24/7 連續市場），實際日期 < 請求日時**不**標記請求日，留待次日 UTC 日 K
+完成後回補，避免帳本謊報造成 `check_uploaded` 日後永久跳過該日。
+
+### 每日缺漏自我修復（排程 08:00）
+
+每日對五個商品掃描近 30 天缺漏並自動補回，以「問爬蟲」為交易日／休市的唯一
+真相來源（免維護各市場假日表）。REST 端點：
+
+- `GET /api/special-info-backfill/schedule`、`PUT /api/special-info-backfill/schedule`：檢視／修改排程時間。
+- `POST /api/special-info-backfill/run`：手動觸發，body 可帶 `{"days": 30, "deep": false}`。
+  - `deep=false`（日常）：跳過帳本已標記的日期（避免反覆詢問已確認的非交易日）。
+  - `deep=true`（人工修復歷史缺漏）：先清除窗內孤兒帳本再交由爬蟲重驗，救回
+    舊 bug／管線停擺期間被誤標為已完成的「真實交易日」。
+
+### 一次性回補與孤兒帳本清理
+
+`backfill_special_info.py` 以 deep 模式對五個商品執行「清孤兒帳本 → 逐日重驗
+補回」，冪等可重跑：
+
+```bash
+docker run --rm --network db_network \
+  nk7260ynpa/tw_stock_db_operating:latest \
+  python backfill_special_info.py --days 30
+```
 
 ## 安裝方式
 
