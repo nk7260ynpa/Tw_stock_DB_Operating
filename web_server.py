@@ -85,6 +85,20 @@ retry_queue: RetryQueue | None = None
 # 任務於資料已可取得後，能在當日重新被重試佇列處理。
 REQUEUE_EXHAUSTED_TIME = "06:30"
 
+# SPECIAL_INFO 缺漏自我修復掃描窗（天數）：遠大於各商品排程的「過去 7 天」
+# 回補窗，足以自癒管線停擺數週造成的缺漏。
+SPECIAL_INFO_BACKFILL_DAYS = 30
+
+# SPECIAL_INFO 五個商品的 (task_type, Uploader 類別) 對照，供缺漏自我修復
+# 作業逐一掃描補抓；task_type 與 retry_queue／各 upload 端點一致。
+SPECIAL_INFO_ASSETS = [
+    ("oil_price", OilPriceUploader),
+    ("gold_price", GoldPriceUploader),
+    ("bitcoin_price", BitcoinPriceUploader),
+    ("currency_price", CurrencyPriceUploader),
+    ("indices_price", IndicesPriceUploader),
+]
+
 # 任務佇列
 from job_queue import JobQueue
 job_queue: JobQueue | None = None
@@ -127,6 +141,7 @@ def load_config():
         "bitcoin_price_schedule": {"time": "07:10"},
         "currency_price_schedule": {"time": "07:15"},
         "indices_price_schedule": {"time": "07:20"},
+        "special_info_backfill_schedule": {"time": "08:00"},
     }
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -171,6 +186,11 @@ def load_config():
         # 向後相容：舊 config 可能沒有 indices_price_schedule
         if "indices_price_schedule" not in config:
             config["indices_price_schedule"] = default["indices_price_schedule"]
+        # 向後相容：舊 config 可能沒有 special_info_backfill_schedule
+        if "special_info_backfill_schedule" not in config:
+            config["special_info_backfill_schedule"] = (
+                default["special_info_backfill_schedule"]
+            )
         return config
     return default
 
@@ -191,6 +211,7 @@ def setup_schedule(
     yt_transcript_schedule=None, oil_price_schedule=None,
     gold_price_schedule=None, bitcoin_price_schedule=None,
     currency_price_schedule=None, indices_price_schedule=None,
+    special_info_backfill_schedule=None,
 ):
     """設定每日排程（含各資料來源每日檢查）。
 
@@ -218,6 +239,8 @@ def setup_schedule(
             包含 time（HH:MM）。
         indices_price_schedule (dict | None): 股市指數價格每日排程設定，
             包含 time（HH:MM）。
+        special_info_backfill_schedule (dict | None): SPECIAL_INFO 每日缺漏
+            自我修復偵測補抓排程設定，包含 time（HH:MM）。
     """
     with schedule_lock:
         schedule_lib.clear()
@@ -310,6 +333,15 @@ def setup_schedule(
                 run_indices_price_scheduled
             )
             logger.info("股市指數價格每日排程已設定為 %s", indices_time)
+
+        if special_info_backfill_schedule:
+            backfill_time = special_info_backfill_schedule.get("time", "08:00")
+            schedule_lib.every().day.at(backfill_time).do(
+                run_special_info_backfill_scheduled
+            )
+            logger.info(
+                "SPECIAL_INFO 缺漏自我修復每日排程已設定為 %s", backfill_time
+            )
 
         # 每小時執行重試佇列
         schedule_lib.every(1).hours.do(process_retry_queue)
@@ -1724,6 +1756,97 @@ def run_indices_price_upload_job(job_id, start_date, end_date):
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
 
 
+def run_special_info_backfill_scheduled():
+    """排程觸發的 SPECIAL_INFO 缺漏自我修復偵測補抓（近 30 天）。"""
+    job_id = str(uuid.uuid4())[:8]
+    now = datetime.now().isoformat()
+
+    with jobs_lock:
+        upload_jobs[job_id] = {
+            "job_id": job_id,
+            "type": "special_info_backfill",
+            "status": "queued",
+            "days": SPECIAL_INFO_BACKFILL_DAYS,
+            "record_count": 0,
+            "summary": [],
+            "errors": [],
+            "created_at": now,
+            "finished_at": None,
+            "scheduled": True,
+        }
+
+    job_queue.enqueue(
+        job_id, run_special_info_backfill_job,
+        (job_id, SPECIAL_INFO_BACKFILL_DAYS),
+    )
+    logger.info(
+        "SPECIAL_INFO 缺漏自我修復任務已建立 %s（近 %d 天）",
+        job_id, SPECIAL_INFO_BACKFILL_DAYS,
+    )
+
+
+def run_special_info_backfill_job(
+    job_id, days=SPECIAL_INFO_BACKFILL_DAYS, deep=False,
+):
+    """執行 SPECIAL_INFO 缺漏自我修復偵測補抓任務（背景執行緒）。
+
+    對 5 個商品各自掃描近 N 天缺漏並以「問爬蟲」為交易日唯一真相回補。
+    冪等、可重跑。逐商品建立獨立連線；某商品失敗不影響其他商品。
+    掃描過程中遇 NetworkError 的日期改交由 retry_queue 後續重試。
+
+    Args:
+        job_id (str): 任務 ID。
+        days (int): 掃描天數，預設 SPECIAL_INFO_BACKFILL_DAYS。
+        deep (bool): 是否深度重驗（先清孤兒帳本再重驗），預設 False；
+            日常排程用 False，人工修復歷史缺漏用 True。
+    """
+    with jobs_lock:
+        upload_jobs[job_id]["status"] = "running"
+
+    total_records = 0
+    summaries = []
+    errors = []
+
+    for task_type, uploader_cls in SPECIAL_INFO_ASSETS:
+        conn = None
+        try:
+            conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
+            uploader = uploader_cls(conn, CRAWLERHOST)
+            summary = uploader.backfill_missing(days=days, deep=deep)
+            total_records += summary["records"]
+            summaries.append(summary)
+
+            # 網路失敗的日期交由 retry_queue 後續重試（沿用既有機制）。
+            if retry_queue is not None:
+                for date_str in summary["network_errors"]:
+                    retry_queue.add(
+                        task_type,
+                        {"date": date_str},
+                        "缺漏自我修復網路失敗",
+                        created_by_job_id=job_id,
+                    )
+        except Exception as e:  # noqa: BLE001 逐商品隔離，避免單一失敗中斷全部
+            logger.error(
+                "SPECIAL_INFO 缺漏自我修復 %s 失敗：%s", task_type, e
+            )
+            errors.append(f"{task_type}: {e}")
+        finally:
+            if conn is not None:
+                conn.close()
+
+    with jobs_lock:
+        upload_jobs[job_id]["status"] = "completed" if not errors else "failed"
+        upload_jobs[job_id]["record_count"] = total_records
+        upload_jobs[job_id]["summary"] = summaries
+        upload_jobs[job_id]["errors"] = errors
+        upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+    logger.info(
+        "SPECIAL_INFO 缺漏自我修復任務完成 %s（補回 %d 筆，錯誤 %d 個）",
+        job_id, total_records, len(errors),
+    )
+
+
 # Pydantic 請求模型
 class UploadRequest(BaseModel):
     """手動上傳請求。"""
@@ -1857,6 +1980,17 @@ class IndicesPriceScheduleRequest(BaseModel):
     time: str
 
 
+class SpecialInfoBackfillScheduleRequest(BaseModel):
+    """SPECIAL_INFO 缺漏自我修復每日排程更新請求。"""
+    time: str
+
+
+class SpecialInfoBackfillRunRequest(BaseModel):
+    """SPECIAL_INFO 缺漏自我修復手動觸發請求。"""
+    days: int = SPECIAL_INFO_BACKFILL_DAYS
+    deep: bool = False
+
+
 # FastAPI 應用
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1887,6 +2021,7 @@ async def lifespan(app: FastAPI):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
+        config.get("special_info_backfill_schedule"),
     )
 
     t = threading.Thread(target=scheduler_thread, daemon=True)
@@ -2032,6 +2167,7 @@ def update_schedule(req: ScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
+        config.get("special_info_backfill_schedule"),
     )
 
     logger.info("排程時間已更新為 %s", req.time)
@@ -2251,6 +2387,7 @@ def update_tdcc_schedule(req: TDCCScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
+        config.get("special_info_backfill_schedule"),
     )
 
     logger.info("TDCC 每日排程已更新為 %s", req.time)
@@ -2378,6 +2515,7 @@ def update_ctee_news_schedule(req: CTEENewsScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
+        config.get("special_info_backfill_schedule"),
     )
 
     logger.info("CTEE 新聞每日排程已更新為 %s", req.time)
@@ -2505,6 +2643,7 @@ def update_cnyes_news_schedule(req: CNYESNewsScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
+        config.get("special_info_backfill_schedule"),
     )
 
     logger.info("CNYES 新聞每日排程已更新為 %s", req.time)
@@ -2632,6 +2771,7 @@ def update_ptt_news_schedule(req: PTTNewsScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
+        config.get("special_info_backfill_schedule"),
     )
 
     logger.info("PTT 新聞每日排程已更新為 %s", req.time)
@@ -2759,6 +2899,7 @@ def update_moneyudn_news_schedule(req: MoneyUDNNewsScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
+        config.get("special_info_backfill_schedule"),
     )
 
     logger.info("MoneyUDN 新聞每日排程已更新為 %s", req.time)
@@ -2874,6 +3015,7 @@ def update_yt_transcript_schedule(req: YTTranscriptScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
+        config.get("special_info_backfill_schedule"),
     )
 
     logger.info("YT 逐字稿每日排程已更新為 %s", req.time)
@@ -3041,6 +3183,7 @@ def update_oil_price_schedule(req: OilPriceScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
+        config.get("special_info_backfill_schedule"),
     )
 
     logger.info("原油價格每日排程已更新為 %s", req.time)
@@ -3167,6 +3310,7 @@ def update_gold_price_schedule(req: GoldPriceScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
+        config.get("special_info_backfill_schedule"),
     )
 
     logger.info("黃金價格每日排程已更新為 %s", req.time)
@@ -3293,6 +3437,7 @@ def update_bitcoin_price_schedule(req: BitcoinPriceScheduleRequest):
         config["bitcoin_price_schedule"],
         config.get("currency_price_schedule"),
         config.get("indices_price_schedule"),
+        config.get("special_info_backfill_schedule"),
     )
 
     logger.info("比特幣價格每日排程已更新為 %s", req.time)
@@ -3419,6 +3564,7 @@ def update_currency_price_schedule(req: CurrencyPriceScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config["currency_price_schedule"],
         config.get("indices_price_schedule"),
+        config.get("special_info_backfill_schedule"),
     )
 
     logger.info("匯率每日排程已更新為 %s", req.time)
@@ -3545,6 +3691,7 @@ def update_indices_price_schedule(req: IndicesPriceScheduleRequest):
         config.get("bitcoin_price_schedule"),
         config.get("currency_price_schedule"),
         config["indices_price_schedule"],
+        config.get("special_info_backfill_schedule"),
     )
 
     logger.info("股市指數價格每日排程已更新為 %s", req.time)
@@ -3552,6 +3699,109 @@ def update_indices_price_schedule(req: IndicesPriceScheduleRequest):
         "time": req.time,
         "message": f"股市指數價格每日排程已更新為 {req.time}",
     }
+
+
+# SPECIAL_INFO 缺漏自我修復 API 端點
+@app.get("/api/special-info-backfill/schedule")
+def get_special_info_backfill_schedule():
+    """取得 SPECIAL_INFO 缺漏自我修復每日排程設定。
+
+    Returns:
+        dict: 包含 time 與 days 欄位的排程資訊。
+    """
+    config = load_config()
+    backfill = config.get(
+        "special_info_backfill_schedule", {"time": "08:00"}
+    )
+    return {"time": backfill["time"], "days": SPECIAL_INFO_BACKFILL_DAYS}
+
+
+@app.put("/api/special-info-backfill/schedule")
+def update_special_info_backfill_schedule(
+    req: SpecialInfoBackfillScheduleRequest,
+):
+    """更新 SPECIAL_INFO 缺漏自我修復每日排程設定。
+
+    Args:
+        req: 包含 time 的請求。
+
+    Returns:
+        dict: 更新後的排程設定與訊息。
+    """
+    try:
+        time_parts = req.time.split(":")
+        hour = int(time_parts[0])
+        minute = int(time_parts[1])
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError
+    except (ValueError, IndexError):
+        raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
+
+    config = load_config()
+    config["special_info_backfill_schedule"] = {"time": req.time}
+    save_config(config)
+    setup_schedule(
+        config["schedule_time"],
+        config.get("tdcc_schedule"),
+        config.get("ctee_schedule"),
+        config.get("cnyes_schedule"),
+        config.get("ptt_schedule"),
+        config.get("moneyudn_schedule"),
+        config.get("yt_transcript_schedule"),
+        config.get("oil_price_schedule"),
+        config.get("gold_price_schedule"),
+        config.get("bitcoin_price_schedule"),
+        config.get("currency_price_schedule"),
+        config.get("indices_price_schedule"),
+        config["special_info_backfill_schedule"],
+    )
+
+    logger.info("SPECIAL_INFO 缺漏自我修復每日排程已更新為 %s", req.time)
+    return {
+        "time": req.time,
+        "message": f"SPECIAL_INFO 缺漏自我修復每日排程已更新為 {req.time}",
+    }
+
+
+@app.post("/api/special-info-backfill/run")
+def create_special_info_backfill_run(req: SpecialInfoBackfillRunRequest = None):
+    """手動觸發 SPECIAL_INFO 缺漏自我修復偵測補抓任務。
+
+    Args:
+        req: 可選，包含 days（掃描天數）與 deep（是否深度重驗）。未提供時
+            使用預設 30 天、deep=False。
+
+    Returns:
+        dict: 任務 ID 與初始狀態。
+    """
+    days = req.days if req is not None else SPECIAL_INFO_BACKFILL_DAYS
+    deep = req.deep if req is not None else False
+    if days <= 0:
+        raise HTTPException(400, "days 必須為正整數")
+
+    job_id = str(uuid.uuid4())[:8]
+    with jobs_lock:
+        upload_jobs[job_id] = {
+            "job_id": job_id,
+            "type": "special_info_backfill",
+            "status": "queued",
+            "days": days,
+            "deep": deep,
+            "record_count": 0,
+            "summary": [],
+            "errors": [],
+            "created_at": datetime.now().isoformat(),
+            "finished_at": None,
+        }
+
+    position = job_queue.enqueue(
+        job_id, run_special_info_backfill_job, (job_id, days, deep),
+    )
+    logger.info(
+        "SPECIAL_INFO 缺漏自我修復手動任務已建立 %s（近 %d 天，deep=%s）",
+        job_id, days, deep,
+    )
+    return {"job_id": job_id, "status": "queued", "queue_position": position}
 
 
 # 公司產業對照 API 端點
