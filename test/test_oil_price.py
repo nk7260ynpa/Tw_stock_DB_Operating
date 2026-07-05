@@ -14,6 +14,28 @@ from data_upload.oil_price import (
 from data_upload.base import CrawlError, NetworkError
 
 
+def _recorded_uploaded_dates(mock_conn):
+    """從 mock 連線的 execute 呼叫中收集寫入帳本表的日期。
+
+    Args:
+        mock_conn: 被 mock 的 SQLAlchemy 連線物件。
+
+    Returns:
+        list[str]: 被寫入帳本的日期字串清單。
+    """
+    dates = []
+    for call in mock_conn.execute.call_args_list:
+        if not call.args:
+            continue
+        if "INSERT IGNORE INTO" not in str(call.args[0]):
+            continue
+        if len(call.args) >= 2 and isinstance(call.args[1], dict):
+            date = call.args[1].get("date")
+            if date is not None:
+                dates.append(date)
+    return dates
+
+
 class TestOilPriceType(unittest.TestCase):
     """測試 OilPriceType schema。"""
 
@@ -351,6 +373,61 @@ class TestUpload(unittest.TestCase):
         self.assertEqual(result["date"], "2026-03-18")
         self.assertEqual(result["record_count"], 2)
         self.mock_conn.commit.assert_called()
+
+    @patch("data_upload.oil_price.requests.get")
+    def test_successful_upload_records_actual_date(self, mock_get):
+        """測試實際==請求日時，帳本記錄實際交易日。"""
+        self.uploader.check_uploaded = MagicMock(return_value=False)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "date": "2026-03-18",
+            "data": [
+                {
+                    "product": "WTI", "date": "2026-03-18",
+                    "open": 68.50, "high": 69.20, "low": 68.10,
+                    "close": 68.85, "volume": 250000,
+                },
+            ],
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        self.uploader.upload("2026-03-18")
+
+        recorded = _recorded_uploaded_dates(self.mock_conn)
+        self.assertIn("2026-03-18", recorded)
+
+    @patch("data_upload.oil_price.requests.get")
+    def test_fallback_records_both_actual_and_request_date(self, mock_get):
+        """測試非 24/7 商品 fallback 時，實際日與請求日皆記帳。
+
+        請求 2026-03-16（週日），爬蟲 fallback 回 2026-03-13（週五）：
+        帳本應同時寫入實際日 2026-03-13（真資料）與請求日 2026-03-16
+        （確定為非交易日，記帳避免反覆檢查）。
+        """
+        self.uploader.check_uploaded = MagicMock(return_value=False)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "date": "2026-03-16",
+            "data": [
+                {
+                    "product": "WTI", "date": "2026-03-13",
+                    "open": 68.50, "high": 69.20, "low": 68.10,
+                    "close": 68.85, "volume": 250000,
+                },
+            ],
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        result = self.uploader.upload("2026-03-16")
+
+        self.assertEqual(result["record_count"], 1)
+        recorded = _recorded_uploaded_dates(self.mock_conn)
+        self.assertIn("2026-03-13", recorded)
+        self.assertIn("2026-03-16", recorded)
 
     @patch("data_upload.oil_price.requests.get")
     def test_network_error_propagates(self, mock_get):

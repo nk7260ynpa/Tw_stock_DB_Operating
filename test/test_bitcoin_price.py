@@ -14,6 +14,32 @@ from data_upload.bitcoin_price import (
 from data_upload.base import CrawlError, NetworkError
 
 
+def _recorded_uploaded_dates(mock_conn):
+    """從 mock 連線的 execute 呼叫中收集寫入帳本表的日期。
+
+    掃描所有 execute(call) 找出 SQL 含 "INSERT IGNORE INTO" 的呼叫，
+    取其參數 dict 的 date 欄位，用於驗證帳本記帳語意。
+
+    Args:
+        mock_conn: 被 mock 的 SQLAlchemy 連線物件。
+
+    Returns:
+        list[str]: 被寫入帳本的日期字串清單。
+    """
+    dates = []
+    for call in mock_conn.execute.call_args_list:
+        if not call.args:
+            continue
+        sql = str(call.args[0])
+        if "INSERT IGNORE INTO" not in sql:
+            continue
+        if len(call.args) >= 2 and isinstance(call.args[1], dict):
+            date = call.args[1].get("date")
+            if date is not None:
+                dates.append(date)
+    return dates
+
+
 class TestBitcoinPriceType(unittest.TestCase):
     """測試 BitcoinPriceType schema。"""
 
@@ -284,8 +310,12 @@ class TestUpload(unittest.TestCase):
         self.assertEqual(result["record_count"], 0)
 
     @patch("data_upload.bitcoin_price.requests.get")
-    def test_empty_data_records_date(self, mock_get):
-        """測試無資料時仍記錄已處理日期。"""
+    def test_empty_data_not_recorded_for_continuous_market(self, mock_get):
+        """測試 24/7 商品無資料時「不」記帳請求日（留待次日回補）。
+
+        比特幣為連續市場：當日 UTC 日 K 尚未生成時爬蟲回空，若此時記帳
+        請求日會造成日後永久跳過，故不記帳。
+        """
         self.uploader.check_uploaded = MagicMock(return_value=False)
 
         mock_resp = MagicMock()
@@ -300,9 +330,43 @@ class TestUpload(unittest.TestCase):
 
         self.assertEqual(result["date"], "2026-03-19")
         self.assertEqual(result["record_count"], 0)
-        # 應該有寫入 BitcoinPriceUploaded
-        self.mock_conn.execute.assert_called()
-        self.mock_conn.commit.assert_called()
+        # 24/7 商品空資料不應寫入 BitcoinPriceUploaded（不記帳）
+        self.mock_conn.execute.assert_not_called()
+
+    @patch("data_upload.bitcoin_price.requests.get")
+    def test_fallback_earlier_date_not_recording_request_date(self, mock_get):
+        """測試 24/7 商品 fallback 到更早日期時，只記實際日、不記請求日。
+
+        請求 2026-03-20，爬蟲 fallback 回 2026-03-19（實際<請求）：
+        帳本只應寫入 2026-03-19，不應寫入請求日 2026-03-20。
+        """
+        self.uploader.check_uploaded = MagicMock(return_value=False)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "date": "2026-03-20",
+            "data": [
+                {
+                    "product": "BTC-USD",
+                    "date": "2026-03-19",
+                    "open": 84500.00,
+                    "high": 85200.00,
+                    "low": 83800.00,
+                    "close": 84950.00,
+                    "volume": 25000000000,
+                },
+            ],
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        result = self.uploader.upload("2026-03-20")
+
+        self.assertEqual(result["record_count"], 1)
+        # 收集所有寫入帳本的日期，應只含實際日 2026-03-19、不含請求日 2026-03-20
+        recorded = _recorded_uploaded_dates(self.mock_conn)
+        self.assertIn("2026-03-19", recorded)
+        self.assertNotIn("2026-03-20", recorded)
 
     @patch("data_upload.bitcoin_price.requests.get")
     def test_successful_upload(self, mock_get):
