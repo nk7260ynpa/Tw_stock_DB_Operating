@@ -235,5 +235,28 @@ class TestLoadConfigWithCNYES(unittest.TestCase):
         self.assertEqual(config["cnyes_schedule"]["time"], "22:30")
 
 
+class TestCNYESNewsScheduled(unittest.TestCase):
+    """測試 CNYES 新聞排程任務（回溯時數）。"""
+
+    def setUp(self):
+        """每次測試前清空任務清單。"""
+        import web_server
+        web_server.upload_jobs.clear()
+
+    @patch("web_server.job_queue")
+    def test_scheduled_uses_48_hours(self, mock_queue):
+        """排程改於早上抓取，回溯時數應為 48 小時以涵蓋昨日整天。"""
+        import web_server
+
+        self.assertEqual(web_server.NEWS_SCHEDULE_HOURS, 48)
+
+        web_server.run_cnyes_news_scheduled()
+
+        mock_queue.enqueue.assert_called_once()
+        func, params = mock_queue.enqueue.call_args.args[1:]
+        self.assertEqual(func, web_server.run_cnyes_news_hours_job)
+        self.assertEqual(params[1], 48)
+
+
 if __name__ == "__main__":
     unittest.main()

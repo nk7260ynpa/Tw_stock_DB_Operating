@@ -149,6 +149,13 @@ CRAWL_SCHEDULE_KEYS = (
     "special_info_backfill_schedule",
 )
 
+# 舊版（v1）曾用、但恰好落在新窗邊界內、不會被 _in_crawl_window 判為窗外的預設值。
+# 一次性遷移時需一併收斂到新預設，否則既有部署會停在舊值。唯一案例：
+# special_info_backfill 舊預設 08:00（== 窗尾）。
+_SUPERSEDED_IN_WINDOW_DEFAULTS = {
+    "special_info_backfill_schedule": "08:00",
+}
+
 
 def _in_crawl_window(time_str):
     """判斷 HH:MM 是否落在爬蟲集中時間窗 07:30~08:00（含端點）內。
@@ -192,7 +199,9 @@ def _migrate_crawl_schedule_window(config, default):
     for key in CRAWL_SCHEDULE_KEYS:
         entry = config.get(key)
         cur = entry.get("time") if isinstance(entry, dict) else None
-        if not _in_crawl_window(cur):
+        # 窗外，或恰為「落在窗內的舊版預設」→ 收斂到新預設。
+        if (not _in_crawl_window(cur)
+                or cur == _SUPERSEDED_IN_WINDOW_DEFAULTS.get(key)):
             new_entry = dict(default[key])
             if config.get(key) != new_entry:
                 config[key] = new_entry
@@ -3836,7 +3845,7 @@ def get_special_info_backfill_schedule():
     """
     config = load_config()
     backfill = config.get(
-        "special_info_backfill_schedule", {"time": "08:00"}
+        "special_info_backfill_schedule", {"time": "07:57"}
     )
     return {"time": backfill["time"], "days": SPECIAL_INFO_BACKFILL_DAYS}
 

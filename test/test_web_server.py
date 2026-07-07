@@ -125,6 +125,28 @@ class TestCrawlScheduleMigration(unittest.TestCase):
         # 窗內自訂 07:47 應保留（非重置為預設 07:46）
         self.assertEqual(config["ctee_schedule"]["time"], "07:47")
 
+    @patch("web_server.save_config")
+    @patch("web_server.CONFIG_PATH")
+    def test_superseded_in_window_default_is_migrated(
+        self, mock_path, mock_save
+    ):
+        """舊版 special_info_backfill 預設 08:00（落窗尾）應收斂到新預設 07:57。"""
+        import web_server
+
+        mock_path.exists.return_value = True
+        old_config = {
+            "schedule_time": "19:07",
+            "special_info_backfill_schedule": {"time": "08:00"},
+        }
+
+        with patch("builtins.open", unittest.mock.mock_open(read_data="{}")):
+            with patch("json.load", return_value=old_config.copy()):
+                config = web_server.load_config()
+
+        self.assertEqual(
+            config["special_info_backfill_schedule"]["time"], "07:57"
+        )
+
 
 class TestSaveConfig(unittest.TestCase):
     """測試 save_config 函式。"""
