@@ -132,6 +132,13 @@ def daily_craw():
 
         missing_dates = get_missing_dates(db_name, days=30)
 
+        # 排程改於早上（07:30）執行，此時當日台股尚未收盤、行情資料尚未發布；
+        # 若貿然爬取今日會取得空資料，經 base.upload_date 標記為「非交易日」
+        # (Open=False) 後將永久跳過，導致今日真實行情永遠不會補上。故排除今日，
+        # 僅補抓「昨日（含）以前」的缺漏，今日資料留待明日排程以「昨日」身分補回。
+        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        missing_dates = [d for d in missing_dates if d < today_str]
+
         if not missing_dates:
             logger.info(f"{db_name}: 過去 30 天資料皆已上傳，無需補抓。")
             continue

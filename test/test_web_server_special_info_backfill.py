@@ -172,7 +172,7 @@ class TestLoadConfigBackfill(unittest.TestCase):
                 config = web_server.load_config()
 
         self.assertEqual(
-            config["special_info_backfill_schedule"], {"time": "08:00"}
+            config["special_info_backfill_schedule"], {"time": "07:57"}
         )
 
 

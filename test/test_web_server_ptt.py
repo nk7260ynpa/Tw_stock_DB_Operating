@@ -211,7 +211,7 @@ class TestLoadConfigWithPTT(unittest.TestCase):
                 config = web_server.load_config()
 
         self.assertIn("ptt_schedule", config)
-        self.assertEqual(config["ptt_schedule"]["time"], "22:00")
+        self.assertEqual(config["ptt_schedule"]["time"], "07:50")
 
     @patch("web_server.CONFIG_PATH")
     def test_existing_ptt_schedule_preserved(self, mock_path):
@@ -220,7 +220,9 @@ class TestLoadConfigWithPTT(unittest.TestCase):
 
         mock_path.exists.return_value = True
 
+        # 帶 config_version：已完成遷移的設定，既有值原樣保留（含窗外自訂）。
         config_data = {
+            "config_version": 2,
             "schedule_time": "20:07",
             "tdcc_schedule": {"time": "10:00"},
             "ctee_schedule": {"time": "21:00"},
@@ -235,6 +237,29 @@ class TestLoadConfigWithPTT(unittest.TestCase):
                 config = web_server.load_config()
 
         self.assertEqual(config["ptt_schedule"]["time"], "23:00")
+
+
+class TestPTTNewsScheduled(unittest.TestCase):
+    """測試 PTT 新聞排程任務（回溯時數）。"""
+
+    def setUp(self):
+        """每次測試前清空任務清單。"""
+        import web_server
+        web_server.upload_jobs.clear()
+
+    @patch("web_server.job_queue")
+    def test_scheduled_uses_48_hours(self, mock_queue):
+        """排程改於早上抓取，回溯時數應為 48 小時以涵蓋昨日整天。"""
+        import web_server
+
+        self.assertEqual(web_server.NEWS_SCHEDULE_HOURS, 48)
+
+        web_server.run_ptt_news_scheduled()
+
+        mock_queue.enqueue.assert_called_once()
+        func, params = mock_queue.enqueue.call_args.args[1:]
+        self.assertEqual(func, web_server.run_ptt_news_hours_job)
+        self.assertEqual(params[1], 48)
 
 
 if __name__ == "__main__":

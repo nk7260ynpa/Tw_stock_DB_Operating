@@ -173,7 +173,7 @@ class TestLoadConfigGoldPrice(unittest.TestCase):
                 config = web_server.load_config()
 
         self.assertEqual(
-            config["gold_price_schedule"], {"time": "07:05"}
+            config["gold_price_schedule"], {"time": "07:38"}
         )
 
 

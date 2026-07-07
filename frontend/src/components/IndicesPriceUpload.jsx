@@ -13,7 +13,7 @@ function IndicesPriceUpload() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  const [scheduleTime, setScheduleTime] = useState('07:20')
+  const [scheduleTime, setScheduleTime] = useState('07:44')
   const [saving, setSaving] = useState(false)
   const [scheduleMsg, setScheduleMsg] = useState('')
 
@@ -53,7 +53,7 @@ function IndicesPriceUpload() {
       const res = await apiFetch('/api/indices-price/schedule')
       if (res.ok) {
         const data = await res.json()
-        setScheduleTime(data.time || '07:20')
+        setScheduleTime(data.time || '07:44')
       }
     } catch {
       /* ignore */

@@ -173,7 +173,7 @@ class TestLoadConfigIndicesPrice(unittest.TestCase):
                 config = web_server.load_config()
 
         self.assertEqual(
-            config["indices_price_schedule"], {"time": "07:20"}
+            config["indices_price_schedule"], {"time": "07:44"}
         )
 
 

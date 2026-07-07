@@ -14,7 +14,7 @@ function CNYESNewsUpload() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  const [scheduleTime, setScheduleTime] = useState('21:30')
+  const [scheduleTime, setScheduleTime] = useState('07:48')
   const [saving, setSaving] = useState(false)
   const [scheduleMsg, setScheduleMsg] = useState('')
 
@@ -54,7 +54,7 @@ function CNYESNewsUpload() {
       const res = await apiFetch('/api/cnyes-news/schedule')
       if (res.ok) {
         const data = await res.json()
-        setScheduleTime(data.time || '21:30')
+        setScheduleTime(data.time || '07:48')
       }
     } catch {
       /* ignore */
@@ -177,7 +177,7 @@ function CNYESNewsUpload() {
       {error && <div className="message message-error">{error}</div>}
 
       <div className="form-group" style={{ marginTop: '16px' }}>
-        <label>每日排程設定（每天自動抓取當日新聞）</label>
+        <label>每日排程設定（每天回溯過去 48 小時抓取）</label>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <input
             type="time"

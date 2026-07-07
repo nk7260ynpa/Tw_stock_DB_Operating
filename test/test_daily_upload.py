@@ -171,6 +171,39 @@ class TestDailyCraw(unittest.TestCase):
     @patch("DailyUpload.upload.day_upload")
     @patch("DailyUpload.time.sleep")
     @patch("DailyUpload.get_missing_dates")
+    def test_daily_craw_excludes_today(
+        self, mock_get_missing, mock_sleep, mock_day_upload
+    ):
+        """測試早上排程執行時排除今日，只補抓昨日（含）以前的缺漏。
+
+        排程改於早上（07:30）執行，此時當日台股尚未收盤、行情尚未發布，
+        若爬取今日會取得空資料並被誤標為非交易日而永久跳過，故應排除今日。
+        """
+        import DailyUpload
+
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        yesterday = (
+            datetime.datetime.now() - datetime.timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+
+        mock_get_missing.side_effect = [
+            [today, yesterday],  # TWSE：含今日與昨日
+            [],  # TPEX
+            [],  # TAIFEX
+            [],  # FAOI
+            [],  # MGTS
+        ]
+
+        DailyUpload.daily_craw()
+
+        # 只應爬取昨日，今日被排除
+        dates = [call.args[0] for call in mock_day_upload.call_args_list]
+        self.assertEqual(dates, [yesterday])
+        self.assertNotIn(today, dates)
+
+    @patch("DailyUpload.upload.day_upload")
+    @patch("DailyUpload.time.sleep")
+    @patch("DailyUpload.get_missing_dates")
     def test_daily_craw_pauses_between_dates(
         self, mock_get_missing, mock_sleep, mock_day_upload
     ):

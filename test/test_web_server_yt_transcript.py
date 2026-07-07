@@ -187,5 +187,33 @@ class TestYTTranscriptAPI(unittest.TestCase):
         self.assertFalse(data["exists"])
 
 
+class TestYTTranscriptScheduled(unittest.TestCase):
+    """測試 YT 逐字稿排程任務（抓昨日影片）。"""
+
+    def setUp(self):
+        """每次測試前清空任務清單。"""
+        import web_server
+        web_server.upload_jobs.clear()
+
+    @patch("web_server.job_queue")
+    def test_scheduled_uses_yesterday(self, mock_queue):
+        """排程於早上執行，應抓「昨日」而非今日的影片。"""
+        import web_server
+        from datetime import datetime, timedelta
+
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        web_server.run_yt_transcript_scheduled()
+
+        mock_queue.enqueue.assert_called_once()
+        args = mock_queue.enqueue.call_args.args
+        # enqueue(job_id, run_yt_transcript_upload_job, (job_id, yesterday))
+        job_id, func, params = args
+        self.assertEqual(func, web_server.run_yt_transcript_upload_job)
+        self.assertEqual(params[1], yesterday)
+        # 任務紀錄的日期亦應為昨日
+        self.assertEqual(web_server.upload_jobs[job_id]["date"], yesterday)
+
+
 if __name__ == "__main__":
     unittest.main()
