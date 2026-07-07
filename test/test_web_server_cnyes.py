@@ -208,7 +208,7 @@ class TestLoadConfigWithCNYES(unittest.TestCase):
                 config = web_server.load_config()
 
         self.assertIn("cnyes_schedule", config)
-        self.assertEqual(config["cnyes_schedule"]["time"], "21:30")
+        self.assertEqual(config["cnyes_schedule"]["time"], "07:48")
 
     @patch("web_server.CONFIG_PATH")
     def test_existing_cnyes_schedule_preserved(self, mock_path):
@@ -217,7 +217,9 @@ class TestLoadConfigWithCNYES(unittest.TestCase):
 
         mock_path.exists.return_value = True
 
+        # 帶 config_version：已完成遷移的設定，既有值原樣保留（含窗外自訂）。
         config_data = {
+            "config_version": 2,
             "schedule_time": "20:07",
             "tdcc_schedule": {"time": "10:00"},
             "ctee_schedule": {"time": "21:00"},

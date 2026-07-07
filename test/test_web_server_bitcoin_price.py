@@ -173,7 +173,7 @@ class TestLoadConfigBitcoinPrice(unittest.TestCase):
                 config = web_server.load_config()
 
         self.assertEqual(
-            config["bitcoin_price_schedule"], {"time": "07:10"}
+            config["bitcoin_price_schedule"], {"time": "07:40"}
         )
 
 

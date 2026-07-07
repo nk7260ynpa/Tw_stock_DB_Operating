@@ -13,7 +13,7 @@ function OilPriceUpload() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  const [scheduleTime, setScheduleTime] = useState('07:00')
+  const [scheduleTime, setScheduleTime] = useState('07:36')
   const [saving, setSaving] = useState(false)
   const [scheduleMsg, setScheduleMsg] = useState('')
 
@@ -53,7 +53,7 @@ function OilPriceUpload() {
       const res = await apiFetch('/api/oil-price/schedule')
       if (res.ok) {
         const data = await res.json()
-        setScheduleTime(data.time || '07:00')
+        setScheduleTime(data.time || '07:36')
       }
     } catch {
       /* ignore */

@@ -226,7 +226,7 @@ class TestLoadConfigWithMoneyUDN(unittest.TestCase):
 
         self.assertIn("moneyudn_schedule", config)
         self.assertEqual(
-            config["moneyudn_schedule"]["time"], "22:30"
+            config["moneyudn_schedule"]["time"], "07:52"
         )
 
     @patch("web_server.CONFIG_PATH")
@@ -236,7 +236,9 @@ class TestLoadConfigWithMoneyUDN(unittest.TestCase):
 
         mock_path.exists.return_value = True
 
+        # 帶 config_version：已完成遷移的設定，既有值原樣保留（含窗外自訂）。
         config_data = {
+            "config_version": 2,
             "schedule_time": "20:07",
             "tdcc_schedule": {"time": "10:00"},
             "ctee_schedule": {"time": "21:00"},

@@ -16,7 +16,8 @@ class TestLoadConfig(unittest.TestCase):
         import web_server
 
         mock_path.exists.return_value = True
-        config_data = {"schedule_time": "21:30"}
+        # 帶 config_version：已完成一次性遷移的設定，既有值原樣保留（不再遷移）。
+        config_data = {"schedule_time": "21:30", "config_version": 2}
 
         with patch("builtins.open", mock_open(read_data=json.dumps(config_data))):
             result = web_server.load_config()
@@ -36,10 +37,93 @@ class TestLoadConfig(unittest.TestCase):
 
         result = web_server.load_config()
 
-        self.assertEqual(result["schedule_time"], "20:07")
+        self.assertEqual(result["schedule_time"], "07:30")
         self.assertIn("tdcc_schedule", result)
         self.assertIn("ctee_schedule", result)
         self.assertIn("cnyes_schedule", result)
+
+
+class TestCrawlScheduleMigration(unittest.TestCase):
+    """測試爬蟲排程一次性遷移（07:30~08:00 時間窗）。"""
+
+    @patch("web_server.save_config")
+    @patch("web_server.CONFIG_PATH")
+    def test_old_out_of_window_config_is_migrated(self, mock_path, mock_save):
+        """舊時段設定（無 config_version）應被收斂到 07:30~08:00 窗內並寫回。"""
+        import web_server
+
+        mock_path.exists.return_value = True
+        old_config = {
+            "schedule_time": "19:07",
+            "tdcc_schedule": {"time": "20:15"},
+            "ctee_schedule": {"time": "21:00"},
+            "cnyes_schedule": {"time": "21:10"},
+            "ptt_schedule": {"time": "21:20"},
+            "moneyudn_schedule": {"time": "21:30"},
+            "yt_transcript_schedule": {"time": "19:05"},
+            "oil_price_schedule": {"time": "07:00"},
+            "gold_price_schedule": {"time": "07:05"},
+            "bitcoin_price_schedule": {"time": "07:10"},
+            "currency_price_schedule": {"time": "07:15"},
+            "indices_price_schedule": {"time": "07:20"},
+        }
+
+        with patch("builtins.open", unittest.mock.mock_open(read_data="{}")):
+            with patch("json.load", return_value=old_config.copy()):
+                config = web_server.load_config()
+
+        # 所有爬蟲抓取排程都應落在 07:30~08:00 窗內
+        self.assertEqual(config["schedule_time"], "07:30")
+        for key in web_server.CRAWL_SCHEDULE_KEYS:
+            self.assertTrue(
+                web_server._in_crawl_window(config[key]["time"]),
+                f"{key} 未落在時間窗內：{config[key]}",
+            )
+        # 遷移後應標記為新版並寫回持久化
+        self.assertEqual(config["config_version"], web_server.CONFIG_VERSION)
+        mock_save.assert_called_once()
+
+    @patch("web_server.save_config")
+    @patch("web_server.CONFIG_PATH")
+    def test_migrated_config_preserves_user_custom(self, mock_path, mock_save):
+        """已遷移（帶 config_version）的設定即使窗外也保留使用者自訂、不再遷移。"""
+        import web_server
+
+        mock_path.exists.return_value = True
+        user_config = {
+            "config_version": web_server.CONFIG_VERSION,
+            "schedule_time": "07:35",
+            "ctee_schedule": {"time": "23:00"},
+        }
+
+        with patch("builtins.open", unittest.mock.mock_open(read_data="{}")):
+            with patch("json.load", return_value=user_config.copy()):
+                config = web_server.load_config()
+
+        # 版本相符 → 不觸發遷移，使用者自訂（含窗外）原樣保留、不寫回
+        self.assertEqual(config["schedule_time"], "07:35")
+        self.assertEqual(config["ctee_schedule"]["time"], "23:00")
+        mock_save.assert_not_called()
+
+    @patch("web_server.save_config")
+    @patch("web_server.CONFIG_PATH")
+    def test_migration_keeps_in_window_values(self, mock_path, mock_save):
+        """遷移時已落在窗內的自訂值應被保留，不覆寫為預設。"""
+        import web_server
+
+        mock_path.exists.return_value = True
+        old_config = {
+            "schedule_time": "19:07",
+            "ctee_schedule": {"time": "07:47"},
+        }
+
+        with patch("builtins.open", unittest.mock.mock_open(read_data="{}")):
+            with patch("json.load", return_value=old_config.copy()):
+                config = web_server.load_config()
+
+        self.assertEqual(config["schedule_time"], "07:30")
+        # 窗內自訂 07:47 應保留（非重置為預設 07:46）
+        self.assertEqual(config["ctee_schedule"]["time"], "07:47")
 
 
 class TestSaveConfig(unittest.TestCase):

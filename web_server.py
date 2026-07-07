@@ -81,13 +81,19 @@ schedule_lock = threading.Lock()
 retry_queue: RetryQueue | None = None
 
 # 隔日重排時間：每日將未達上限的 exhausted 任務重設為 pending 再試一輪。
-# 設於各價格排程（07:00~07:20）之前，使前一日因「資料尚未發布」而放棄的
+# 設於當日各爬取排程（07:30~07:57）之前，使前一日因「資料尚未發布」而放棄的
 # 任務於資料已可取得後，能在當日重新被重試佇列處理。
 REQUEUE_EXHAUSTED_TIME = "06:30"
 
 # SPECIAL_INFO 缺漏自我修復掃描窗（天數）：遠大於各商品排程的「過去 7 天」
 # 回補窗，足以自癒管線停擺數週造成的缺漏。
 SPECIAL_INFO_BACKFILL_DAYS = 30
+
+# 新聞排程回溯時數：四來源新聞排程改於早上（07:46~07:52）抓取，回溯窗須涵蓋
+# 「昨日整天到現在」。設為 48 小時（爬蟲支援 1~72），足以吸收晚間→早晨排程搬遷
+# 的一次性缺口，並可補回偶發漏抓一日；重複抓取的記錄由各上傳器以 URL 去重（同日
+# 已存在的 URL 會被跳過），不會重複寫入資料庫或全文檔。
+NEWS_SCHEDULE_HOURS = 48
 
 # SPECIAL_INFO 五個商品的 (task_type, Uploader 類別) 對照，供缺漏自我修復
 # 作業逐一掃描補抓；task_type 與 retry_queue／各 upload 端點一致。
@@ -117,31 +123,116 @@ def _validate_date_format(date_str):
     return bool(re.match(r"^\d{4}-\d{2}-\d{2}$", date_str))
 
 
+# 設定檔結構版本：每次需要對「已持久化」的 config.json 做一次性批次調整時遞增。
+# v2：把所有爬蟲抓取排程集中至 07:30~08:00 時間窗（見 _migrate_crawl_schedule_window）。
+CONFIG_VERSION = 2
+
+# 爬蟲抓取排程統一集中的目標時間窗（HH:MM，含端點）。
+CRAWL_WINDOW_START = "07:30"
+CRAWL_WINDOW_END = "08:00"
+
+# 屬於「爬蟲抓取類」的具名排程鍵（其時間受 07:30~08:00 集中政策約束）；
+# daily_craw 主排程為頂層 schedule_time，另行處理。retry queue／隔日重排等
+# 維護型排程不在此列、不受遷移影響。
+CRAWL_SCHEDULE_KEYS = (
+    "tdcc_schedule",
+    "ctee_schedule",
+    "cnyes_schedule",
+    "ptt_schedule",
+    "moneyudn_schedule",
+    "yt_transcript_schedule",
+    "oil_price_schedule",
+    "gold_price_schedule",
+    "bitcoin_price_schedule",
+    "currency_price_schedule",
+    "indices_price_schedule",
+    "special_info_backfill_schedule",
+)
+
+
+def _in_crawl_window(time_str):
+    """判斷 HH:MM 是否落在爬蟲集中時間窗 07:30~08:00（含端點）內。
+
+    因 HH:MM 為零填補的等長字串，字典序比較等同時間先後比較。
+
+    Args:
+        time_str (str | None): 時間字串（HH:MM）。
+
+    Returns:
+        bool: 落在窗內回傳 True；None 或非字串回傳 False。
+    """
+    if not isinstance(time_str, str):
+        return False
+    return CRAWL_WINDOW_START <= time_str <= CRAWL_WINDOW_END
+
+
+def _migrate_crawl_schedule_window(config, default):
+    """一次性遷移：把仍落在舊時段的爬蟲抓取排程收斂到 07:30~08:00 新預設。
+
+    僅在既有設定的 config_version 低於 CONFIG_VERSION 時由 load_config 觸發一次
+    （version-gated），避免日後每次重啟都覆蓋使用者經 Web 介面所做的自訂。遷移時
+    只重置「時間落在目標窗外」的鍵，已在窗內者保留，尊重既有的窗內微調。
+
+    Args:
+        config (dict): 既有設定內容（就地修改）。
+        default (dict): 內含新版預設時間的預設設定。
+
+    Returns:
+        bool: 是否有任何欄位被修改。
+    """
+    changed = False
+
+    # daily_craw 主排程（頂層字串）
+    if not _in_crawl_window(config.get("schedule_time")):
+        if config.get("schedule_time") != default["schedule_time"]:
+            config["schedule_time"] = default["schedule_time"]
+            changed = True
+
+    # 各具名爬蟲排程（{"time": HH:MM} 結構）
+    for key in CRAWL_SCHEDULE_KEYS:
+        entry = config.get(key)
+        cur = entry.get("time") if isinstance(entry, dict) else None
+        if not _in_crawl_window(cur):
+            new_entry = dict(default[key])
+            if config.get(key) != new_entry:
+                config[key] = new_entry
+                changed = True
+
+    return changed
+
+
 def load_config():
     """讀取設定檔。
+
+    首次讀取既有（舊版）config.json 時，會依 config_version 觸發一次性遷移，
+    把落在 07:30~08:00 窗外的爬蟲抓取排程收斂到新預設並寫回，之後保留使用者的
+    窗內自訂（見 _migrate_crawl_schedule_window）。
 
     Returns:
         dict: 設定內容，包含 schedule_time、tdcc_schedule、
             ctee_schedule、cnyes_schedule、ptt_schedule、
             moneyudn_schedule、yt_transcript_schedule、
             oil_price_schedule、gold_price_schedule、
-            bitcoin_price_schedule、currency_price_schedule
-            和 indices_price_schedule 欄位。
+            bitcoin_price_schedule、currency_price_schedule、
+            indices_price_schedule、special_info_backfill_schedule
+            與 config_version 欄位。
     """
+    # 所有爬取排程集中於 07:30~08:00 之間並彼此錯開，避免同時併發搶爬蟲資源。
     default = {
-        "schedule_time": "20:07",
-        "tdcc_schedule": {"time": "10:00"},
-        "ctee_schedule": {"time": "21:00"},
-        "cnyes_schedule": {"time": "21:30"},
-        "ptt_schedule": {"time": "22:00"},
-        "moneyudn_schedule": {"time": "22:30"},
-        "yt_transcript_schedule": {"time": "19:05"},
-        "oil_price_schedule": {"time": "07:00"},
-        "gold_price_schedule": {"time": "07:05"},
-        "bitcoin_price_schedule": {"time": "07:10"},
-        "currency_price_schedule": {"time": "07:15"},
-        "indices_price_schedule": {"time": "07:20"},
-        "special_info_backfill_schedule": {"time": "08:00"},
+        "config_version": CONFIG_VERSION,
+        "schedule_time": "07:30",
+        "tdcc_schedule": {"time": "07:33"},
+        "ctee_schedule": {"time": "07:46"},
+        "cnyes_schedule": {"time": "07:48"},
+        "ptt_schedule": {"time": "07:50"},
+        "moneyudn_schedule": {"time": "07:52"},
+        "yt_transcript_schedule": {"time": "07:54"},
+        "oil_price_schedule": {"time": "07:36"},
+        "gold_price_schedule": {"time": "07:38"},
+        "bitcoin_price_schedule": {"time": "07:40"},
+        "currency_price_schedule": {"time": "07:42"},
+        "indices_price_schedule": {"time": "07:44"},
+        "special_info_backfill_schedule": {"time": "07:57"},
     }
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -152,7 +243,7 @@ def load_config():
         # 向後相容：舊格式含 day 欄位，遷移為新格式（僅保留 time）
         elif "day" in config["tdcc_schedule"]:
             config["tdcc_schedule"] = {
-                "time": config["tdcc_schedule"].get("time", "10:00"),
+                "time": config["tdcc_schedule"].get("time", "07:33"),
             }
             save_config(config)
             logger.info("已將 TDCC 排程設定從週排程遷移為每日排程。")
@@ -191,6 +282,17 @@ def load_config():
             config["special_info_backfill_schedule"] = (
                 default["special_info_backfill_schedule"]
             )
+        # 一次性遷移（version-gated）：把落在 07:30~08:00 窗外的爬蟲排程收斂到
+        # 新預設並寫回，讓部署重啟後持久化的舊時段自動更新；bump 版本後不再重跑，
+        # 保留使用者日後經 Web 介面所做的窗內自訂。
+        if config.get("config_version", 1) < CONFIG_VERSION:
+            migrated = _migrate_crawl_schedule_window(config, default)
+            config["config_version"] = CONFIG_VERSION
+            save_config(config)
+            if migrated:
+                logger.info(
+                    "已將舊時段的爬蟲抓取排程一次性遷移至 07:30~08:00 時間窗。"
+                )
         return config
     return default
 
@@ -248,7 +350,7 @@ def setup_schedule(
         logger.info("每日排程已設定為 %s", schedule_time)
 
         if tdcc_schedule:
-            tdcc_time = tdcc_schedule.get("time", "10:00")
+            tdcc_time = tdcc_schedule.get("time", "07:33")
             schedule_lib.every().day.at(tdcc_time).do(
                 run_tdcc_scheduled
             )
@@ -257,7 +359,7 @@ def setup_schedule(
             )
 
         if ctee_schedule:
-            ctee_time = ctee_schedule.get("time", "21:00")
+            ctee_time = ctee_schedule.get("time", "07:46")
             schedule_lib.every().day.at(ctee_time).do(
                 run_ctee_news_scheduled
             )
@@ -266,7 +368,7 @@ def setup_schedule(
             )
 
         if cnyes_schedule:
-            cnyes_time = cnyes_schedule.get("time", "21:30")
+            cnyes_time = cnyes_schedule.get("time", "07:48")
             schedule_lib.every().day.at(cnyes_time).do(
                 run_cnyes_news_scheduled
             )
@@ -275,7 +377,7 @@ def setup_schedule(
             )
 
         if ptt_schedule:
-            ptt_time = ptt_schedule.get("time", "22:00")
+            ptt_time = ptt_schedule.get("time", "07:50")
             schedule_lib.every().day.at(ptt_time).do(
                 run_ptt_news_scheduled
             )
@@ -284,7 +386,7 @@ def setup_schedule(
             )
 
         if moneyudn_schedule:
-            moneyudn_time = moneyudn_schedule.get("time", "22:30")
+            moneyudn_time = moneyudn_schedule.get("time", "07:52")
             schedule_lib.every().day.at(moneyudn_time).do(
                 run_moneyudn_news_scheduled
             )
@@ -293,49 +395,49 @@ def setup_schedule(
             )
 
         if yt_transcript_schedule:
-            yt_time = yt_transcript_schedule.get("time", "19:05")
+            yt_time = yt_transcript_schedule.get("time", "07:54")
             schedule_lib.every().day.at(yt_time).do(
                 run_yt_transcript_scheduled
             )
             logger.info("YT 逐字稿每日排程已設定為 %s", yt_time)
 
         if oil_price_schedule:
-            oil_time = oil_price_schedule.get("time", "07:00")
+            oil_time = oil_price_schedule.get("time", "07:36")
             schedule_lib.every().day.at(oil_time).do(
                 run_oil_price_scheduled
             )
             logger.info("原油價格每日排程已設定為 %s", oil_time)
 
         if gold_price_schedule:
-            gold_time = gold_price_schedule.get("time", "07:05")
+            gold_time = gold_price_schedule.get("time", "07:38")
             schedule_lib.every().day.at(gold_time).do(
                 run_gold_price_scheduled
             )
             logger.info("黃金價格每日排程已設定為 %s", gold_time)
 
         if bitcoin_price_schedule:
-            bitcoin_time = bitcoin_price_schedule.get("time", "07:10")
+            bitcoin_time = bitcoin_price_schedule.get("time", "07:40")
             schedule_lib.every().day.at(bitcoin_time).do(
                 run_bitcoin_price_scheduled
             )
             logger.info("比特幣價格每日排程已設定為 %s", bitcoin_time)
 
         if currency_price_schedule:
-            currency_time = currency_price_schedule.get("time", "07:15")
+            currency_time = currency_price_schedule.get("time", "07:42")
             schedule_lib.every().day.at(currency_time).do(
                 run_currency_price_scheduled
             )
             logger.info("匯率每日排程已設定為 %s", currency_time)
 
         if indices_price_schedule:
-            indices_time = indices_price_schedule.get("time", "07:20")
+            indices_time = indices_price_schedule.get("time", "07:44")
             schedule_lib.every().day.at(indices_time).do(
                 run_indices_price_scheduled
             )
             logger.info("股市指數價格每日排程已設定為 %s", indices_time)
 
         if special_info_backfill_schedule:
-            backfill_time = special_info_backfill_schedule.get("time", "08:00")
+            backfill_time = special_info_backfill_schedule.get("time", "07:57")
             schedule_lib.every().day.at(backfill_time).do(
                 run_special_info_backfill_scheduled
             )
@@ -612,7 +714,7 @@ def run_upload_job(job_id, start_date, end_date, databases):
 
 
 def run_ctee_news_scheduled():
-    """排程觸發的 CTEE 新聞上傳（過去 24 小時）。"""
+    """排程觸發的 CTEE 新聞上傳（過去 48 小時）。"""
     today = datetime.now().strftime("%Y-%m-%d")
     job_id = str(uuid.uuid4())[:8]
 
@@ -630,8 +732,12 @@ def run_ctee_news_scheduled():
             "scheduled": True,
         }
 
-    job_queue.enqueue(job_id, run_ctee_news_hours_job, (job_id, 24))
-    logger.info("CTEE 新聞排程任務已建立 %s（hours=24）", job_id)
+    job_queue.enqueue(
+        job_id, run_ctee_news_hours_job, (job_id, NEWS_SCHEDULE_HOURS)
+    )
+    logger.info(
+        "CTEE 新聞排程任務已建立 %s（hours=%d）", job_id, NEWS_SCHEDULE_HOURS
+    )
 
 
 def run_ctee_news_upload_job(job_id, start_date, end_date):
@@ -739,7 +845,7 @@ def run_ctee_news_hours_job(job_id, hours):
 
 
 def run_cnyes_news_scheduled():
-    """排程觸發的 CNYES 新聞上傳（過去 24 小時）。"""
+    """排程觸發的 CNYES 新聞上傳（過去 48 小時）。"""
     today = datetime.now().strftime("%Y-%m-%d")
     job_id = str(uuid.uuid4())[:8]
 
@@ -757,8 +863,12 @@ def run_cnyes_news_scheduled():
             "scheduled": True,
         }
 
-    job_queue.enqueue(job_id, run_cnyes_news_hours_job, (job_id, 24))
-    logger.info("CNYES 新聞排程任務已建立 %s（hours=24）", job_id)
+    job_queue.enqueue(
+        job_id, run_cnyes_news_hours_job, (job_id, NEWS_SCHEDULE_HOURS)
+    )
+    logger.info(
+        "CNYES 新聞排程任務已建立 %s（hours=%d）", job_id, NEWS_SCHEDULE_HOURS
+    )
 
 
 def run_cnyes_news_upload_job(job_id, start_date, end_date):
@@ -866,7 +976,7 @@ def run_cnyes_news_hours_job(job_id, hours):
 
 
 def run_ptt_news_scheduled():
-    """排程觸發的 PTT 新聞上傳（過去 24 小時）。"""
+    """排程觸發的 PTT 新聞上傳（過去 48 小時）。"""
     today = datetime.now().strftime("%Y-%m-%d")
     job_id = str(uuid.uuid4())[:8]
 
@@ -884,8 +994,12 @@ def run_ptt_news_scheduled():
             "scheduled": True,
         }
 
-    job_queue.enqueue(job_id, run_ptt_news_hours_job, (job_id, 24))
-    logger.info("PTT 新聞排程任務已建立 %s（hours=24）", job_id)
+    job_queue.enqueue(
+        job_id, run_ptt_news_hours_job, (job_id, NEWS_SCHEDULE_HOURS)
+    )
+    logger.info(
+        "PTT 新聞排程任務已建立 %s（hours=%d）", job_id, NEWS_SCHEDULE_HOURS
+    )
 
 
 def run_ptt_news_upload_job(job_id, start_date, end_date):
@@ -993,7 +1107,7 @@ def run_ptt_news_hours_job(job_id, hours):
 
 
 def run_moneyudn_news_scheduled():
-    """排程觸發的 MoneyUDN 新聞上傳（過去 24 小時）。"""
+    """排程觸發的 MoneyUDN 新聞上傳（過去 48 小時）。"""
     today = datetime.now().strftime("%Y-%m-%d")
     job_id = str(uuid.uuid4())[:8]
 
@@ -1011,8 +1125,13 @@ def run_moneyudn_news_scheduled():
             "scheduled": True,
         }
 
-    job_queue.enqueue(job_id, run_moneyudn_news_hours_job, (job_id, 24))
-    logger.info("MoneyUDN 新聞排程任務已建立 %s（hours=24）", job_id)
+    job_queue.enqueue(
+        job_id, run_moneyudn_news_hours_job, (job_id, NEWS_SCHEDULE_HOURS)
+    )
+    logger.info(
+        "MoneyUDN 新聞排程任務已建立 %s（hours=%d）",
+        job_id, NEWS_SCHEDULE_HOURS,
+    )
 
 
 def run_moneyudn_news_upload_job(job_id, start_date, end_date):
@@ -1216,8 +1335,12 @@ def run_company_info_upload_job(job_id):
 
 
 def run_yt_transcript_scheduled():
-    """排程觸發的 YT 逐字稿上傳。"""
-    today = datetime.now().strftime("%Y-%m-%d")
+    """排程觸發的 YT 逐字稿上傳（抓昨日影片）。
+
+    排程於早上（07:54）執行，此時「當日」直播多半尚未結束或自動字幕尚未
+    產生，故改抓「昨日」已完成的直播影片，確保逐字稿已可取得。
+    """
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     job_id = str(uuid.uuid4())[:8]
 
     with jobs_lock:
@@ -1225,7 +1348,7 @@ def run_yt_transcript_scheduled():
             "job_id": job_id,
             "type": "yt_transcript",
             "status": "queued",
-            "date": today,
+            "date": yesterday,
             "title": None,
             "errors": [],
             "created_at": datetime.now().isoformat(),
@@ -1233,8 +1356,10 @@ def run_yt_transcript_scheduled():
             "scheduled": True,
         }
 
-    job_queue.enqueue(job_id, run_yt_transcript_upload_job, (job_id, today))
-    logger.info("YT 逐字稿排程任務已建立 %s", job_id)
+    job_queue.enqueue(
+        job_id, run_yt_transcript_upload_job, (job_id, yesterday)
+    )
+    logger.info("YT 逐字稿排程任務已建立 %s（date=%s）", job_id, yesterday)
 
 
 def run_yt_transcript_upload_job(job_id, date):
@@ -2348,7 +2473,7 @@ def get_tdcc_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    tdcc = config.get("tdcc_schedule", {"time": "10:00"})
+    tdcc = config.get("tdcc_schedule", {"time": "07:33"})
     return {"time": tdcc["time"]}
 
 
@@ -2476,7 +2601,7 @@ def get_ctee_news_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    ctee = config.get("ctee_schedule", {"time": "21:00"})
+    ctee = config.get("ctee_schedule", {"time": "07:46"})
     return {"time": ctee["time"]}
 
 
@@ -2604,7 +2729,7 @@ def get_cnyes_news_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    cnyes = config.get("cnyes_schedule", {"time": "21:30"})
+    cnyes = config.get("cnyes_schedule", {"time": "07:48"})
     return {"time": cnyes["time"]}
 
 
@@ -2732,7 +2857,7 @@ def get_ptt_news_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    ptt = config.get("ptt_schedule", {"time": "22:00"})
+    ptt = config.get("ptt_schedule", {"time": "07:50"})
     return {"time": ptt["time"]}
 
 
@@ -2860,7 +2985,7 @@ def get_moneyudn_news_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    moneyudn = config.get("moneyudn_schedule", {"time": "22:30"})
+    moneyudn = config.get("moneyudn_schedule", {"time": "07:52"})
     return {"time": moneyudn["time"]}
 
 
@@ -2976,7 +3101,7 @@ def get_yt_transcript_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    yt = config.get("yt_transcript_schedule", {"time": "19:05"})
+    yt = config.get("yt_transcript_schedule", {"time": "07:54"})
     return {"time": yt["time"]}
 
 
@@ -3144,7 +3269,7 @@ def get_oil_price_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    oil = config.get("oil_price_schedule", {"time": "07:00"})
+    oil = config.get("oil_price_schedule", {"time": "07:36"})
     return {"time": oil["time"]}
 
 
@@ -3271,7 +3396,7 @@ def get_gold_price_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    gold = config.get("gold_price_schedule", {"time": "07:05"})
+    gold = config.get("gold_price_schedule", {"time": "07:38"})
     return {"time": gold["time"]}
 
 
@@ -3398,7 +3523,7 @@ def get_bitcoin_price_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    bitcoin = config.get("bitcoin_price_schedule", {"time": "07:10"})
+    bitcoin = config.get("bitcoin_price_schedule", {"time": "07:40"})
     return {"time": bitcoin["time"]}
 
 
@@ -3525,7 +3650,7 @@ def get_currency_price_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    currency = config.get("currency_price_schedule", {"time": "07:15"})
+    currency = config.get("currency_price_schedule", {"time": "07:42"})
     return {"time": currency["time"]}
 
 
@@ -3652,7 +3777,7 @@ def get_indices_price_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    indices = config.get("indices_price_schedule", {"time": "07:20"})
+    indices = config.get("indices_price_schedule", {"time": "07:44"})
     return {"time": indices["time"]}
 
 
