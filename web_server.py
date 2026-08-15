@@ -77,6 +77,16 @@ jobs_lock = threading.Lock()
 # 排程管理
 schedule_lock = threading.Lock()
 
+# daily_craw 重入控制。
+#
+# daily_craw 會逐一對爬蟲請求「近 30 天內未上傳的日期」，耗時隨缺漏天數增長；
+# 若直接在 scheduler_thread 內同步執行，會在 run_pending() 期間持有 schedule_lock，
+# 使當日後續排程（TDCC/商品價格/新聞/YT/自我修復）全部無法準時觸發。
+# 2026-08 事故中曾因此延後逾 20 小時，導致新聞回溯窗（僅約 3 天）錯過而永久缺資料。
+# 故改為背景執行緒執行，並以此旗標確保同時只有一輪 daily_craw 在跑。
+daily_craw_lock = threading.Lock()
+daily_craw_running = False
+
 # 網路失敗重試佇列
 retry_queue: RetryQueue | None = None
 
@@ -355,7 +365,8 @@ def setup_schedule(
     """
     with schedule_lock:
         schedule_lib.clear()
-        schedule_lib.every().day.at(schedule_time).do(daily_craw)
+        # 註冊背景執行緒包裝而非 daily_craw 本身，避免長時間爬取阻塞排程執行緒。
+        schedule_lib.every().day.at(schedule_time).do(run_daily_craw_scheduled)
         logger.info("每日排程已設定為 %s", schedule_time)
 
         if tdcc_schedule:
@@ -642,6 +653,46 @@ def _execute_retry_task(task):
 
     else:
         raise ValueError(f"不支援的重試任務類型：{task.task_type}")
+
+
+def run_daily_craw_scheduled():
+    """排程觸發的每日爬蟲，於獨立背景執行緒執行。
+
+    `daily_craw` 為長時間任務（缺漏天數多或爬蟲回應慢時可達數小時），若直接由
+    `scheduler_thread` 同步呼叫，會在 `run_pending()` 期間持有 `schedule_lock`，
+    使當日後續排程全部延後。此包裝函式改以背景執行緒執行，讓排程執行緒立即返回；
+    並以 `daily_craw_running` 旗標避免上一輪尚未結束時重複啟動。
+    """
+    global daily_craw_running
+
+    with daily_craw_lock:
+        if daily_craw_running:
+            logger.warning("上一輪每日爬蟲尚未結束，略過本次排程觸發。")
+            return
+        daily_craw_running = True
+
+    def _run():
+        """實際執行 daily_craw 並在結束後釋放重入旗標。"""
+        global daily_craw_running
+        try:
+            daily_craw()
+        except Exception:  # noqa: BLE001 - 背景執行緒需吞例外避免靜默死亡
+            logger.exception("每日爬蟲執行失敗。")
+        finally:
+            with daily_craw_lock:
+                daily_craw_running = False
+            logger.info("每日爬蟲背景執行緒結束。")
+
+    try:
+        threading.Thread(target=_run, daemon=True, name="daily-craw").start()
+    except RuntimeError:
+        # 無法建立執行緒時必須回復旗標，否則此後每日排程都只會被略過。
+        with daily_craw_lock:
+            daily_craw_running = False
+        logger.exception("每日爬蟲背景執行緒建立失敗。")
+        return
+
+    logger.info("每日爬蟲已於背景執行緒啟動。")
 
 
 def scheduler_thread():

@@ -7,7 +7,12 @@ import pandas as pd
 import requests
 from pydantic import BaseModel
 
-from data_upload.base import CrawlError, DataUploadBase
+from data_upload.base import (
+    CRAW_TIMEOUT,
+    CrawlError,
+    DataUploadBase,
+    NetworkError,
+)
 
 
 class SimpleUploadType(BaseModel):
@@ -69,10 +74,46 @@ class TestCrawData(unittest.TestCase):
         df = self.uploader.craw_data("2026-01-02")
 
         mock_get.assert_called_once_with(
-            "http://localhost:6738/test", params={"date": "2026-01-02"}
+            "http://localhost:6738/test",
+            params={"date": "2026-01-02"},
+            timeout=CRAW_TIMEOUT,
         )
         self.assertEqual(len(df), 2)
         self.assertEqual(df.iloc[0]["SecurityCode"], "2330")
+
+    @patch("data_upload.base.requests.get")
+    def test_craw_data_always_sets_timeout(self, mock_get):
+        """測試爬蟲請求必定帶入 timeout。
+
+        未設 timeout 時 requests 會無限期等待，一旦爬蟲 hang 住即會卡住
+        daily_craw 並延後當日後續所有排程，故此為回歸測試。
+        """
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"data": []}
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+
+        self.uploader.craw_data("2026-01-02")
+
+        timeout = mock_get.call_args.kwargs.get("timeout")
+        self.assertIsNotNone(timeout, "craw_data 必須帶入 timeout")
+        self.assertGreater(timeout, 0)
+
+    @patch("data_upload.base.requests.get")
+    def test_craw_data_timeout_raises_network_error(self, mock_get):
+        """測試請求逾時時拋出可重試的 NetworkError。"""
+        mock_get.side_effect = requests.Timeout("read timed out")
+
+        with self.assertRaises(NetworkError):
+            self.uploader.craw_data("2026-01-02")
+
+    @patch("data_upload.base.requests.get")
+    def test_craw_data_connection_error_raises_network_error(self, mock_get):
+        """測試連線失敗時拋出可重試的 NetworkError。"""
+        mock_get.side_effect = requests.ConnectionError("refused")
+
+        with self.assertRaises(NetworkError):
+            self.uploader.craw_data("2026-01-02")
 
     @patch("data_upload.base.requests.get")
     def test_craw_data_request_exception(self, mock_get):
