@@ -22,6 +22,7 @@
 - **匯率**：從爬蟲取得匯率資料（USDTWD/JPYTWD），metadata 存入 SPECIAL_INFO 資料庫的 CurrencyPrice 表（`data_upload/currency_price.py`）
 - **股市指數**：從爬蟲取得國際股市指數價格（道瓊工業指數/納斯達克指數），資料存入 SPECIAL_INFO 資料庫的 IndicesPrice 表（`data_upload/indices_price.py`）
 - **失敗重試佇列**：排程任務失敗時自動加入重試佇列。網路中斷每小時檢查網路並重試，最多 5 次；非網路錯誤（如「資料尚未發布」）標為 exhausted 後，每日（預設 06:30）「隔日重排」重設為 pending 再試一輪，最多 3 次，避免永久放棄隔日才會出現的資料（`retry_queue.py`）
+- **行情類 empty-crawl 孤兒帳本自我修復**：TWSE/TPEX/TAIFEX/FAOI/MGTS 五個行情來源的每日排程（07:30 `daily_craw`）在補抓前，會先清除「近 7 天、落在平日、帳本標記 Open=False」的孤兒帳本並重新查詢，修復「交易日但當時資料尚未發布→爬空→被誤標非交易日而永久遮蔽」的真實行情；週末與更早於視窗的日期保留標記不重試。歷史（超出日常視窗）孤兒帳本以 `backfill_price.py` 較大視窗一次性 deep 修復（`DailyUpload.clear_price_orphans`）
 - **SPECIAL_INFO 缺漏自我修復**：每日（預設 07:57，排在各商品 07:36~07:44 抓取之後補齊）對原油／黃金／比特幣／匯率／股市指數掃描近 30 天缺漏並自動補回，以「問爬蟲」為交易日／休市的唯一真相來源（回傳該日自身 K 棒即補上，只回更早日期即視為非交易日）。掃描窗遠大於各商品排程的「過去 7 天」回補窗，足以自癒管線停擺數週造成的缺漏。共用邏輯於 `data_upload/special_info_common.py`，一次性修復與孤兒帳本清理入口為 `backfill_special_info.py`
 
 ## 支援的資料來源
@@ -54,8 +55,9 @@ Tw_stock_DB_Operating/
 ├── clients.py                # MySQL 連線函式
 ├── routers.py                # MySQLRouter 路由類別
 ├── upload.py                 # 批次上傳入口程式
-├── DailyUpload.py            # 每日排程上傳
+├── DailyUpload.py            # 每日排程上傳（含行情類 empty-crawl 孤兒帳本每日重驗）
 ├── backfill_special_info.py  # SPECIAL_INFO 缺漏一次性回補與孤兒帳本清理入口
+├── backfill_price.py         # 行情類 empty-crawl 孤兒帳本一次性 deep 修復入口
 ├── retry_queue.py            # 網路失敗重試佇列
 ├── job_queue.py              # 任務佇列（FIFO 排隊機制）
 ├── pyproject.toml            # Python 專案定義（PEP 621）
@@ -115,6 +117,8 @@ Tw_stock_DB_Operating/
 │   ├── test_base.py
 │   ├── test_clients.py
 │   ├── test_daily_upload.py
+│   ├── test_backfill_price.py            # 行情類孤兒帳本 deep 修復入口
+│   ├── test_clear_price_orphans_db.py    # 清孤兒三條安全邊界（真實 SQL 引擎）
 │   ├── test_faoi.py
 │   ├── test_mgts.py
 │   ├── test_quarter_revenue.py
@@ -279,7 +283,7 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:latest python -m pytest test/
 
 | 時間 | 排程 | 說明 |
 |------|------|------|
-| 07:30 | daily_craw | 台股行情（TWSE/TPEX/TAIFEX/三大法人/融資融券），補抓過去 30 天缺漏，**排除今日**（尚未收盤） |
+| 07:30 | daily_craw | 台股行情（TWSE/TPEX/TAIFEX/三大法人/融資融券），補抓過去 30 天缺漏，**排除今日**（尚未收盤），並先清除近 7 天平日 empty-crawl 孤兒帳本重驗 |
 | 07:33 | TDCC 集保 | 檢查並上傳最新集保庫存分級 |
 | 07:36 | 原油 | SPECIAL_INFO 原油價格（過去 7 天回補） |
 | 07:38 | 黃金 | SPECIAL_INFO 黃金價格（過去 7 天回補） |
@@ -305,6 +309,9 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:latest python -m pytest test/
 - **daily_craw 排除今日**：早上 07:30 台股尚未收盤、當日行情尚未發布；若爬取今日會
   取得空資料並被 `base.upload_date` 標記為「非交易日」而永久跳過，故排除今日，僅補抓
   昨日（含）以前，今日資料留待明日排程以「昨日」身分補回。
+- **行情類 empty-crawl 孤兒帳本每日重驗**：`daily_craw` 在補抓前先 `clear_price_orphans`
+  清除「近 7 天、平日、Open=False」的孤兒帳本，使被誤標的真實交易日重新成為缺漏候選
+  並重抓（詳見下方「行情類 empty-crawl 帳本語意與自我修復」）。
 - **YT 抓昨日**：早上執行時「當日」直播多半尚未結束或自動字幕尚未產生，故排程改抓
   「昨日」已完成的直播影片，確保逐字稿已可取得。
 - **daily_craw 於背景執行緒執行（不阻塞排程）**：`daily_craw` 需逐日向爬蟲請求缺漏
@@ -377,6 +384,51 @@ docker run --rm --network db_network \
   nk7260ynpa/tw_stock_db_operating:latest \
   python backfill_special_info.py --days 30
 ```
+
+## 行情類 empty-crawl 帳本語意與自我修復
+
+TWSE／TPEX／TAIFEX／FAOI／MGTS 五個行情來源共用 `data_upload/base.py`，以各自的
+`*UploadDate` 帳本表判斷某日是否已上傳（避免重抓）。
+
+### 風險：empty-crawl 誤記帳本 → 孤兒帳本永久遮蔽交易日
+
+> **定位：預防性防呆，非修復現存故障。** 查核當下（2026-08-15）五個行情來源自
+> 2026-06-01 起孤兒帳本數皆為 **0**，本機制是為避免下述情境日後發生而預先設置。
+
+`base.upload_date` 在爬蟲**回空資料**時一律以 `Open=False` 記入帳本，而 `base.upload`
+見帳本已有該日即**永久跳過**。因此「交易日但當時資料尚未發布」若被爬空，會被誤標為
+非交易日而**永久遮蔽**——形成「帳本有列、價格表卻無資料」的**孤兒帳本**，真實行情
+再也補不回（同型問題曾在 SPECIAL_INFO 發生，見 v2.11.0）。行情類的爬蟲**不像
+SPECIAL_INFO 有 fallback**（回更早交易日）機制，無法單以「問爬蟲」區分「非交易日」與
+「交易日但資料未發布」，故改以「交易日曆常識（週末必為非交易日）＋近期時間視窗重驗」
+自我修復。
+
+### 修法：每日近期重驗 + 一次性 deep 修復
+
+- **每日近期重驗（`DailyUpload.clear_price_orphans`，內建於 07:30 `daily_craw`）**：
+  補抓前先清除「近 `REVERIFY_DAYS`（預設 7）天、落在**平日**、帳本 `Open=False`」的
+  孤兒帳本，使其重新成為缺漏候選並於同一輪重抓——資料已發布→補回並標 `Open=True`；
+  仍為空→重標 `Open=False`。**週末**為確定非交易日、**更早於視窗**的日期一律保留
+  標記，不清、不重試，避免對已確定的非交易日反覆重試同一天。台股行情最遲於盤後隔日
+  清晨發布，7 天視窗足以涵蓋發布延遲。
+- **一次性 deep 修復（`backfill_price.py`）**：對超出日常視窗的歷史孤兒帳本，以較大
+  視窗清孤兒→逐日重抓，冪等可重跑（等同 SPECIAL_INFO 的 `backfill_special_info.py`）：
+
+  ```bash
+  docker run --rm --network db_network \
+    nk7260ynpa/tw_stock_db_operating:latest \
+    python backfill_price.py --days 30
+  ```
+
+  每次重抓前與 `daily_craw` 一樣隨機暫停 3~15 秒節流，避免大視窗一次清出數十個日期時
+  背靠背打爆上游爬蟲。結束碼 0 代表全數完成；1 代表有網路失敗、或有日期重抓後帳本未
+  回填（爬取失敗），兩者皆可直接重跑。若拋出 `NetworkError` 以外的例外（如 DB 連線、
+  schema 錯誤）會中止整輪，該來源已清除但尚未重抓的日期會暫時失去帳本標記——價格資料
+  不受影響、重跑即可補回，但視窗超過 30 天時 `daily_craw` 不會自動涵蓋，需人工重跑。
+
+> **既有行為不受影響**：清孤兒只針對 `Open=False`（等同該日無價格資料）的帳本；
+> `Open=True`（已成功上傳、已有價格）的日期一律不清、不重抓，維持「已上傳日正確跳過、
+> 避免重抓」的既有保證。
 
 ## 安裝方式
 
