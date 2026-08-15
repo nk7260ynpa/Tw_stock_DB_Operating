@@ -683,7 +683,15 @@ def run_daily_craw_scheduled():
                 daily_craw_running = False
             logger.info("每日爬蟲背景執行緒結束。")
 
-    threading.Thread(target=_run, daemon=True, name="daily-craw").start()
+    try:
+        threading.Thread(target=_run, daemon=True, name="daily-craw").start()
+    except RuntimeError:
+        # 無法建立執行緒時必須回復旗標，否則此後每日排程都只會被略過。
+        with daily_craw_lock:
+            daily_craw_running = False
+        logger.exception("每日爬蟲背景執行緒建立失敗。")
+        return
+
     logger.info("每日爬蟲已於背景執行緒啟動。")
 
 

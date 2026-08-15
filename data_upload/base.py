@@ -16,7 +16,19 @@ logger = logging.getLogger(__name__)
 # timeout：未設 timeout 時 requests 會無限期等待，一旦爬蟲服務 hang 住，單一請求
 # 即可卡住整個 daily_craw，連帶延後當日後續所有排程（實測曾延後逾 20 小時）。
 # 逾時會拋出 requests.Timeout，於 craw_data 中歸類為可重試的 NetworkError。
-CRAW_TIMEOUT = int(os.getenv("CRAW_TIMEOUT", "120"))
+_DEFAULT_CRAW_TIMEOUT = 120
+
+try:
+    CRAW_TIMEOUT = int(os.getenv("CRAW_TIMEOUT", str(_DEFAULT_CRAW_TIMEOUT)))
+    if CRAW_TIMEOUT <= 0:
+        raise ValueError("CRAW_TIMEOUT 需為正整數")
+except ValueError:
+    # 環境變數設錯不應讓整個服務在 import 期就起不來，退回預設值並記錄警告。
+    logger.warning(
+        "CRAW_TIMEOUT 環境變數值無效（%r），改用預設 %d 秒。",
+        os.getenv("CRAW_TIMEOUT"), _DEFAULT_CRAW_TIMEOUT,
+    )
+    CRAW_TIMEOUT = _DEFAULT_CRAW_TIMEOUT
 
 
 class CrawlError(Exception):

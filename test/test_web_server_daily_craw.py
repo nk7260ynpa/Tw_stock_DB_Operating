@@ -103,6 +103,19 @@ class TestRunDailyCrawScheduled(unittest.TestCase):
             with self.web_server.daily_craw_lock:
                 self.assertFalse(self.web_server.daily_craw_running)
 
+    def test_flag_reset_when_thread_start_fails(self):
+        """測試執行緒建立失敗時釋放旗標，避免此後每日排程都被略過。"""
+        with patch.object(self.web_server, "daily_craw", lambda: None), \
+                patch.object(self.web_server.threading, "Thread") as mock_thread:
+            mock_thread.return_value.start.side_effect = RuntimeError(
+                "can't start new thread"
+            )
+
+            self.web_server.run_daily_craw_scheduled()
+
+            with self.web_server.daily_craw_lock:
+                self.assertFalse(self.web_server.daily_craw_running)
+
 
 class TestScheduleRegistration(unittest.TestCase):
     """測試排程註冊的是非阻塞包裝而非 daily_craw 本身。"""
