@@ -23,7 +23,9 @@
 
 import argparse
 import logging
+import random
 import sys
+import time
 
 from easydict import EasyDict
 from sqlalchemy import text
@@ -76,7 +78,11 @@ def parse_args(argv=None):
 
 
 def _classify_dates(db_name, dates, host, user, password):
-    """重讀帳本，將重驗後的日期分類為已補回／仍非交易日。
+    """重讀帳本，將重驗後的日期分類為已補回／仍非交易日／未回填。
+
+    「未回填」指帳本查無該日：清孤兒已刪除原標記，但重抓時 `base.upload` 因
+    非網路錯誤（如爬取失敗）提前返回而未寫回帳本。此狀態需明確回報，否則會被
+    誤判為成功（該日若超出 `daily_craw` 的 30 天視窗，帳本標記將不再自動補回）。
 
     Args:
         db_name (str): 資料來源名稱。
@@ -86,15 +92,17 @@ def _classify_dates(db_name, dates, host, user, password):
         password (str): MySQL 密碼。
 
     Returns:
-        tuple[int, int]: (已補回筆數 Open=True, 仍非交易日筆數 Open=False)。
+        tuple[int, int, list[str]]: (已補回筆數 Open=True, 仍非交易日筆數
+            Open=False, 帳本未回填的日期清單)。
     """
     if not dates:
-        return 0, 0
+        return 0, 0, []
     actual_db = DB_MAPPING.get(db_name, db_name)
     table = UPLOAD_DATE_TABLE.get(db_name, "UploadDate")
     conn = MySQLRouter(host, user, password, actual_db).mysql_conn
     filled = 0
     non_trading = 0
+    unrestored = []
     try:
         for date_str in dates:
             open_val = conn.execute(
@@ -103,13 +111,15 @@ def _classify_dates(db_name, dates, host, user, password):
                 ),
                 {"date": date_str},
             ).scalar()
-            if open_val:
+            if open_val is None:
+                unrestored.append(date_str)
+            elif open_val:
                 filled += 1
-            elif open_val is not None:
+            else:
                 non_trading += 1
     finally:
         conn.close()
-    return filled, non_trading
+    return filled, non_trading, unrestored
 
 
 def run_backfill(days, host, user, password, crawlerhost):
@@ -141,6 +151,9 @@ def run_backfill(days, host, user, password, crawlerhost):
         network_errors = []
         requeried = []
         for date_str in sorted(cleared):
+            # 與 daily_craw 一致的隨機節流：deep 修復可能一次清出數十個日期，
+            # 背靠背請求同一組行情端點有被上游限流／封鎖之虞。
+            time.sleep(random.uniform(3, 15))
             try:
                 upload.day_upload(date_str, opt)
                 requeried.append(date_str)
@@ -151,15 +164,21 @@ def run_backfill(days, host, user, password, crawlerhost):
                 )
                 network_errors.append(date_str)
 
-        filled, non_trading = _classify_dates(
+        filled, non_trading, unrestored = _classify_dates(
             db_name, requeried, host, user, password,
         )
+        if unrestored:
+            logger.warning(
+                "%s：%d 個日期重抓後帳本未回填（疑爬取失敗），需人工確認：%s",
+                db_name, len(unrestored), unrestored,
+            )
         summaries.append({
             "db_name": db_name,
             "cleared": len(cleared),
             "filled": filled,
             "non_trading": non_trading,
             "network_errors": network_errors,
+            "unrestored": unrestored,
         })
     return summaries
 
@@ -171,7 +190,7 @@ def main(argv=None):
         argv (list[str] | None): 參數清單，預設取 sys.argv。
 
     Returns:
-        int: 結束碼（0 成功、1 有網路失敗待重試）。
+        int: 結束碼（0 全數完成、1 有網路失敗或帳本未回填待重跑）。
     """
     args = parse_args(argv)
     logger.info("開始行情類孤兒帳本 deep 修復（近 %d 天）。", args.days)
@@ -182,20 +201,25 @@ def main(argv=None):
 
     total_filled = 0
     total_network_errors = 0
+    total_unrestored = 0
     for summary in summaries:
         total_filled += summary["filled"]
         total_network_errors += len(summary["network_errors"])
+        total_unrestored += len(summary["unrestored"])
         logger.info(
-            "%s：清除孤兒 %d、補回交易日 %d、仍非交易日 %d、網路失敗 %d。",
+            "%s：清除孤兒 %d、補回交易日 %d、仍非交易日 %d、網路失敗 %d、"
+            "帳本未回填 %d。",
             summary["db_name"], summary["cleared"], summary["filled"],
             summary["non_trading"], len(summary["network_errors"]),
+            len(summary["unrestored"]),
         )
 
     logger.info(
-        "行情類孤兒帳本 deep 修復完成：共補回 %d 個交易日，網路失敗 %d 筆。",
-        total_filled, total_network_errors,
+        "行情類孤兒帳本 deep 修復完成：共補回 %d 個交易日，網路失敗 %d 筆，"
+        "帳本未回填 %d 筆。",
+        total_filled, total_network_errors, total_unrestored,
     )
-    return 1 if total_network_errors else 0
+    return 1 if (total_network_errors or total_unrestored) else 0
 
 
 if __name__ == "__main__":
