@@ -55,6 +55,22 @@ UPLOAD_DATE_TABLE = {
     "MGTS": "MGTSUploadDate",
 }
 
+# 行情類 empty-crawl 孤兒帳本每日重驗的近期視窗天數。
+#
+# 潛在風險（預防性防呆，非修復現存故障）：`base.upload_date` 在爬蟲回空時一律以
+# `Open=False` 記入帳本，`upload` 見帳本有該日即永久跳過。故「交易日但當時資料尚未
+# 發布」若被爬空，該日會被誤標為非交易日而永久遮蔽（孤兒帳本＝帳本有列、價格表無
+# 資料），真實行情再也補不回。查核時（2026-08-15）五個行情來源自 2026-06-01 起孤兒
+# 帳本數皆為 0，本機制為避免日後發生而設。
+#
+# 防呆：每日排程先清除「近 REVERIFY_DAYS 天、落在平日、標記 Open=False」的孤兒
+# 帳本，使其重新成為缺漏候選並於同一輪重新向爬蟲查詢——資料已發布則補回並標
+# Open=True，仍為空（真正的非交易日）則重標 Open=False。台股行情最遲於當日盤後
+# 隔日清晨即發布，7 天視窗足以涵蓋發布延遲；週末為確定非交易日（不清、不重試），
+# 更早於視窗的日期亦保留標記，避免對已確定的非交易日反覆重試同一天。歷史（超出
+# 視窗）孤兒帳本的一次性修復請用 `backfill_price.py` 以較大視窗執行。
+REVERIFY_DAYS = 7
+
 
 def set_retry_queue(queue):
     """設定全域重試佇列引用。
@@ -115,6 +131,115 @@ def get_missing_dates(db_name, days=30):
     return missing_dates
 
 
+def _to_date(value):
+    """將帳本 Date 欄位的查詢結果正規化為 `datetime.date`。
+
+    MySQL 的 DATE 欄位經 pymysql 回傳 `datetime.date`，但不同驅動（或測試用的
+    SQLite）可能回傳 `datetime.datetime` 或 `YYYY-MM-DD` 字串，故統一正規化，
+    避免後續 `weekday()` 判斷因型別差異而誤判。
+
+    Args:
+        value (datetime.date | datetime.datetime | str): 帳本日期欄位值。
+
+    Returns:
+        datetime.date: 正規化後的日期。
+
+    Raises:
+        TypeError: 無法辨識的日期型別。
+    """
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    if isinstance(value, datetime.date):
+        return value
+    if isinstance(value, str):
+        return datetime.datetime.strptime(value[:10], "%Y-%m-%d").date()
+    raise TypeError(f"無法辨識的帳本日期型別：{type(value)!r}")
+
+
+def clear_price_orphans(
+    db_name,
+    days=REVERIFY_DAYS,
+    today=None,
+    host=None,
+    user=None,
+    password=None,
+):
+    """清除近 N 天內平日的 empty-crawl 孤兒帳本（Open=False），回傳被清除的日期。
+
+    孤兒帳本＝帳本標記為非交易日（`Open=False`，行情類此標記等同「該日無價格
+    資料」）的日期。其中「交易日但當時資料尚未發布」被爬空而誤標者，一經標記便
+    被 `upload` 永久跳過而遮蔽真實行情。本函式僅重驗**近期平日**的此類孤兒：
+
+        - 視窗為以 `today` 往回推算 `days` 個日曆天並排除 `today` 本身，即
+          `today - days + 1` ～ `today - 1`（與 `get_missing_dates` 的「近 N 天
+          含今日」同義，再排除尚未收盤的今日）。落在視窗內且為平日（週一～週五）
+          者才清除；清除後該日重新成為 `get_missing_dates` 的缺漏候選，由呼叫端
+          （daily_craw／一次性修復）重新向爬蟲查詢。資料已發布→補回並標
+          Open=True；仍為空→重標 Open=False。
+        - 週末為確定非交易日、更早於視窗的日期亦保留其 Open=False 標記，不清除、
+          不重試，避免對已確定的非交易日反覆重試同一天。
+
+    僅清除 `Open=False` 的帳本，`Open=True`（已成功上傳、已有價格）的日期一律
+    不受影響，確保「已上傳日正確跳過、避免重抓」的既有行為不被破壞。
+
+    Args:
+        db_name (str): 資料來源名稱（TWSE/TPEX/TAIFEX/FAOI/MGTS）。
+        days (int): 重驗的近期視窗天數（含今日往回推算的日曆天數）。
+        today (datetime.date | None): 視窗基準日，預設為當日；供測試注入。
+        host (str | None): MySQL 主機位址，預設取模組層 `HOST`。
+        user (str | None): MySQL 使用者名稱，預設取模組層 `USER`。
+        password (str | None): MySQL 密碼，預設取模組層 `PASSWORD`。
+
+    Returns:
+        list[str]: 由舊到新排序、被清除的孤兒帳本日期字串（YYYY-MM-DD）。
+    """
+    actual_db = DB_MAPPING.get(db_name, db_name)
+    upload_date_table = UPLOAD_DATE_TABLE.get(db_name, "UploadDate")
+    if today is None:
+        today = datetime.datetime.now().date()
+
+    start = today - datetime.timedelta(days=days - 1)
+    conn = MySQLRouter(
+        host if host is not None else HOST,
+        user if user is not None else USER,
+        password if password is not None else PASSWORD,
+        actual_db,
+    ).mysql_conn
+    try:
+        rows = conn.execute(
+            text(
+                f"SELECT Date FROM {upload_date_table} "
+                f"WHERE Date >= :start AND Date < :today AND `Open` = 0"
+            ),
+            {
+                "start": start.strftime("%Y-%m-%d"),
+                "today": today.strftime("%Y-%m-%d"),
+            },
+        ).fetchall()
+
+        # 僅重驗平日；週末（weekday() >= 5）為確定非交易日，保留標記不清除。
+        orphans = sorted(
+            _to_date(row[0]).strftime("%Y-%m-%d")
+            for row in rows
+            if _to_date(row[0]).weekday() < 5
+        )
+
+        for date_str in orphans:
+            conn.execute(
+                text(
+                    f"DELETE FROM {upload_date_table} "
+                    f"WHERE Date = :date AND `Open` = 0"
+                ),
+                {"date": date_str},
+            )
+        if orphans:
+            conn.commit()
+    finally:
+        conn.close()
+
+    return orphans
+
+
 def daily_craw():
     """每日排程爬取資料並上傳至 MySQL 資料庫。
 
@@ -129,6 +254,19 @@ def daily_craw():
             "dbname": db_name,
             "crawlerhost": CRAWLERHOST,
         })
+
+        # 先重驗近期平日的 empty-crawl 孤兒帳本（可能為「交易日但當時資料尚未
+        # 發布」而被誤標 Open=False），清除後它們會重新成為下方缺漏候選並重抓，
+        # 避免真實交易日被永久遮蔽。
+        try:
+            cleared = clear_price_orphans(db_name, days=REVERIFY_DAYS)
+            if cleared:
+                logger.info(
+                    f"{db_name}: 清除近 {REVERIFY_DAYS} 天平日孤兒帳本 "
+                    f"{len(cleared)} 筆並將重新查詢：{cleared}"
+                )
+        except Exception as e:  # noqa: BLE001 - 重驗失敗不應中斷當日補抓
+            logger.warning(f"{db_name}: 清除孤兒帳本失敗，略過重驗：{e}")
 
         missing_dates = get_missing_dates(db_name, days=30)
 
