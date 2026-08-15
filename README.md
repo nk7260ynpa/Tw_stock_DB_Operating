@@ -307,6 +307,20 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:latest python -m pytest test/
   昨日（含）以前，今日資料留待明日排程以「昨日」身分補回。
 - **YT 抓昨日**：早上執行時「當日」直播多半尚未結束或自動字幕尚未產生，故排程改抓
   「昨日」已完成的直播影片，確保逐字稿已可取得。
+- **daily_craw 於背景執行緒執行（不阻塞排程）**：`daily_craw` 需逐日向爬蟲請求缺漏
+  日期，耗時隨缺漏天數成長。若直接在 `scheduler_thread` 內同步執行，會在
+  `run_pending()` 期間持有 `schedule_lock`，使當日 07:33~07:57 的後續排程全部延後。
+  故排程註冊的是 `run_daily_craw_scheduled` 包裝函式：它以背景執行緒啟動 `daily_craw`
+  後立即返回，並以重入旗標確保同時只有一輪在跑（上一輪未結束則記錄警告並略過本次）。
+- **爬蟲請求一律設 timeout**：`data_upload/base.py` 的 `CRAW_TIMEOUT`（預設 120 秒，
+  可用同名環境變數覆寫）套用於所有行情類爬取請求。未設 timeout 時 `requests` 會無限期
+  等待，爬蟲一旦 hang 住即會卡住 `daily_craw`。逾時歸類為**可重試**的 `NetworkError`
+  並進入重試佇列，而非直接放棄。
+
+> **2026-08 事故背景**：上述兩點源自一次連續多日的資料缺漏。爬蟲間歇性回傳缺少 `data`
+> 鍵的 payload，使該日期不寫帳本而每日重抓、缺漏數逐日累積；又因請求未設 timeout，
+> `daily_craw` 曾單日執行逾 20 小時並持有 `schedule_lock`，導致新聞等排程被延後到深夜
+> 才觸發。新聞來源的日期回溯僅約 3 天，錯過抓取窗即**永久無法補回**。
 
 ### 排程時間的一次性遷移（config_version）
 

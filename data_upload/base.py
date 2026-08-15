@@ -10,6 +10,14 @@ from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
+# 爬蟲請求逾時秒數（可用環境變數 CRAW_TIMEOUT 覆寫）。
+#
+# 行情資料單日筆數較多（上萬筆），故預設值較其他上傳器寬鬆。此處**必須**設定
+# timeout：未設 timeout 時 requests 會無限期等待，一旦爬蟲服務 hang 住，單一請求
+# 即可卡住整個 daily_craw，連帶延後當日後續所有排程（實測曾延後逾 20 小時）。
+# 逾時會拋出 requests.Timeout，於 craw_data 中歸類為可重試的 NetworkError。
+CRAW_TIMEOUT = int(os.getenv("CRAW_TIMEOUT", "120"))
+
 
 class CrawlError(Exception):
     """爬取資料失敗時拋出的異常。"""
@@ -61,12 +69,13 @@ class DataUploadBase(ABC):
             pd.DataFrame: 包含每日資料的 DataFrame。
 
         Raises:
-            CrawlError: 爬取失敗時拋出。
+            NetworkError: 網路連線失敗或請求逾時時拋出（可重試）。
+            CrawlError: 其他爬取失敗時拋出（不可重試）。
         """
         url = f"{self.url}/{self.name}"
         payload = {"date": date}
         try:
-            response = requests.get(url, params=payload)
+            response = requests.get(url, params=payload, timeout=CRAW_TIMEOUT)
             response.raise_for_status()
             json_data = response.json()["data"]
             df = pd.DataFrame(json_data)
