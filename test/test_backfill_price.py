@@ -155,11 +155,19 @@ class TestRunBackfill(unittest.TestCase):
         ]
         mock_classify.return_value = (3, 0, [])
 
+        # 記錄每次 sleep 當下已完成的重抓次數，用以鎖定「先睡後抓」的順序：
+        # 若 sleep 被移到 day_upload 之後，第一次請求就會毫無間隔送出。
+        uploads_before_sleep = []
+        mock_sleep.side_effect = lambda _: uploads_before_sleep.append(
+            mock_day_upload.call_count
+        )
+
         backfill_price.run_backfill(
             days=30, host="h", user="u", password="p", crawlerhost="c",
         )
 
         self.assertEqual(mock_sleep.call_count, mock_day_upload.call_count)
+        self.assertEqual(uploads_before_sleep, [0, 1, 2])
         for call_obj in mock_sleep.call_args_list:
             self.assertGreaterEqual(call_obj.args[0], 3)
             self.assertLessEqual(call_obj.args[0], 15)
