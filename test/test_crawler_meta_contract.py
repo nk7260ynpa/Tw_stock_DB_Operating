@@ -100,6 +100,12 @@ class TestRetryableIsPrimaryCriterion(unittest.TestCase):
                 "detail_failed": 5,
                 "list_failed": True,
             },
+            # 舊欄位 `source_truncated` 單獨出現時同樣算硬限制佐證，
+            # 不因為少了 `non_retryable_reasons` 就退回保守重抓。
+            "只有 source_truncated 佐證": {
+                "retryable": False,
+                "source_truncated": True,
+            },
         }
         for label, meta in metas.items():
             with self.subTest(meta=label):
@@ -124,6 +130,12 @@ class TestRetryableIsPrimaryCriterion(unittest.TestCase):
                 "retryable": False,
                 "retryable_reasons": [],
                 "non_retryable_reasons": [],
+            },
+            # 空字串不算佐證：拿掉過濾會讓這筆從「重抓」翻成「不重抓」，
+            # 正是本 repo 最怕的危險方向，故明確釘住。
+            "清單只有空字串": {
+                "retryable": False,
+                "non_retryable_reasons": [""],
             },
         }
         for label, meta in metas.items():
