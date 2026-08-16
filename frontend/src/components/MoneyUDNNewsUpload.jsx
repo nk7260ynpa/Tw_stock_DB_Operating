@@ -246,6 +246,14 @@ function MoneyUDNNewsUpload() {
                   無新資料或資料已存在
                 </div>
               )}
+              {/* 抓取不完整：已取得的部分早已落地，須顯示實際筆數，
+                  否則只看到「失敗」會被誤判成完全沒抓到。 */}
+              {job.status === 'failed' && job.record_count > 0 && (
+                <div className="job-info" style={{ marginTop: '4px' }}>
+                  已存入 {job.record_count.toLocaleString()} 筆 metadata，
+                  {job.file_count || 0} 個全文檔案，其餘待重試補齊
+                </div>
+              )}
               {job.error && (
                 <div className="job-errors">{job.error}</div>
               )}

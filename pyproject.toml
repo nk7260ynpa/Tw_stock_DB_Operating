@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tw-stock-db-operating"
 # 版本以 git tag（vX.Y.Z）為單一版本軸；發版時本欄位需與所打的 tag 對齊。
-version = "2.15.0"
+version = "2.16.0"
 description = "台股資料庫操作模組，提供資料上傳、排程與 Web 管理介面"
 requires-python = ">=3.12"
 license = "MIT"

@@ -67,7 +67,7 @@ class TestCompanyInfoAPI(unittest.TestCase):
         self.assertEqual(job["company_info_count"], 0)
         self.assertEqual(job["industry_map_count"], 0)
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_get_status_success(self, mock_router_cls):
         """測試取得公司產業對照狀態。"""
         mock_conn = MagicMock()
@@ -83,7 +83,7 @@ class TestCompanyInfoAPI(unittest.TestCase):
         self.assertEqual(data["company_info_count"], 999)
         self.assertEqual(data["industry_map_count"], 30)
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_get_status_db_error(self, mock_router_cls):
         """測試資料庫連線失敗時回傳 0。"""
         mock_router_cls.side_effect = Exception("連線失敗")

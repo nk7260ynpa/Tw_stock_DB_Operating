@@ -10,7 +10,7 @@ class TestDayUpload(unittest.TestCase):
     """測試 day_upload 函式。"""
 
     @patch("upload.data_upload")
-    @patch("upload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_day_upload_calls_uploader(self, mock_router_cls, mock_data_upload):
         """測試 day_upload 正確呼叫對應上傳器。"""
         import upload
@@ -41,7 +41,7 @@ class TestDayUpload(unittest.TestCase):
         mock_conn.close.assert_called_once()
 
     @patch("upload.data_upload")
-    @patch("upload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_day_upload_uses_correct_package_name(
         self, mock_router_cls, mock_data_upload
     ):
@@ -69,7 +69,7 @@ class TestDayUpload(unittest.TestCase):
         mock_module.Uploader.assert_called_once()
 
     @patch("upload.data_upload")
-    @patch("upload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_day_upload_faoi_maps_to_twse(
         self, mock_router_cls, mock_data_upload
     ):
@@ -102,7 +102,7 @@ class TestDayUpload(unittest.TestCase):
         )
 
     @patch("upload.data_upload")
-    @patch("upload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_day_upload_mgts_maps_to_twse(
         self, mock_router_cls, mock_data_upload
     ):

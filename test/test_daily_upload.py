@@ -8,7 +8,7 @@ import datetime
 class TestGetMissingDates(unittest.TestCase):
     """測試 get_missing_dates 函式。"""
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_no_missing_dates(self, mock_router_cls):
         """測試所有日期皆已上傳時回傳空清單。"""
         import DailyUpload
@@ -31,7 +31,7 @@ class TestGetMissingDates(unittest.TestCase):
         self.assertEqual(result, [])
         mock_conn.close.assert_called_once()
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_some_missing_dates(self, mock_router_cls):
         """測試部分日期未上傳時回傳缺漏日期。"""
         import DailyUpload
@@ -53,7 +53,7 @@ class TestGetMissingDates(unittest.TestCase):
         self.assertEqual(len(result), 3)
         mock_conn.close.assert_called_once()
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_all_missing_dates(self, mock_router_cls):
         """測試完全沒有上傳紀錄時回傳全部日期。"""
         import DailyUpload
@@ -67,7 +67,7 @@ class TestGetMissingDates(unittest.TestCase):
         self.assertEqual(len(result), 3)
         mock_conn.close.assert_called_once()
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_uses_correct_db_name(self, mock_router_cls):
         """測試使用正確的資料庫名稱建立連線。"""
         import DailyUpload
@@ -85,7 +85,7 @@ class TestGetMissingDates(unittest.TestCase):
             "TPEX",
         )
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_faoi_maps_to_twse(self, mock_router_cls):
         """測試 FAOI 連線至 TWSE 資料庫並查詢 FAOIUploadDate。"""
         import DailyUpload
@@ -105,7 +105,7 @@ class TestGetMissingDates(unittest.TestCase):
         call_args = mock_conn.execute.call_args[0][0]
         self.assertIn("FAOIUploadDate", str(call_args))
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_mgts_maps_to_twse(self, mock_router_cls):
         """測試 MGTS 連線至 TWSE 資料庫並查詢 MGTSUploadDate。"""
         import DailyUpload
@@ -333,7 +333,7 @@ class TestClearPriceOrphans(unittest.TestCase):
             for d in dates
         ]
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_clears_weekday_orphans(self, mock_router_cls):
         """測試清除平日 Open=False 孤兒帳本並回傳其日期。"""
         import DailyUpload
@@ -355,7 +355,7 @@ class TestClearPriceOrphans(unittest.TestCase):
         mock_conn.commit.assert_called_once()
         mock_conn.close.assert_called_once()
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_skips_weekend_orphans(self, mock_router_cls):
         """測試週末孤兒帳本不清除（確定非交易日、不反覆重試）。"""
         import DailyUpload
@@ -376,7 +376,7 @@ class TestClearPriceOrphans(unittest.TestCase):
         mock_conn.commit.assert_not_called()
         mock_conn.close.assert_called_once()
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_mixed_weekday_weekend(self, mock_router_cls):
         """測試混合平日與週末時只清除平日。"""
         import DailyUpload
@@ -395,7 +395,7 @@ class TestClearPriceOrphans(unittest.TestCase):
         # SELECT + 1 次 DELETE
         self.assertEqual(mock_conn.execute.call_count, 2)
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_no_orphans(self, mock_router_cls):
         """測試無孤兒帳本時回傳空清單且不 DELETE、不 commit。"""
         import DailyUpload
@@ -411,7 +411,7 @@ class TestClearPriceOrphans(unittest.TestCase):
         mock_conn.commit.assert_not_called()
         mock_conn.close.assert_called_once()
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_faoi_uses_mapped_db_and_table(self, mock_router_cls):
         """測試 FAOI 連線至 TWSE 資料庫並操作 FAOIUploadDate 表。"""
         import DailyUpload
@@ -433,7 +433,7 @@ class TestClearPriceOrphans(unittest.TestCase):
         # 僅針對 Open=False 的孤兒帳本
         self.assertIn("`Open` = 0", select_sql)
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_only_selects_open_false(self, mock_router_cls):
         """測試 SELECT 僅挑出 Open=False（不動 Open=True 已上傳日）。"""
         import DailyUpload
@@ -448,7 +448,7 @@ class TestClearPriceOrphans(unittest.TestCase):
         self.assertIn("MGTSUploadDate", select_sql)
         self.assertIn("`Open` = 0", select_sql)
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_delete_also_guards_open_false(self, mock_router_cls):
         """測試 DELETE 亦帶 Open=0 條件（防 SELECT 後被改為已上傳的競態）。"""
         import DailyUpload
@@ -466,7 +466,7 @@ class TestClearPriceOrphans(unittest.TestCase):
         self.assertIn("DELETE", delete_sql)
         self.assertIn("`Open` = 0", delete_sql)
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_window_excludes_today(self, mock_router_cls):
         """測試查詢視窗為 today-days+1 ～ today-1（排除今日）。"""
         import DailyUpload
@@ -482,7 +482,7 @@ class TestClearPriceOrphans(unittest.TestCase):
         self.assertEqual(params["start"], "2026-01-06")
         self.assertEqual(params["today"], "2026-01-12")
 
-    @patch("DailyUpload.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_uses_custom_connection_args(self, mock_router_cls):
         """測試可注入自訂 MySQL 連線參數（供一次性修復入口使用）。"""
         import DailyUpload

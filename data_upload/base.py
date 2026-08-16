@@ -56,7 +56,23 @@ class SourceError(NetworkError):
 
     若不區分，`daily_craw` 會在昇冪排序的缺漏清單第一個「毒日期」上
     每天重複中斷，其後日期永遠不會被嘗試，直到滑出 30 天視窗即永久遺失。
+
+    Attributes:
+        partial_result (dict | None): 拋出前已成功落地的統計（如
+            `record_count`、`file_count`）。`partial` 狀態下已取得的資料
+            會先寫入才拋例外，呼叫端若不讀取此欄位就只能回報 0 筆，
+            使用者會誤判成「完全沒抓到」。無資料落地時為 None。
     """
+
+    def __init__(self, message, partial_result=None):
+        """初始化來源端抓取失敗例外。
+
+        Args:
+            message (str): 錯誤說明文字。
+            partial_result (dict | None): 已落地的統計結果，預設 None。
+        """
+        super().__init__(message)
+        self.partial_result = partial_result
 
 
 class OutOfRangeError(CrawlError):

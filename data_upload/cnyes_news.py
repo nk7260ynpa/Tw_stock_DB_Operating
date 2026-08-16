@@ -170,7 +170,7 @@ class CNYESNewsUploader:
         df = df.where(df.notna(), None)
         return df
 
-    def _check_incomplete(self, context):
+    def _check_incomplete(self, context, partial_result=None):
         """依最近一次爬取狀態決定是否排入重試（須於資料落地後呼叫）。
 
         `partial` 代表抓到的資料不完整。此時已抓到的部分一律先寫入（新聞以
@@ -179,8 +179,12 @@ class CNYESNewsUploader:
         排入 retry queue；來源硬上限（`source_truncated`）→ 重抓也拿不到，
         僅記錄警告，避免無謂的重試循環。
 
+        `partial_result` 會附在例外上一併帶給呼叫端：資料既然已落地，
+        介面就該顯示實際筆數，否則會被誤判成「完全沒抓到」。
+
         Args:
             context (str): 情境說明，如「（2026-08-16）」。
+            partial_result (dict | None): 已落地的統計結果，預設 None。
 
         Raises:
             SourceError: 不完整且重抓有機會補齊時拋出（爬蟲仍可達，
@@ -197,7 +201,8 @@ class CNYESNewsUploader:
             return
         raise SourceError(
             f"{SOURCE_LABEL}{context} 抓取不完整（{reason}），"
-            "已存入取得的部分，排入重試以補齊剩餘資料"
+            "已存入取得的部分，排入重試以補齊剩餘資料",
+            partial_result=partial_result,
         )
 
     def get_existing_urls(self, date):
@@ -364,15 +369,17 @@ class CNYESNewsUploader:
 
         if raw_df.empty:
             logger.info("CNYES 新聞 %s 無資料可上傳。", date)
-            self._check_incomplete(f"（{date}）")
-            return {"date": date, "record_count": 0, "file_count": 0}
+            result = {"date": date, "record_count": 0, "file_count": 0}
+            self._check_incomplete(f"（{date}）", result)
+            return result
 
         new_df = self.filter_new_records(raw_df, date)
 
         if new_df.empty:
             logger.info("CNYES 新聞 %s 所有記錄皆已存在，跳過上傳。", date)
-            self._check_incomplete(f"（{date}）")
-            return {"date": date, "record_count": 0, "file_count": 0}
+            result = {"date": date, "record_count": 0, "file_count": 0}
+            self._check_incomplete(f"（{date}）", result)
+            return result
 
         # 驗證 schema 並上傳 metadata
         meta_df = self.check_schema(new_df)
@@ -388,12 +395,13 @@ class CNYESNewsUploader:
             "CNYES 新聞 %s 已上傳 %d 筆 metadata，儲存 %d 個全文檔案。",
             date, record_count, file_count,
         )
-        self._check_incomplete(f"（{date}）")
-        return {
+        result = {
             "date": date,
             "record_count": record_count,
             "file_count": file_count,
         }
+        self._check_incomplete(f"（{date}）", result)
+        return result
 
     def upload_by_hours(self, hours):
         """以時數模式執行 CNYES 新聞上傳流程。
@@ -417,13 +425,14 @@ class CNYESNewsUploader:
 
         if raw_df.empty:
             logger.info("CNYES 新聞過去 %d 小時無資料可上傳。", hours)
-            self._check_incomplete(f"（hours={hours}）")
-            return {
+            result = {
                 "hours": hours,
                 "record_count": 0,
                 "file_count": 0,
                 "dates": [],
             }
+            self._check_incomplete(f"（hours={hours}）", result)
+            return result
 
         total_records = 0
         total_files = 0
@@ -459,13 +468,14 @@ class CNYESNewsUploader:
             "儲存 %d 個全文檔案，涵蓋日期：%s。",
             hours, total_records, total_files, processed_dates,
         )
-        self._check_incomplete(f"（hours={hours}）")
-        return {
+        result = {
             "hours": hours,
             "record_count": total_records,
             "file_count": total_files,
             "dates": processed_dates,
         }
+        self._check_incomplete(f"（hours={hours}）", result)
+        return result
 
     def record_uploaded_date(self, date):
         """將日期記錄至 CNYESUploaded 資料表。
