@@ -43,6 +43,172 @@ class NetworkError(CrawlError):
     """
 
 
+class SourceError(NetworkError):
+    """爬蟲可達、但該次抓取於來源端失敗時拋出（可重試）。
+
+    刻意繼承 `NetworkError` 以維持「可重試」語意（仍會進 retry queue），
+    但與傳輸層失敗區分開來，因為兩者該有的**批次策略相反**：
+
+    * `NetworkError`（連不上爬蟲）：其後的日期／任務必然同樣失敗，
+      應整批排入重試並**中止本輪**。
+    * `SourceError`（爬蟲活著、只是這天抓不到）：僅該筆失敗，
+      應**繼續處理後續**日期／任務。
+
+    若不區分，`daily_craw` 會在昇冪排序的缺漏清單第一個「毒日期」上
+    每天重複中斷，其後日期永遠不會被嘗試，直到滑出 30 天視窗即永久遺失。
+    """
+
+
+class OutOfRangeError(CrawlError):
+    """查詢日期超出來源可回溯範圍時拋出（重試無用）。
+
+    刻意繼承 `CrawlError` 而非 `NetworkError`：本專案以「是否為
+    `NetworkError`」作為可重試判準，故此例外不會進入 retry queue，
+    避免對來源根本不再提供的日期反覆重抓。
+
+    Attributes:
+        oldest_available (str | None): 來源目前最舊可取得的日期／時間。
+    """
+
+    def __init__(self, message, oldest_available=None):
+        """初始化超出回溯範圍例外。
+
+        Args:
+            message (str): 錯誤說明文字。
+            oldest_available (str | None): 來源最舊可取得的日期／時間。
+        """
+        super().__init__(message)
+        self.oldest_available = oldest_available
+
+
+# --- 爬蟲回應狀態（Tw_stock_crawer v2.13.0 起提供） ---
+#
+# 舊契約下，爬取失敗的回應「沒有 data 鍵」，本專案靠 `response.json()["data"]`
+# 拋出的 KeyError 得知失敗（→ CrawlError → 不寫帳本 → 次日重抓）。新契約
+# **保證 data 鍵永遠存在**（失敗時為 []／{}），KeyError 不再發生；若沿用
+# 「有 data 就當成功」的邏輯，失敗日會被誤判為「當日無資料」而寫入
+# `Open=False` 帳本 → `check_date` 之後永久跳過 → 真實資料永久遮蔽。
+# 因此改以 status 欄位作為成敗的唯一判準。
+STATUS_OK = "ok"
+STATUS_EMPTY = "empty"
+STATUS_PARTIAL = "partial"
+STATUS_OUT_OF_RANGE = "out_of_range"
+STATUS_ERROR = "error"
+
+# 代表「抓取成功」、可直接依 data 筆數繼續處理的狀態。
+_PASSTHROUGH_STATUSES = frozenset({STATUS_OK, STATUS_EMPTY})
+
+# `partial` 時明確代表「重試有機會補齊」的 meta 標記。
+_TRANSIENT_PARTIAL_META = ("detail_failed", "skipped_by_deadline")
+
+# `partial` 時明確代表「重試也拿不到」的 meta 標記（來源硬上限）。
+_PERMANENT_PARTIAL_META = "source_truncated"
+
+
+def check_crawl_status(result, source, context="", allow_partial=False):
+    """判讀爬蟲回應的 status 欄位，失敗時拋出對應例外。
+
+    須在取用 `data` 之前呼叫，確保「抓取失敗」不會被當成「當日無資料」。
+
+    狀態對應行為：
+
+    | status         | 行為                                   | 可重試 |
+    |----------------|----------------------------------------|--------|
+    | `ok`/`empty`   | 放行，由呼叫端依 data 筆數處理         | —      |
+    | `partial`      | 視 `allow_partial` 而定                | 是     |
+    | `error`        | 拋 `SourceError`（0 筆不代表沒有）     | 是     |
+    | `out_of_range` | 拋 `OutOfRangeError`（重試也沒用）     | 否     |
+
+    **相容性**：`status` 缺席時（舊版爬蟲或非制式回應）一律放行，維持既有
+    行為。未知狀態則保守視為可重試失敗——寧可多重試，也不可把失敗誤記成
+    「當日無資料」而永久遮蔽。
+
+    Args:
+        result (dict): 爬蟲回應的 JSON 物件。
+        source (str): 來源名稱，供錯誤訊息使用（如「CTEE 新聞」）。
+        context (str): 補充情境，如「（2026-08-16）」。
+        allow_partial (bool): 為 True 時 `partial` 不拋例外而回傳狀態值，
+            供「資料照存、之後再補」的來源（新聞類）使用；為 False 時
+            `partial` 拋 `SourceError`（行情類：`DailyPrice` 為 append
+            寫入且無去重，存入部分資料會在重抓時產生重複列）。
+
+    Returns:
+        str: 判定後的狀態值（`ok`／`empty`／`partial`）。
+
+    Raises:
+        SourceError: `error`、未知狀態，或 `allow_partial` 為 False 的
+            `partial`。皆可重試，但屬來源端失敗（爬蟲仍可達），呼叫端
+            應僅跳過該筆、繼續處理後續日期。
+        OutOfRangeError: `out_of_range`（不可重試）。
+    """
+    if not isinstance(result, dict):
+        return STATUS_OK
+
+    status = result.get("status")
+    if status is None or status in _PASSTHROUGH_STATUSES:
+        return status or STATUS_OK
+
+    label = f"{source}{context}"
+    detail = result.get("message") or result.get("error") or "（未提供說明）"
+
+    if status == STATUS_OUT_OF_RANGE:
+        meta = result.get("meta") or {}
+        oldest = meta.get("oldest_available")
+        suffix = f"（來源最舊可得：{oldest}）" if oldest else ""
+        raise OutOfRangeError(
+            f"{label} 超出來源可回溯範圍，重試無用：{detail}{suffix}",
+            oldest_available=oldest,
+        )
+
+    if status == STATUS_PARTIAL:
+        if allow_partial:
+            return STATUS_PARTIAL
+        raise SourceError(f"{label} 爬取結果不完整，需重抓：{detail}")
+
+    if status == STATUS_ERROR:
+        raise SourceError(f"{label} 爬取失敗，0 筆不代表無資料：{detail}")
+
+    # 未知狀態：保守視為可重試失敗，絕不當成「當日無資料」寫入帳本。
+    raise SourceError(f"{label} 回傳未知狀態 {status!r}：{detail}")
+
+
+def partial_retry_reason(result):
+    """判斷 `partial` 回應是否值得重抓，回傳原因說明。
+
+    採**預設重抓**的保守策略：唯有 meta 明確指出不完整**只**源自來源硬
+    上限（`source_truncated`）時，才判定重抓無用。
+
+    刻意不採白名單（只認 `detail_failed`／`skipped_by_deadline` 才重抓）：
+    各爬蟲對 `partial` 的 meta 標註並不一致——例如 CNYES 的「翻頁中途失敗」
+    這種明確的暫時性錯誤只帶 `fetched`／`pages`，CTEE 的「列表抓取部分失敗」
+    亦無對應 meta key。白名單會把這些**該重試**的情形誤判成「重試無用」而
+    永久漏抓，與 `check_crawl_status` 對未知狀態的保守原則自相矛盾。
+    多重試的代價有上限（`max_retries` 與每日重排次數皆有限）且新聞以 URL
+    去重、重抓為冪等，遠低於漏抓的代價（新聞回溯窗有限，錯過即永久遺失）。
+
+    Args:
+        result (dict): 爬蟲回應的 JSON 物件。
+
+    Returns:
+        str | None: 值得重抓時回傳原因說明，重抓無用時回傳 None。
+    """
+    if not isinstance(result, dict):
+        return "未提供狀態細節"
+
+    meta = result.get("meta") or {}
+    transient = [
+        f"{key}={meta[key]}"
+        for key in _TRANSIENT_PARTIAL_META
+        if meta.get(key)
+    ]
+    if transient:
+        # 即使同時有來源硬上限，暫時性失敗仍值得重抓補齊。
+        return "、".join(transient)
+    if meta.get(_PERMANENT_PARTIAL_META):
+        return None
+    return result.get("message") or "爬蟲未說明不完整的原因"
+
+
 class DataUploadBase(ABC):
     """資料上傳抽象基類。
 
@@ -81,7 +247,10 @@ class DataUploadBase(ABC):
             pd.DataFrame: 包含每日資料的 DataFrame。
 
         Raises:
-            NetworkError: 網路連線失敗或請求逾時時拋出（可重試）。
+            NetworkError: 網路連線失敗或請求逾時（爬蟲不可達，可重試）。
+            SourceError: 爬蟲回報 `error`／`partial`／未知狀態
+                （爬蟲可達但該日抓取失敗，可重試）。
+            OutOfRangeError: 爬蟲回報 `out_of_range` 時拋出（不可重試）。
             CrawlError: 其他爬取失敗時拋出（不可重試）。
         """
         url = f"{self.url}/{self.name}"
@@ -89,11 +258,20 @@ class DataUploadBase(ABC):
         try:
             response = requests.get(url, params=payload, timeout=CRAW_TIMEOUT)
             response.raise_for_status()
-            json_data = response.json()["data"]
-            df = pd.DataFrame(json_data)
+            result = response.json()
         except (requests.ConnectionError, requests.Timeout) as e:
             raise NetworkError(f"日期 {date} 網路連線失敗：{e}") from e
-        except (requests.RequestException, KeyError, ValueError) as e:
+        except (requests.RequestException, ValueError) as e:
+            raise CrawlError(f"日期 {date} 爬取失敗：{e}") from e
+
+        # 先判讀 status 再取用 data：爬蟲新契約下失敗也會回 data: []，
+        # 若不先判讀，失敗會被當成「當日無資料」而寫入 Open=False 帳本，
+        # 使該日永久跳過、真實行情再也補不回。
+        check_crawl_status(result, self.name.upper(), f"（{date}）")
+
+        try:
+            df = pd.DataFrame(result["data"])
+        except (KeyError, ValueError) as e:
             raise CrawlError(f"日期 {date} 爬取失敗：{e}") from e
         return df
 

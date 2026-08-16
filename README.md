@@ -329,6 +329,43 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:latest python -m pytest test/
 > `daily_craw` 曾單日執行逾 20 小時並持有 `schedule_lock`，導致新聞等排程被延後到深夜
 > 才觸發。新聞來源的日期回溯僅約 3 天，錯過抓取窗即**永久無法補回**。
 
+### 依爬蟲 `status` 判讀成敗（`Tw_stock_crawer` v2.13.0 起）
+
+爬蟲新契約**保證 `data` 鍵永遠存在**（失敗時為 `[]`，`/company_info` 為 `{}`），並新增
+`status`（`ok`／`empty`／`partial`／`out_of_range`／`error`）、`message`、`meta`。
+
+這對本專案是**必須主動適配的破壞性變更**：`data_upload/base.py` 原本正是靠
+`response.json()["data"]` 的 `KeyError` 得知爬取失敗（→ `CrawlError` → 不寫帳本 →
+次日重抓）。新契約下失敗不再拋 `KeyError`，若沿用「有 `data` 就當成功」的邏輯，失敗日
+會被 `upload_date()` 寫成 `Open=False`（非交易日）而**永久跳過**——與上述事故「帳本
+誤標 → 永久遮蔽」是同一種死法，只是換一個入口。
+
+故 `base.check_crawl_status()` 於**取用 `data` 之前**先判讀狀態：
+
+| `status` | 行為 | 是否寫帳本 | 是否重試 |
+|---|---|---|---|
+| `ok` | 正常寫入 | 依資料筆數 | — |
+| `empty` | 該日確實無資料 | `Open=False` | 否 |
+| `partial` | 資料不完整 | **不寫** | 是（`SourceError`） |
+| `error` | 抓取失敗，0 筆不代表沒有 | **不寫** | 是（`SourceError`） |
+| `out_of_range` | 來源不再提供，重抓無用 | **不寫** | 否（`OutOfRangeError`） |
+
+- `OutOfRangeError` 刻意繼承 `CrawlError` 而非 `NetworkError`，故**不進** retry queue
+  （本專案以「是否為 `NetworkError`」作為可重試判準），避免對來源根本拿不到的日期反覆重抓。
+- **未知狀態**保守視為可重試失敗。寧可多重試，也不可把失敗誤記成「當日無資料」。
+- **`SourceError` 與 `NetworkError` 的批次策略相反**：`SourceError`（繼承 `NetworkError`，
+  故仍可重試）代表「爬蟲可達、只有這一筆抓不到」，`daily_craw` 與 `process_retry_queue`
+  **只跳過該筆並繼續**；`NetworkError`（連不上爬蟲）則整批排入重試並**中止本輪**。若兩者
+  不分，`missing_dates` 昇冪排序下最舊的「毒日期」會每天在同一處中斷補抓，其後日期永遠
+  不被嘗試，直到滑出 30 天視窗即永久遺失。
+- **`status` 缺席時放行**，維持既有行為以相容舊版爬蟲。
+- **新聞類的 `partial` 例外**：新聞以 URL 去重、重抓為冪等，故 `partial` 的資料**先落地**
+  再依 `meta` 決定是否重試——`detail_failed`／`skipped_by_deadline`（暫時性）排入 retry
+  queue 補齊；僅 `source_truncated`（來源硬上限）則只記錄警告，不做無謂重試。行情類則相反：
+  `DailyPrice` 為 append 寫入且**無去重**，存入部分資料會在重抓時產生重複列，故一律丟棄重抓。
+- **新聞爬取的 `timeout=600` 不可調低**：爬蟲端 `MAX_RUNTIME_SECONDS=480`（最壞含重試約
+  573 秒）刻意設計為低於本端 600 秒。CTEE 正常耗時約 210~230 秒、尖峰更久，調低會提前中斷。
+
 ### 排程時間的一次性遷移（config_version）
 
 排程時間有兩個來源：程式碼預設值（`load_config()`）與持久化的 `logs/config.json`

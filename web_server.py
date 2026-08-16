@@ -27,7 +27,12 @@ from dataclasses import asdict
 
 from DailyUpload import daily_craw, set_retry_queue, DB_NAMES, HOST, USER, PASSWORD, CRAWLERHOST
 from upload import day_upload
-from data_upload.base import CrawlError, NetworkError
+from data_upload.base import (
+    CrawlError,
+    NetworkError,
+    OutOfRangeError,
+    SourceError,
+)
 from data_upload.quarter_revenue import QuarterRevenueUploader
 from data_upload.tdcc import TDCCUploader
 from data_upload.ctee_news import CTEENewsUploader
@@ -482,8 +487,9 @@ def process_retry_queue():
     """處理重試佇列中的 pending 任務。
 
     檢查網路連通後，逐一執行 pending 任務。
-    成功則標為 success，NetworkError 則 retry_count+1 並中斷，
-    非網路錯誤或超過重試上限則標為 exhausted。
+    成功則標為 success；`SourceError`（爬蟲可達、來源端抓取失敗）維持
+    pending 並**續處理其餘任務**；`NetworkError`（爬蟲不可達）則維持
+    pending 並中斷本輪；非網路錯誤或超過重試上限則標為 exhausted。
     """
     global retry_queue
     if retry_queue is None:
@@ -518,6 +524,17 @@ def process_retry_queue():
             _execute_retry_task(task)
             retry_queue.update_status(task.task_id, "success")
             logger.info("重試任務 %s 成功。", task.task_id)
+        except SourceError as e:
+            # 爬蟲仍可達，只是這筆任務在來源端抓取失敗：維持 pending 待下輪
+            # 重試，但**不可中斷整個佇列**，否則單一「毒任務」會癱瘓其後所有
+            # 待重試任務（達 max_retries 後才會由迴圈開頭標為 exhausted）。
+            logger.warning(
+                "重試任務 %s 來源端抓取失敗：%s，續處理其餘任務。",
+                task.task_id, e,
+            )
+            retry_queue.update_status(
+                task.task_id, "pending", str(e)
+            )
         except NetworkError as e:
             logger.warning(
                 "重試任務 %s 仍然網路失敗：%s，中斷本輪重試。",
@@ -813,6 +830,7 @@ def run_ctee_news_upload_job(job_id, start_date, end_date):
     with jobs_lock:
         upload_jobs[job_id]["status"] = "running"
 
+    conn = None
     try:
         conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
         uploader = CTEENewsUploader(conn, CRAWLERHOST)
@@ -823,27 +841,51 @@ def run_ctee_news_upload_job(job_id, start_date, end_date):
         total_records = 0
         total_files = 0
         current = start_dt
+        failed_dates = []
+        unavailable_dates = []
 
         while current <= end_dt:
             date_str = current.strftime("%Y-%m-%d")
             with jobs_lock:
                 upload_jobs[job_id]["date"] = date_str
 
-            result = uploader.upload(date_str)
-            total_records += result["record_count"]
-            total_files += result["file_count"]
+            # 單日失敗不得中斷整段回補：逐日隔離例外，最後再彙總回報。
+            # 否則首日若超出來源回溯範圍，後面能補的日期會一筆都補不到。
+            try:
+                result = uploader.upload(date_str)
+                total_records += result["record_count"]
+                total_files += result["file_count"]
+            except OutOfRangeError as e:
+                logger.warning(
+                    "CTEE 新聞 %s 超出來源可回溯範圍，略過：%s",
+                    date_str, e,
+                )
+                unavailable_dates.append(date_str)
+            except NetworkError as e:
+                logger.warning(
+                    "CTEE 新聞 %s 抓取失敗：%s", date_str, e
+                )
+                failed_dates.append(date_str)
             current += timedelta(days=1)
 
-        conn.close()
-
         with jobs_lock:
-            upload_jobs[job_id]["status"] = "completed"
+            upload_jobs[job_id]["status"] = (
+                "failed" if failed_dates else "completed"
+            )
             upload_jobs[job_id]["record_count"] = total_records
             upload_jobs[job_id]["file_count"] = total_files
+            if failed_dates:
+                upload_jobs[job_id]["error"] = (
+                    "下列日期抓取失敗：" + "、".join(failed_dates)
+                )
+            if unavailable_dates:
+                upload_jobs[job_id]["unavailable_dates"] = unavailable_dates
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
         logger.info(
-            "CTEE 新聞任務完成 %s（%d 筆 metadata，%d 個檔案）",
+            "CTEE 新聞任務結束 %s（%d 筆 metadata，%d 個檔案，"
+            "失敗 %d 日、超出回溯範圍 %d 日）",
             job_id, total_records, total_files,
+            len(failed_dates), len(unavailable_dates),
         )
 
     except Exception as e:
@@ -852,6 +894,10 @@ def run_ctee_news_upload_job(job_id, start_date, end_date):
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def run_ctee_news_hours_job(job_id, hours):
@@ -944,6 +990,7 @@ def run_cnyes_news_upload_job(job_id, start_date, end_date):
     with jobs_lock:
         upload_jobs[job_id]["status"] = "running"
 
+    conn = None
     try:
         conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
         uploader = CNYESNewsUploader(conn, CRAWLERHOST)
@@ -954,27 +1001,51 @@ def run_cnyes_news_upload_job(job_id, start_date, end_date):
         total_records = 0
         total_files = 0
         current = start_dt
+        failed_dates = []
+        unavailable_dates = []
 
         while current <= end_dt:
             date_str = current.strftime("%Y-%m-%d")
             with jobs_lock:
                 upload_jobs[job_id]["date"] = date_str
 
-            result = uploader.upload(date_str)
-            total_records += result["record_count"]
-            total_files += result["file_count"]
+            # 單日失敗不得中斷整段回補：逐日隔離例外，最後再彙總回報。
+            # 否則首日若超出來源回溯範圍，後面能補的日期會一筆都補不到。
+            try:
+                result = uploader.upload(date_str)
+                total_records += result["record_count"]
+                total_files += result["file_count"]
+            except OutOfRangeError as e:
+                logger.warning(
+                    "CNYES 新聞 %s 超出來源可回溯範圍，略過：%s",
+                    date_str, e,
+                )
+                unavailable_dates.append(date_str)
+            except NetworkError as e:
+                logger.warning(
+                    "CNYES 新聞 %s 抓取失敗：%s", date_str, e
+                )
+                failed_dates.append(date_str)
             current += timedelta(days=1)
 
-        conn.close()
-
         with jobs_lock:
-            upload_jobs[job_id]["status"] = "completed"
+            upload_jobs[job_id]["status"] = (
+                "failed" if failed_dates else "completed"
+            )
             upload_jobs[job_id]["record_count"] = total_records
             upload_jobs[job_id]["file_count"] = total_files
+            if failed_dates:
+                upload_jobs[job_id]["error"] = (
+                    "下列日期抓取失敗：" + "、".join(failed_dates)
+                )
+            if unavailable_dates:
+                upload_jobs[job_id]["unavailable_dates"] = unavailable_dates
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
         logger.info(
-            "CNYES 新聞任務完成 %s（%d 筆 metadata，%d 個檔案）",
+            "CNYES 新聞任務結束 %s（%d 筆 metadata，%d 個檔案，"
+            "失敗 %d 日、超出回溯範圍 %d 日）",
             job_id, total_records, total_files,
+            len(failed_dates), len(unavailable_dates),
         )
 
     except Exception as e:
@@ -983,6 +1054,10 @@ def run_cnyes_news_upload_job(job_id, start_date, end_date):
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def run_cnyes_news_hours_job(job_id, hours):
@@ -1075,6 +1150,7 @@ def run_ptt_news_upload_job(job_id, start_date, end_date):
     with jobs_lock:
         upload_jobs[job_id]["status"] = "running"
 
+    conn = None
     try:
         conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
         uploader = PTTNewsUploader(conn, CRAWLERHOST)
@@ -1085,27 +1161,51 @@ def run_ptt_news_upload_job(job_id, start_date, end_date):
         total_records = 0
         total_files = 0
         current = start_dt
+        failed_dates = []
+        unavailable_dates = []
 
         while current <= end_dt:
             date_str = current.strftime("%Y-%m-%d")
             with jobs_lock:
                 upload_jobs[job_id]["date"] = date_str
 
-            result = uploader.upload(date_str)
-            total_records += result["record_count"]
-            total_files += result["file_count"]
+            # 單日失敗不得中斷整段回補：逐日隔離例外，最後再彙總回報。
+            # 否則首日若超出來源回溯範圍，後面能補的日期會一筆都補不到。
+            try:
+                result = uploader.upload(date_str)
+                total_records += result["record_count"]
+                total_files += result["file_count"]
+            except OutOfRangeError as e:
+                logger.warning(
+                    "PTT 新聞 %s 超出來源可回溯範圍，略過：%s",
+                    date_str, e,
+                )
+                unavailable_dates.append(date_str)
+            except NetworkError as e:
+                logger.warning(
+                    "PTT 新聞 %s 抓取失敗：%s", date_str, e
+                )
+                failed_dates.append(date_str)
             current += timedelta(days=1)
 
-        conn.close()
-
         with jobs_lock:
-            upload_jobs[job_id]["status"] = "completed"
+            upload_jobs[job_id]["status"] = (
+                "failed" if failed_dates else "completed"
+            )
             upload_jobs[job_id]["record_count"] = total_records
             upload_jobs[job_id]["file_count"] = total_files
+            if failed_dates:
+                upload_jobs[job_id]["error"] = (
+                    "下列日期抓取失敗：" + "、".join(failed_dates)
+                )
+            if unavailable_dates:
+                upload_jobs[job_id]["unavailable_dates"] = unavailable_dates
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
         logger.info(
-            "PTT 新聞任務完成 %s（%d 筆 metadata，%d 個檔案）",
+            "PTT 新聞任務結束 %s（%d 筆 metadata，%d 個檔案，"
+            "失敗 %d 日、超出回溯範圍 %d 日）",
             job_id, total_records, total_files,
+            len(failed_dates), len(unavailable_dates),
         )
 
     except Exception as e:
@@ -1114,6 +1214,10 @@ def run_ptt_news_upload_job(job_id, start_date, end_date):
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def run_ptt_news_hours_job(job_id, hours):
@@ -1207,6 +1311,7 @@ def run_moneyudn_news_upload_job(job_id, start_date, end_date):
     with jobs_lock:
         upload_jobs[job_id]["status"] = "running"
 
+    conn = None
     try:
         conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
         uploader = MoneyUDNNewsUploader(conn, CRAWLERHOST)
@@ -1217,27 +1322,51 @@ def run_moneyudn_news_upload_job(job_id, start_date, end_date):
         total_records = 0
         total_files = 0
         current = start_dt
+        failed_dates = []
+        unavailable_dates = []
 
         while current <= end_dt:
             date_str = current.strftime("%Y-%m-%d")
             with jobs_lock:
                 upload_jobs[job_id]["date"] = date_str
 
-            result = uploader.upload(date_str)
-            total_records += result["record_count"]
-            total_files += result["file_count"]
+            # 單日失敗不得中斷整段回補：逐日隔離例外，最後再彙總回報。
+            # 否則首日若超出來源回溯範圍，後面能補的日期會一筆都補不到。
+            try:
+                result = uploader.upload(date_str)
+                total_records += result["record_count"]
+                total_files += result["file_count"]
+            except OutOfRangeError as e:
+                logger.warning(
+                    "MoneyUDN 新聞 %s 超出來源可回溯範圍，略過：%s",
+                    date_str, e,
+                )
+                unavailable_dates.append(date_str)
+            except NetworkError as e:
+                logger.warning(
+                    "MoneyUDN 新聞 %s 抓取失敗：%s", date_str, e
+                )
+                failed_dates.append(date_str)
             current += timedelta(days=1)
 
-        conn.close()
-
         with jobs_lock:
-            upload_jobs[job_id]["status"] = "completed"
+            upload_jobs[job_id]["status"] = (
+                "failed" if failed_dates else "completed"
+            )
             upload_jobs[job_id]["record_count"] = total_records
             upload_jobs[job_id]["file_count"] = total_files
+            if failed_dates:
+                upload_jobs[job_id]["error"] = (
+                    "下列日期抓取失敗：" + "、".join(failed_dates)
+                )
+            if unavailable_dates:
+                upload_jobs[job_id]["unavailable_dates"] = unavailable_dates
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
         logger.info(
-            "MoneyUDN 新聞任務完成 %s（%d 筆 metadata，%d 個檔案）",
+            "MoneyUDN 新聞任務結束 %s（%d 筆 metadata，%d 個檔案，"
+            "失敗 %d 日、超出回溯範圍 %d 日）",
             job_id, total_records, total_files,
+            len(failed_dates), len(unavailable_dates),
         )
 
     except Exception as e:
@@ -1246,6 +1375,10 @@ def run_moneyudn_news_upload_job(job_id, start_date, end_date):
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def run_moneyudn_news_hours_job(job_id, hours):

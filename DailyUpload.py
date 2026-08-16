@@ -12,7 +12,7 @@ import schedule
 
 import upload
 from routers import MySQLRouter
-from data_upload.base import NetworkError
+from data_upload.base import NetworkError, SourceError
 
 # 設定 logging，輸出至 logs/ 資料夾
 log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -290,7 +290,23 @@ def daily_craw():
             time.sleep(pause_duration)
             try:
                 upload.day_upload(date, opt)
+            except SourceError as e:
+                # 爬蟲仍可達，只是這一天在來源端抓不到：僅該日排入重試並
+                # 繼續補後續日期。missing_dates 為昇冪排序，若比照網路失敗
+                # 直接 break，最舊的「毒日期」會每天在同一處中斷排程，
+                # 其後日期永遠不會被嘗試，直到滑出 30 天視窗即永久遺失。
+                logger.warning(
+                    f"{db_name}: 日期 {date} 來源端抓取失敗，"
+                    f"排入重試並繼續後續日期：{e}"
+                )
+                _add_to_retry_queue(
+                    "daily_upload",
+                    {"db_name": db_name, "dates": [date]},
+                    str(e),
+                )
+                continue
             except NetworkError as e:
+                # 連不上爬蟲：後續日期必然同樣失敗，整批排入重試並中止。
                 logger.warning(
                     f"{db_name}: 日期 {date} 網路連線失敗，"
                     f"跳過後續日期：{e}"

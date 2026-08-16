@@ -14,9 +14,18 @@ import requests
 from pydantic import BaseModel
 from sqlalchemy import text
 
-from data_upload.base import NetworkError
+from data_upload.base import (
+    NetworkError,
+    STATUS_PARTIAL,
+    SourceError,
+    check_crawl_status,
+    partial_retry_reason,
+)
 
 logger = logging.getLogger(__name__)
+
+# 來源標籤，供 log 與錯誤訊息使用。
+SOURCE_LABEL = "PTT 新聞"
 
 # 全文存放根目錄
 NEWS_CONTENT_BASE = Path("/workspace/NewsContents/PTT")
@@ -54,6 +63,9 @@ class PTTNewsUploader:
         """
         self.conn = conn
         self.crawler_host = crawler_host
+        # 最近一次爬取的狀態，供 upload 於資料落地後決定是否排入重試。
+        self._last_status = None
+        self._last_partial_reason = None
 
     @staticmethod
     def url_hash(url):
@@ -76,6 +88,9 @@ class PTTNewsUploader:
         Returns:
             pd.DataFrame: 新聞資料 DataFrame，爬取失敗時回傳空 DataFrame。
         """
+        # 重置狀態，避免範圍模式共用實例時殘留上一次的結果。
+        self._last_status = None
+        self._last_partial_reason = None
         url = f"http://{self.crawler_host}/ptt_news"
         try:
             resp = requests.get(url, params={"date": date}, timeout=600)
@@ -89,6 +104,12 @@ class PTTNewsUploader:
             return pd.DataFrame()
 
         result = resp.json()
+        # 先判讀 status 再取用 data：新契約下爬取失敗也會回 data: []，
+        # 不先判讀會把「抓取失敗」誤當成「當日無新聞」而靜默漏抓且不重試。
+        self._last_status = check_crawl_status(
+            result, SOURCE_LABEL, f"（{date}）", allow_partial=True,
+        )
+        self._last_partial_reason = partial_retry_reason(result)
         records = result.get("data", [])
 
         if not records:
@@ -111,6 +132,9 @@ class PTTNewsUploader:
         Returns:
             pd.DataFrame: 新聞資料 DataFrame，爬取失敗時回傳空 DataFrame。
         """
+        # 重置狀態，避免範圍模式共用實例時殘留上一次的結果。
+        self._last_status = None
+        self._last_partial_reason = None
         url = f"http://{self.crawler_host}/ptt_news"
         try:
             resp = requests.get(
@@ -128,6 +152,12 @@ class PTTNewsUploader:
             return pd.DataFrame()
 
         result = resp.json()
+        # 先判讀 status 再取用 data：新契約下爬取失敗也會回 data: []，
+        # 不先判讀會把「抓取失敗」誤當成「當日無新聞」而靜默漏抓且不重試。
+        self._last_status = check_crawl_status(
+            result, SOURCE_LABEL, f"（hours={hours}）", allow_partial=True,
+        )
+        self._last_partial_reason = partial_retry_reason(result)
         records = result.get("data", [])
 
         if not records:
@@ -138,6 +168,36 @@ class PTTNewsUploader:
         # 將 NaN 轉為 None（避免 Pydantic 驗證失敗）
         df = df.where(df.notna(), None)
         return df
+
+    def _check_incomplete(self, context):
+        """依最近一次爬取狀態決定是否排入重試（須於資料落地後呼叫）。
+
+        `partial` 代表抓到的資料不完整。此時已抓到的部分一律先寫入（新聞以
+        URL 去重，重抓為冪等，不會重複），再依 meta 判斷重抓是否有意義：
+        部分全文抓取失敗或因逾時提前收工 → 重抓可補齊，拋 `SourceError`
+        排入 retry queue；來源硬上限（`source_truncated`）→ 重抓也拿不到，
+        僅記錄警告，避免無謂的重試循環。
+
+        Args:
+            context (str): 情境說明，如「（2026-08-16）」。
+
+        Raises:
+            SourceError: 不完整且重抓有機會補齊時拋出（爬蟲仍可達，
+                呼叫端應僅跳過該筆、繼續處理後續日期）。
+        """
+        if self._last_status != STATUS_PARTIAL:
+            return
+        reason = self._last_partial_reason
+        if reason is None:
+            logger.warning(
+                "%s%s 抓取不完整，但受限於來源可提供範圍，重抓亦無法補齊。",
+                SOURCE_LABEL, context,
+            )
+            return
+        raise SourceError(
+            f"{SOURCE_LABEL}{context} 抓取不完整（{reason}），"
+            "已存入取得的部分，排入重試以補齊剩餘資料"
+        )
 
     def get_existing_urls(self, date):
         """查詢指定日期已存在的新聞 URL。
@@ -292,17 +352,24 @@ class PTTNewsUploader:
 
         Returns:
             dict: 包含 date、record_count、file_count 的結果字典。
+
+        Raises:
+            SourceError: 爬取失敗或結果不完整且重抓有機會補齊時拋出
+                （可重試，資料已取得的部分先落地）。
+            OutOfRangeError: 日期超出來源可回溯範圍時拋出（不可重試）。
         """
         raw_df = self.crawl_data(date)
 
         if raw_df.empty:
             logger.info("PTT 新聞 %s 無資料可上傳。", date)
+            self._check_incomplete(f"（{date}）")
             return {"date": date, "record_count": 0, "file_count": 0}
 
         new_df = self.filter_new_records(raw_df, date)
 
         if new_df.empty:
             logger.info("PTT 新聞 %s 所有記錄皆已存在，跳過上傳。", date)
+            self._check_incomplete(f"（{date}）")
             return {"date": date, "record_count": 0, "file_count": 0}
 
         # 驗證 schema 並上傳 metadata
@@ -319,6 +386,7 @@ class PTTNewsUploader:
             "PTT 新聞 %s 已上傳 %d 筆 metadata，儲存 %d 個全文檔案。",
             date, record_count, file_count,
         )
+        self._check_incomplete(f"（{date}）")
         return {
             "date": date,
             "record_count": record_count,
@@ -337,11 +405,17 @@ class PTTNewsUploader:
 
         Returns:
             dict: 包含 hours、record_count、file_count、dates 的結果字典。
+
+        Raises:
+            SourceError: 爬取失敗或結果不完整且重抓有機會補齊時拋出
+                （可重試，資料已取得的部分先落地）。
+            OutOfRangeError: 區間超出來源可回溯範圍時拋出（不可重試）。
         """
         raw_df = self.crawl_data_by_hours(hours)
 
         if raw_df.empty:
             logger.info("PTT 新聞過去 %d 小時無資料可上傳。", hours)
+            self._check_incomplete(f"（hours={hours}）")
             return {
                 "hours": hours,
                 "record_count": 0,
@@ -383,6 +457,7 @@ class PTTNewsUploader:
             "儲存 %d 個全文檔案，涵蓋日期：%s。",
             hours, total_records, total_files, processed_dates,
         )
+        self._check_incomplete(f"（hours={hours}）")
         return {
             "hours": hours,
             "record_count": total_records,
