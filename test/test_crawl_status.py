@@ -3,7 +3,7 @@
 `Tw_stock_crawer` v2.13.0 起保證 `data` 鍵永遠存在（失敗時為 `[]`），
 本專案原本正是靠 `KeyError` 得知爬取失敗。本模組確保新契約下：
 
-1. 失敗（`error`／`partial`／未知狀態）一律拋可重試的 `NetworkError`；
+1. 失敗（`error`／`partial`／未知狀態）一律拋可重試的 `SourceError`；
 2. `out_of_range` 拋不可重試的 `OutOfRangeError`；
 3. **失敗絕不寫入 `UploadDate` 帳本**——這是本次要防的回歸：帳本一旦被
    誤標成「當日無資料」，該日就永久跳過、真實行情再也補不回。
@@ -23,6 +23,7 @@ from data_upload.base import (
     DataUploadBase,
     NetworkError,
     OutOfRangeError,
+    SourceError,
     check_crawl_status,
     partial_retry_reason,
 )
@@ -100,9 +101,9 @@ class TestCheckCrawlStatus(unittest.TestCase):
         """測試非字典回應不誤判為失敗。"""
         self.assertEqual(check_crawl_status([1, 2], "測試"), STATUS_OK)
 
-    def test_error_raises_network_error(self):
-        """測試 error 狀態拋出可重試的 NetworkError。"""
-        with self.assertRaises(NetworkError) as ctx:
+    def test_error_raises_source_error(self):
+        """測試 error 狀態拋出可重試的 SourceError。"""
+        with self.assertRaises(SourceError) as ctx:
             check_crawl_status(
                 {"status": "error", "data": [], "message": "來源逾時"},
                 "測試", "（2026-08-16）",
@@ -111,15 +112,15 @@ class TestCheckCrawlStatus(unittest.TestCase):
 
     def test_error_falls_back_to_error_key(self):
         """測試無 message 時改用既有 error 鍵作為說明。"""
-        with self.assertRaises(NetworkError) as ctx:
+        with self.assertRaises(SourceError) as ctx:
             check_crawl_status(
                 {"status": "error", "data": [], "error": "boom"}, "測試"
             )
         self.assertIn("boom", str(ctx.exception))
 
-    def test_partial_raises_network_error_by_default(self):
-        """測試行情類（不允許 partial）時 partial 拋 NetworkError。"""
-        with self.assertRaises(NetworkError):
+    def test_partial_raises_source_error_by_default(self):
+        """測試行情類（不允許 partial）時 partial 拋 SourceError。"""
+        with self.assertRaises(SourceError):
             check_crawl_status({"status": "partial", "data": [1]}, "測試")
 
     def test_partial_returned_when_allowed(self):
@@ -149,9 +150,9 @@ class TestCheckCrawlStatus(unittest.TestCase):
         self.assertTrue(issubclass(OutOfRangeError, CrawlError))
         self.assertFalse(issubclass(OutOfRangeError, NetworkError))
 
-    def test_unknown_status_raises_network_error(self):
+    def test_unknown_status_raises_source_error(self):
         """測試未知狀態保守視為可重試失敗，而非當日無資料。"""
-        with self.assertRaises(NetworkError):
+        with self.assertRaises(SourceError):
             check_crawl_status({"status": "weird", "data": []}, "測試")
 
     def test_out_of_range_without_meta(self):
@@ -238,7 +239,7 @@ class TestCrawDataStatusContract(unittest.TestCase):
 
     @patch("data_upload.base.requests.get")
     def test_error_with_empty_data_raises(self, mock_get):
-        """測試 status=error 且 data 為空時拋出 NetworkError。
+        """測試 status=error 且 data 為空時拋出 SourceError。
 
         這是新契約下最關鍵的分支：舊契約靠 KeyError 得知失敗，新契約
         失敗也會回 data: []，若不判讀 status 會被當成「當日無資料」。
@@ -248,7 +249,7 @@ class TestCrawDataStatusContract(unittest.TestCase):
              "message": "來源連線失敗", "error": "來源連線失敗"}
         )
 
-        with self.assertRaises(NetworkError):
+        with self.assertRaises(SourceError):
             self.uploader.craw_data("2026-08-16")
 
     @patch("data_upload.base.requests.get")
@@ -264,7 +265,7 @@ class TestCrawDataStatusContract(unittest.TestCase):
 
     @patch("data_upload.base.requests.get")
     def test_partial_raises_network_error(self, mock_get):
-        """測試 status=partial 時拋出 NetworkError 且不回傳部分資料。
+        """測試 status=partial 時拋出 SourceError 且不回傳部分資料。
 
         `DailyPrice` 為 append 寫入且無去重，存入部分資料會在重抓時
         產生重複列，故行情類一律丟棄重抓。
@@ -274,7 +275,7 @@ class TestCrawDataStatusContract(unittest.TestCase):
              "data": [{"SecurityCode": "2330", "Value": 1.0}]}
         )
 
-        with self.assertRaises(NetworkError):
+        with self.assertRaises(SourceError):
             self.uploader.craw_data("2026-08-14")
 
     @patch("data_upload.base.requests.get")
@@ -355,7 +356,7 @@ class TestUploadNeverMarksLedgerOnFailure(unittest.TestCase):
         )
 
         with patch.object(self.uploader, "upload_date") as mock_upload_date:
-            with self.assertRaises(NetworkError):
+            with self.assertRaises(SourceError):
                 self.uploader.upload("2026-08-16")
             mock_upload_date.assert_not_called()
 
@@ -370,7 +371,7 @@ class TestUploadNeverMarksLedgerOnFailure(unittest.TestCase):
         )
 
         with patch.object(self.uploader, "upload_date") as mock_upload_date:
-            with self.assertRaises(NetworkError):
+            with self.assertRaises(SourceError):
                 self.uploader.upload("2026-08-14")
             mock_upload_date.assert_not_called()
 
