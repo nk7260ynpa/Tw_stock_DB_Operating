@@ -20,6 +20,7 @@ from data_upload.base import (
     SourceError,
     check_crawl_status,
     partial_retry_reason,
+    partial_skip_note,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ class CNYESNewsUploader:
         # 最近一次爬取的狀態，供 upload 於資料落地後決定是否排入重試。
         self._last_status = None
         self._last_partial_reason = None
+        self._last_partial_note = None
 
     @staticmethod
     def url_hash(url):
@@ -92,6 +94,7 @@ class CNYESNewsUploader:
         # 重置狀態，避免範圍模式共用實例時殘留上一次的結果。
         self._last_status = None
         self._last_partial_reason = None
+        self._last_partial_note = None
         url = f"http://{self.crawler_host}/cnyes_news"
         try:
             resp = requests.get(url, params={"date": date}, timeout=600)
@@ -111,6 +114,7 @@ class CNYESNewsUploader:
             result, SOURCE_LABEL, f"（{date}）", allow_partial=True,
         )
         self._last_partial_reason = partial_retry_reason(result)
+        self._last_partial_note = partial_skip_note(result)
         records = result.get("data", [])
 
         if not records:
@@ -136,6 +140,7 @@ class CNYESNewsUploader:
         # 重置狀態，避免範圍模式共用實例時殘留上一次的結果。
         self._last_status = None
         self._last_partial_reason = None
+        self._last_partial_note = None
         url = f"http://{self.crawler_host}/cnyes_news"
         try:
             resp = requests.get(
@@ -159,6 +164,7 @@ class CNYESNewsUploader:
             result, SOURCE_LABEL, f"（hours={hours}）", allow_partial=True,
         )
         self._last_partial_reason = partial_retry_reason(result)
+        self._last_partial_note = partial_skip_note(result)
         records = result.get("data", [])
 
         if not records:
@@ -174,10 +180,10 @@ class CNYESNewsUploader:
         """依最近一次爬取狀態決定是否排入重試（須於資料落地後呼叫）。
 
         `partial` 代表抓到的資料不完整。此時已抓到的部分一律先寫入（新聞以
-        URL 去重，重抓為冪等，不會重複），再依 meta 判斷重抓是否有意義：
-        部分全文抓取失敗或因逾時提前收工 → 重抓可補齊，拋 `SourceError`
-        排入 retry queue；來源硬上限（`source_truncated`）→ 重抓也拿不到，
-        僅記錄警告，避免無謂的重試循環。
+        URL 去重，重抓為冪等，不會重複），再由 `partial_retry_reason` 判斷
+        重抓值不值得：值得 → 拋 `SourceError` 排入 retry queue；不值得
+        （來源硬上限，或僅零星全文抓取失敗且低於門檻）→ 僅記錄警告並附上
+        判定理由，避免為了幾篇文章同步重跑整個 48 小時窗。
 
         `partial_result` 會附在例外上一併帶給呼叫端：資料既然已落地，
         介面就該顯示實際筆數，否則會被誤判成「完全沒抓到」。
@@ -194,9 +200,12 @@ class CNYESNewsUploader:
             return
         reason = self._last_partial_reason
         if reason is None:
+            # 不重抓的成因有兩種（來源硬限制／低於門檻），語意天差地遠，
+            # 必須據實寫出，否則排查時會被固定字串誤導。
             logger.warning(
-                "%s%s 抓取不完整，但受限於來源可提供範圍，重抓亦無法補齊。",
+                "%s%s 抓取不完整，判定不重抓：%s。",
                 SOURCE_LABEL, context,
+                self._last_partial_note or "爬蟲判定重抓結果不會改變",
             )
             return
         raise SourceError(

@@ -114,11 +114,60 @@ STATUS_ERROR = "error"
 # 代表「抓取成功」、可直接依 data 筆數繼續處理的狀態。
 _PASSTHROUGH_STATUSES = frozenset({STATUS_OK, STATUS_EMPTY})
 
+# --- 舊契約（爬蟲 v2.14.0 之前）的 meta 標記 ---
+#
+# 只在回應**不帶 `retryable`** 時使用。新契約已把判斷收斂成單一布林值，
+# 下方兩組常數僅為向後相容而保留：舊版爬蟲的回應仍須維持既有行為，
+# 不可因為「沒有 retryable」就當成不重抓——那正是「把失敗誤記成空」的老毛病。
+
 # `partial` 時明確代表「重試有機會補齊」的 meta 標記。
-_TRANSIENT_PARTIAL_META = ("detail_failed", "skipped_by_deadline")
+# `list_failed` 在舊契約下靠預設重抓兜底，行為正確但重試原因說明模糊，
+# 故一併列入以取得明確的原因字串。
+_TRANSIENT_PARTIAL_META = (
+    "list_failed", "detail_failed", "skipped_by_deadline",
+)
 
 # `partial` 時明確代表「重試也拿不到」的 meta 標記（來源硬上限）。
 _PERMANENT_PARTIAL_META = "source_truncated"
+
+# --- 新契約（爬蟲 v2.14.0 起）的不完整成因代碼 ---
+#
+# 與爬蟲 `tw_crawler/status.py` 的 `REASON_*` 對齊。爬蟲已用單一的
+# `meta.retryable` 表達「重抓有沒有機會補回來」，下游不必再自行維護
+# 成因黑白名單；`retryable_reasons` 僅用於**在可重試的前提下**再細分
+# 值不值得付出重跑成本。
+REASON_LIST_FAILED = "list_failed"      # 列表／分頁抓取中途失敗
+REASON_DETAIL_FAILED = "detail_failed"  # 部分文章全文抓取失敗
+REASON_DEADLINE = "deadline"            # 達單次時間上限而提前收工
+REASON_CRAWL_FAILED = "crawl_failed"    # 爬蟲整體拋例外
+
+# 「連有哪些文章都不知道」的成因：損失範圍無上限，一律重抓。
+_UNBOUNDED_LOSS_REASONS = frozenset({
+    REASON_LIST_FAILED, REASON_DEADLINE, REASON_CRAWL_FAILED,
+})
+
+# 僅有全文抓取失敗時的重抓門檻（失敗率達此值才值得整批重跑）。
+#
+# 取 0.2 的理由：
+#
+# 1. **重跑成本高**：retry queue 是同步重跑整個 48 小時窗（CTEE 正常
+#    210~230 秒），且每小時觸發一次。若沿用舊的「1 篇失敗就重抓」，
+#    PTT／MoneyUDN 在新契約下天天都會排重試（舊契約這些情形只回 `ok`）。
+# 2. **detail-only 的損失多半會自癒**：全文抓失敗的文章被爬蟲**整篇排除**
+#    在 `data` 之外（不是留空白內容），因此不會寫進 MySQL；隔天早上的排程
+#    以 48 小時窗重抓時，這些 URL 仍是「新記錄」而會被正常補上——等於
+#    每篇文章本來就有第二次免費機會，不需付出額外重跑成本。
+#    界線：每日視窗只往前推 48 小時，故「今天視窗中較舊的那 24 小時」不會
+#    被明天的視窗涵蓋，每篇文章總共只有兩次機會。連兩天同一篇都失敗時
+#    才會真的漏掉，而那種系統性失敗即使立刻重抓通常也救不回來。
+# 3. **門檻要抓的是系統性異常**：失敗率高到五分之一，多半代表來源端正在
+#    擋人或全文頁改版，明天大概也修不好，值得立刻再試一次；零星幾篇失敗
+#    交給隔日的自然重抓即可。
+#
+# 對照之下 `list_failed`／`deadline`／`crawl_failed` 一律重抓，因為那時
+# 連「有哪些文章」都不知道，無從估計損失，且 CTEE 來源只保留約 3 天，
+# 等不起。
+DETAIL_FAILED_RETRY_RATIO = 0.2
 
 
 def check_crawl_status(result, source, context="", allow_partial=False):
@@ -191,27 +240,103 @@ def check_crawl_status(result, source, context="", allow_partial=False):
 def partial_retry_reason(result):
     """判斷 `partial` 回應是否值得重抓，回傳原因說明。
 
-    採**預設重抓**的保守策略：唯有 meta 明確指出不完整**只**源自來源硬
-    上限（`source_truncated`）時，才判定重抓無用。
+    判讀順序：
 
-    刻意不採白名單（只認 `detail_failed`／`skipped_by_deadline` 才重抓）：
-    各爬蟲對 `partial` 的 meta 標註並不一致——例如 CNYES 的「翻頁中途失敗」
-    這種明確的暫時性錯誤只帶 `fetched`／`pages`，CTEE 的「列表抓取部分失敗」
-    亦無對應 meta key。白名單會把這些**該重試**的情形誤判成「重試無用」而
-    永久漏抓，與 `check_crawl_status` 對未知狀態的保守原則自相矛盾。
-    多重試的代價有上限（`max_retries` 與每日重排次數皆有限）且新聞以 URL
-    去重、重抓為冪等，遠低於漏抓的代價（新聞回溯窗有限，錯過即永久遺失）。
+    1. `meta.retryable` 存在（爬蟲 v2.14.0 起）→ 以它為**主判準**。
+       爬蟲已彙整過所有成因，`retryable=False` 代表重抓結果不會改變
+       （但需有 `non_retryable_reasons`／`source_truncated` 佐證，
+       兩者皆空的退化回應仍保守重抓）。
+    2. `retryable=True` 時再以 `retryable_reasons` 決定「值不值得」：
+       只有全文抓取失敗（`detail_failed`）時看 `detail_failed_ratio`
+       是否達 `DETAIL_FAILED_RETRY_RATIO`；其餘成因一律重抓。
+    3. `meta` 不帶 `retryable`（舊版爬蟲或非制式回應）→ 走舊契約邏輯，
+       維持**預設重抓**。絕不可因為「沒有 retryable」就當成不重抓，
+       那會把失敗誤記成空而永久漏抓。
 
     Args:
         result (dict): 爬蟲回應的 JSON 物件。
 
     Returns:
-        str | None: 值得重抓時回傳原因說明，重抓無用時回傳 None。
+        str | None: 值得重抓時回傳原因說明，不值得重抓時回傳 None
+            （呼叫端應只告警，不排入 retry queue）。
     """
     if not isinstance(result, dict):
         return "未提供狀態細節"
 
     meta = result.get("meta") or {}
+    if "retryable" in meta:
+        return _retry_reason_from_contract(meta)
+    return _legacy_retry_reason(result, meta)
+
+
+def _retry_reason_from_contract(meta):
+    """依 v2.14.0 契約的 `retryable` 系列欄位判斷是否值得重抓。
+
+    Args:
+        meta (dict): 爬蟲回應的 meta 物件（已確認含 `retryable`）。
+
+    Returns:
+        str | None: 值得重抓時回傳原因說明，否則 None。
+    """
+    if not meta.get("retryable"):
+        # 第二道防線：`retryable=False` 必須有硬限制佐證才採信。
+        #
+        # 爬蟲 `classify_meta` 是以 `retryable = bool(retryable_reasons)`
+        # 推導的，`partial` 必定至少帶一個成因碼，故正常情況不會走到這裡。
+        # 但「不重抓」是本 repo 唯一會把失敗永久遮蔽的方向，若日後爬蟲回了
+        # 退化的 `retryable: false`（兩個成因清單都空），寧可多跑一次也不能
+        # 誤判成「重抓拿不到」。此分支只會把「不重抓」翻成「重抓」，
+        # 不會反向削弱 `retryable` 作為單一判準的地位。
+        blocked = [
+            r for r in (meta.get("non_retryable_reasons") or []) if r
+        ]
+        if blocked or meta.get(_PERMANENT_PARTIAL_META):
+            return None
+        return "爬蟲標記不可重試但未提供硬限制佐證"
+
+    reasons = [str(r) for r in (meta.get("retryable_reasons") or []) if r]
+    if not reasons:
+        # 標記可重試卻沒說明成因：保守重抓，不臆測。
+        return "爬蟲標記可重試但未提供成因"
+
+    # 只要有一項「連缺什麼都不知道」的成因，就不做門檻判斷。
+    unbounded = [r for r in reasons if r in _UNBOUNDED_LOSS_REASONS]
+    if unbounded:
+        return "、".join(unbounded)
+
+    # 未知的成因代碼（爬蟲日後新增）同樣保守重抓。
+    unknown = [r for r in reasons if r != REASON_DETAIL_FAILED]
+    if unknown:
+        return "、".join(unknown)
+
+    ratio = meta.get("detail_failed_ratio")
+    failed = meta.get("detail_failed")
+    if not isinstance(ratio, (int, float)):
+        # 沒給失敗率就無從套門檻，保守重抓。
+        return f"detail_failed={failed}（未提供失敗率）"
+    if ratio >= DETAIL_FAILED_RETRY_RATIO:
+        return (
+            f"detail_failed_ratio={ratio}"
+            f"（達重抓門檻 {DETAIL_FAILED_RETRY_RATIO}）"
+        )
+    return None
+
+
+def _legacy_retry_reason(result, meta):
+    """舊契約（無 `retryable`）的判讀邏輯，維持預設重抓。
+
+    刻意不採白名單（只認特定 meta key 才重抓）：舊版各爬蟲對 `partial`
+    的 meta 標註並不一致——例如 CNYES 的「翻頁中途失敗」只帶
+    `fetched`／`pages`。白名單會把這些**該重試**的情形誤判成「重試無用」
+    而永久漏抓，與 `check_crawl_status` 對未知狀態的保守原則自相矛盾。
+
+    Args:
+        result (dict): 爬蟲回應的 JSON 物件。
+        meta (dict): 回應的 meta 物件。
+
+    Returns:
+        str | None: 值得重抓時回傳原因說明，重抓無用時回傳 None。
+    """
     transient = [
         f"{key}={meta[key]}"
         for key in _TRANSIENT_PARTIAL_META
@@ -223,6 +348,40 @@ def partial_retry_reason(result):
     if meta.get(_PERMANENT_PARTIAL_META):
         return None
     return result.get("message") or "爬蟲未說明不完整的原因"
+
+
+def partial_skip_note(result):
+    """說明「判定不重抓」的理由，供只告警時寫進 log。
+
+    `partial_retry_reason` 回 None 有兩種截然不同的成因，log 訊息若不加
+    區分會誤導：來源硬限制是「重抓也拿不到」，低於門檻則是「重抓拿得到，
+    但不值得為這幾篇重跑整批，隔日 48 小時窗會再抓一次」。
+
+    Args:
+        result (dict): 爬蟲回應的 JSON 物件。
+
+    Returns:
+        str | None: 不重抓的理由說明；判定為值得重抓時回傳 None。
+    """
+    if partial_retry_reason(result) is not None:
+        return None
+    if not isinstance(result, dict):
+        return None
+
+    meta = result.get("meta") or {}
+    blocked = [str(r) for r in (meta.get("non_retryable_reasons") or []) if r]
+    if blocked:
+        return f"來源硬限制（{'、'.join(blocked)}），重抓也拿不到"
+    if meta.get(_PERMANENT_PARTIAL_META):
+        return "來源硬限制（source_truncated），重抓也拿不到"
+
+    ratio = meta.get("detail_failed_ratio")
+    if isinstance(ratio, (int, float)):
+        return (
+            f"僅全文抓取失敗且失敗率 {ratio} 低於門檻 "
+            f"{DETAIL_FAILED_RETRY_RATIO}，缺的部分留待隔日 48 小時窗補回"
+        )
+    return "爬蟲判定重抓結果不會改變"
 
 
 class DataUploadBase(ABC):

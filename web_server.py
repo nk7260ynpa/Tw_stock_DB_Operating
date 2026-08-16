@@ -92,6 +92,18 @@ schedule_lock = threading.Lock()
 daily_craw_lock = threading.Lock()
 daily_craw_running = False
 
+# 重試佇列重入控制。
+#
+# process_retry_queue 會**同步**重跑佇列內每一筆任務，新聞類任務是整個 48 小時窗
+# 重抓（CTEE 實測 210~230 秒），一輪累積下來可達數分鐘至數十分鐘。與 daily_craw
+# 同理，直接由 scheduler_thread 呼叫會在 run_pending() 期間持有 schedule_lock，
+# 把當日 07:30~08:00 的爬取排程整批往後推。爬蟲 v2.14.0 起 PTT／MoneyUDN 的零星
+# 抓漏由 ok 改回報 partial，排入重試的頻率大幅提高，此風險已從理論變成常態。
+# 故一律改以背景執行緒執行，並以此旗標確保同時只有一輪重試在跑
+# （手動觸發的 /api/retry-queue/retry-all 亦共用，避免與排程輪重複執行同一任務）。
+retry_queue_lock = threading.Lock()
+retry_queue_running = False
+
 # 網路失敗重試佇列
 retry_queue: RetryQueue | None = None
 
@@ -469,8 +481,8 @@ def setup_schedule(
                 "SPECIAL_INFO 缺漏自我修復每日排程已設定為 %s", backfill_time
             )
 
-        # 每小時執行重試佇列
-        schedule_lib.every(1).hours.do(process_retry_queue)
+        # 每小時執行重試佇列（背景執行緒，不可阻塞排程）
+        schedule_lib.every(1).hours.do(run_retry_queue_scheduled)
         logger.info("重試佇列每小時排程已設定。")
 
         # 每日隔日重排：將未達上限的 exhausted 任務重設為 pending
@@ -551,6 +563,53 @@ def process_retry_queue():
             retry_queue.update_status(
                 task.task_id, "exhausted", str(e)
             )
+
+
+def run_retry_queue_scheduled():
+    """觸發重試佇列處理，於獨立背景執行緒執行。
+
+    `process_retry_queue` 逐一同步執行佇列任務，新聞類是整個 48 小時窗重抓，
+    單輪耗時可達數分鐘以上。若直接由 `scheduler_thread` 呼叫，會在
+    `run_pending()` 期間持有 `schedule_lock`，使其後所有排程延後觸發——這正是
+    2026-08 事故的成因。此包裝函式讓排程執行緒立即返回，並以 `retry_queue_running`
+    旗標避免上一輪尚未結束時重複啟動（同一任務被兩輪同時執行會重複寫入）。
+
+    Returns:
+        bool: 已啟動背景執行緒為 True；上一輪仍在執行或建立執行緒失敗為 False。
+    """
+    global retry_queue_running
+
+    with retry_queue_lock:
+        if retry_queue_running:
+            logger.warning("上一輪重試佇列尚未結束，略過本次觸發。")
+            return False
+        retry_queue_running = True
+
+    def _run():
+        """實際執行重試佇列並在結束後釋放重入旗標。"""
+        global retry_queue_running
+        try:
+            process_retry_queue()
+        except Exception:  # noqa: BLE001 - 背景執行緒需吞例外避免靜默死亡
+            logger.exception("重試佇列處理失敗。")
+        finally:
+            with retry_queue_lock:
+                retry_queue_running = False
+            logger.info("重試佇列背景執行緒結束。")
+
+    try:
+        threading.Thread(
+            target=_run, daemon=True, name="retry-queue"
+        ).start()
+    except RuntimeError:
+        # 無法建立執行緒時必須回復旗標，否則此後每輪重試都只會被略過。
+        with retry_queue_lock:
+            retry_queue_running = False
+        logger.exception("重試佇列背景執行緒建立失敗。")
+        return False
+
+    logger.info("重試佇列已於背景執行緒啟動。")
+    return True
 
 
 def requeue_exhausted_scheduled():
@@ -4273,12 +4332,17 @@ def get_retry_queue():
 def retry_all_pending():
     """手動立即觸發重試所有 pending 任務。
 
+    與每小時排程共用同一支包裝函式與重入旗標：兩者若同時執行，同一筆任務會被
+    重複跑一遍（新聞雖以 URL 去重，行情類 `DailyPrice` 卻是 append 寫入，
+    會產生重複列）。
+
     Returns:
-        dict: 操作結果訊息。
+        dict: 操作結果訊息與 `started`（是否真的啟動了一輪重試）。前端據
+            `started` 區分成功與略過的樣式，避免「略過」被顯示成綠色成功。
     """
-    t = threading.Thread(target=process_retry_queue, daemon=True)
-    t.start()
-    return {"message": "已觸發重試所有 pending 任務"}
+    if run_retry_queue_scheduled():
+        return {"message": "已觸發重試所有 pending 任務", "started": True}
+    return {"message": "上一輪重試尚未結束，本次略過", "started": False}
 
 
 @app.post("/api/retry-queue/reset-exhausted")

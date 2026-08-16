@@ -23,7 +23,11 @@
 - **比特幣價格**：從爬蟲取得比特幣價格，metadata 存入 SPECIAL_INFO 資料庫的 BitcoinPrice 表（`data_upload/bitcoin_price.py`）
 - **匯率**：從爬蟲取得匯率資料（USDTWD/JPYTWD），metadata 存入 SPECIAL_INFO 資料庫的 CurrencyPrice 表（`data_upload/currency_price.py`）
 - **股市指數**：從爬蟲取得國際股市指數價格（道瓊工業指數/納斯達克指數），資料存入 SPECIAL_INFO 資料庫的 IndicesPrice 表（`data_upload/indices_price.py`）
-- **失敗重試佇列**：排程任務失敗時自動加入重試佇列。網路中斷每小時檢查網路並重試，最多 5 次；非網路錯誤（如「資料尚未發布」）標為 exhausted 後，每日（預設 06:30）「隔日重排」重設為 pending 再試一輪，最多 3 次，避免永久放棄隔日才會出現的資料（`retry_queue.py`）
+- **失敗重試佇列**：排程任務失敗時自動加入重試佇列。網路中斷每小時檢查網路並重試，最多 5 次；非網路錯誤（如「資料尚未發布」）標為 exhausted 後，每日（預設 06:30）「隔日重排」重設為 pending 再試一輪，最多 3 次，避免永久放棄隔日才會出現的資料（`retry_queue.py`）。整輪重試於**背景執行緒**執行（`run_retry_queue_scheduled`），不阻塞排程執行緒
+- **重抓決策依爬蟲 `meta.retryable`**：新聞抓取不完整時，以爬蟲 v2.14.0 的
+  `meta.retryable` 為單一判準決定「重抓有沒有機會補回來」，並以
+  `detail_failed_ratio ≥ 0.2` 決定「值不值得付出整批重跑的成本」；舊版爬蟲回應
+  （不帶 `retryable`）維持預設重抓（`data_upload/base.py`）
 - **新聞 partial 如實回報筆數**：新聞抓取不完整（`status=partial`）時，已取得的部分**先寫入**
   MySQL 與 `NewsContents/` 才拋 `SourceError` 排入重試；例外會帶上已落地統計
   （`SourceError.partial_result`），Web 介面的任務因此顯示實際筆數而非固定 0，避免誤判成
@@ -124,6 +128,8 @@ Tw_stock_DB_Operating/
 │   ├── test_clients.py
 │   ├── test_db_conn.py                   # 連線生命週期（含 AST 掃描防止裸連線復發）
 │   ├── test_partial_result_reporting.py  # partial 已落地筆數如實回報
+│   ├── test_crawler_meta_contract.py     # 爬蟲 v2.14.0 meta 契約重抓決策
+│   ├── test_web_server_retry_queue_scheduled.py  # 重試佇列不阻塞排程
 │   ├── test_daily_upload.py
 │   ├── test_backfill_price.py            # 行情類孤兒帳本 deep 修復入口
 │   ├── test_clear_price_orphans_db.py    # 清孤兒三條安全邊界（真實 SQL 引擎）
@@ -327,6 +333,11 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:latest python -m pytest test/
   `run_pending()` 期間持有 `schedule_lock`，使當日 07:33~07:57 的後續排程全部延後。
   故排程註冊的是 `run_daily_craw_scheduled` 包裝函式：它以背景執行緒啟動 `daily_craw`
   後立即返回，並以重入旗標確保同時只有一輪在跑（上一輪未結束則記錄警告並略過本次）。
+- **重試佇列同樣於背景執行緒執行**：`process_retry_queue` 逐一**同步**重跑佇列任務，
+  新聞類是整個 48 小時窗重抓，一輪可達數分鐘以上；若直接註冊為每小時排程的 callback，
+  同樣會在 `run_pending()` 期間持有 `schedule_lock` 而拖累其後所有排程。故排程與 Web
+  介面的「立即重試」都改走 `run_retry_queue_scheduled` 包裝（背景執行緒 + 重入旗標），
+  兩者共用同一面旗標，避免同一任務被兩輪並行執行而重複寫入。
 - **爬蟲請求一律設 timeout**：`data_upload/base.py` 的 `CRAW_TIMEOUT`（預設 120 秒，
   可用同名環境變數覆寫）套用於所有行情類爬取請求。未設 timeout 時 `requests` 會無限期
   等待，爬蟲一旦 hang 住即會卡住 `daily_craw`。逾時歸類為**可重試**的 `NetworkError`
@@ -368,11 +379,54 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:latest python -m pytest test/
   不被嘗試，直到滑出 30 天視窗即永久遺失。
 - **`status` 缺席時放行**，維持既有行為以相容舊版爬蟲。
 - **新聞類的 `partial` 例外**：新聞以 URL 去重、重抓為冪等，故 `partial` 的資料**先落地**
-  再依 `meta` 決定是否重試——`detail_failed`／`skipped_by_deadline`（暫時性）排入 retry
-  queue 補齊；僅 `source_truncated`（來源硬上限）則只記錄警告，不做無謂重試。行情類則相反：
-  `DailyPrice` 為 append 寫入且**無去重**，存入部分資料會在重抓時產生重複列，故一律丟棄重抓。
+  再依 `meta` 決定是否重試（判準見下節）。行情類則相反：`DailyPrice` 為 append 寫入且
+  **無去重**，存入部分資料會在重抓時產生重複列，故一律丟棄重抓。
+- **`partial` 但 `data` 為空時絕不寫帳本**：「重抓也拿不到」不等於「當日確實沒有新聞」
+  ——來源硬上限截斷時，被截掉的部分是真實存在的資料。四支上傳器的 0 筆早退路徑都在
+  `record_uploaded_date()` **之前**返回，故 `*Uploaded` 帳本不會被寫入，該日仍是缺漏
+  候選；若寫了，該日就永久宣告處理完畢、再也不會被檢查。
 - **新聞爬取的 `timeout=600` 不可調低**：爬蟲端 `MAX_RUNTIME_SECONDS=480`（最壞含重試約
   573 秒）刻意設計為低於本端 600 秒。CTEE 正常耗時約 210~230 秒、尖峰更久，調低會提前中斷。
+
+### 新聞 `partial` 的重抓決策（`Tw_stock_crawer` v2.14.0 起）
+
+爬蟲 v2.14.0 起在 `meta` 增加下列欄位（全為增量，既有欄位語意不變）：
+
+| 欄位 | 型別 | 出現時機 | 語意 |
+|---|---|---|---|
+| `retryable` | bool | `partial`／`out_of_range`／`error` | 重抓有沒有機會補回來（**單一判準**） |
+| `retryable_reasons` | list | 有暫時性成因時 | `list_failed`／`detail_failed`／`deadline`／`crawl_failed` |
+| `non_retryable_reasons` | list | 有硬限制成因時 | `source_truncated`／`out_of_range` |
+| `detail_total`／`detail_failed_ratio` | int／float | 有嘗試抓全文時 | 全文抓取的總篇數與失敗率 |
+| `list_failed` | bool | 列表／分頁抓取中途失敗 | 缺的是「哪些文章存在」 |
+| `pages` | int | CNYES | 翻頁停在第幾頁（診斷用） |
+
+`data_upload/base.py` 的 `partial_retry_reason()` 據此分兩層決策：
+
+1. **能不能補回來** → 以 `meta.retryable` 為準。爬蟲已彙整所有成因，
+   `retryable=False`（如 CNYES 翻頁上限 `source_truncated`）一律只告警不重抓。
+2. **值不值得重抓** → 僅當成因**只有** `detail_failed` 時，看
+   `detail_failed_ratio` 是否達 `DETAIL_FAILED_RETRY_RATIO`（**0.2**）；
+   `list_failed`／`deadline`／`crawl_failed` 則無視門檻一律重抓。
+
+**門檻取 0.2 的理由**：重試佇列是**同步**重跑整個 48 小時窗（CTEE 約 210~230 秒）
+且每小時觸發，成本高；而全文抓失敗的文章被爬蟲**整篇排除**在 `data` 之外，不會寫進
+MySQL，隔日排程的 48 小時窗重抓時仍是「新記錄」而會被補上——等於每篇本來就有第二次
+免費機會（界線：視窗只往前推 48 小時，今天視窗中較舊的 24 小時不會被明天涵蓋，
+每篇合計兩次機會；要真的漏掉須連兩天同一篇都失敗）。門檻要攔的是「來源擋人／全文頁
+改版」這類系統性異常（失敗率高到五分之一，明天多半也修不好），零星幾篇交給隔日自然
+補抓即可。反之 `list_failed`／`deadline` 連「有哪些文章」都不知道，損失無上限且
+CTEE 來源僅保留約 3 天，等不起。
+
+> 若無此門檻：PTT／MoneyUDN 過去抓漏也回 `ok`，新契約改回 `partial` + `detail_failed`，
+> 沿用舊的「1 篇失敗就重抓」會讓它們**天天**排一次同步重跑，把早上 07:30~08:00 的
+> 抓取窗整批往後推——與 2026-08 的排程連鎖延遲事故同型。
+
+**向後相容**：`meta` 缺席或不帶 `retryable`（舊版爬蟲、非制式回應）時走舊邏輯，
+維持**預設重抓**；只有明確標示 `source_truncated` 才不重抓。絕不可因為「沒有
+`retryable`」就當成不重抓——那正是「把失敗誤記成空」而永久遮蔽該日的老毛病。
+同理，`retryable=False` 但 `non_retryable_reasons` 與 `source_truncated` 皆空的
+退化回應（爬蟲現行邏輯不會產生）也保守重抓；此防線只會把「不重抓」翻成「重抓」。
 
 ### 排程時間的一次性遷移（config_version）
 
