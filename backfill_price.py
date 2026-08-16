@@ -42,7 +42,7 @@ from DailyUpload import (
     clear_price_orphans,
 )
 from data_upload.base import NetworkError
-from routers import MySQLRouter
+from routers import db_conn
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,11 +99,10 @@ def _classify_dates(db_name, dates, host, user, password):
         return 0, 0, []
     actual_db = DB_MAPPING.get(db_name, db_name)
     table = UPLOAD_DATE_TABLE.get(db_name, "UploadDate")
-    conn = MySQLRouter(host, user, password, actual_db).mysql_conn
     filled = 0
     non_trading = 0
     unrestored = []
-    try:
+    with db_conn(host, user, password, actual_db) as conn:
         for date_str in dates:
             open_val = conn.execute(
                 text(
@@ -117,8 +116,6 @@ def _classify_dates(db_name, dates, host, user, password):
                 filled += 1
             else:
                 non_trading += 1
-    finally:
-        conn.close()
     return filled, non_trading, unrestored
 
 

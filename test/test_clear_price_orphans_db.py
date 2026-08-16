@@ -67,7 +67,7 @@ class TestClearPriceOrphansAgainstDatabase(unittest.TestCase):
         """
         import DailyUpload
 
-        with patch("DailyUpload.MySQLRouter") as mock_router_cls:
+        with patch("routers.MySQLRouter") as mock_router_cls:
             mock_router_cls.return_value.mysql_conn = self.engine.connect()
             return DailyUpload.clear_price_orphans(
                 "TWSE", days=days, today=self.TODAY

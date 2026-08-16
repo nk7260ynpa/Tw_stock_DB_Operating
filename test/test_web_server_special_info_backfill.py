@@ -101,7 +101,7 @@ class TestSpecialInfoBackfillJob(unittest.TestCase):
         import web_server
         web_server.upload_jobs.clear()
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_job_iterates_assets_and_queues_network_errors(
         self, mock_router_cls
     ):

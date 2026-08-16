@@ -47,7 +47,7 @@ from data_upload.bitcoin_price import BitcoinPriceUploader
 from data_upload.currency_price import CurrencyPriceUploader
 from data_upload.indices_price import IndicesPriceUploader
 from retry_queue import RetryQueue, is_network_error, check_network_available
-from routers import MySQLRouter
+from routers import db_conn
 
 # 路徑設定
 BASE_DIR = Path(__file__).parent
@@ -123,7 +123,6 @@ SPECIAL_INFO_ASSETS = [
 # 任務佇列
 from job_queue import JobQueue
 job_queue: JobQueue | None = None
-
 
 
 def _validate_date_format(date_str):
@@ -599,74 +598,64 @@ def _execute_retry_task(task):
             day_upload(date, opt)
 
     elif task.task_type == "ctee_news":
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        uploader = CTEENewsUploader(conn, CRAWLERHOST)
-        uploader.upload_by_hours(task.params["hours"])
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            uploader = CTEENewsUploader(conn, CRAWLERHOST)
+            uploader.upload_by_hours(task.params["hours"])
 
     elif task.task_type == "cnyes_news":
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        uploader = CNYESNewsUploader(conn, CRAWLERHOST)
-        uploader.upload_by_hours(task.params["hours"])
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            uploader = CNYESNewsUploader(conn, CRAWLERHOST)
+            uploader.upload_by_hours(task.params["hours"])
 
     elif task.task_type == "ptt_news":
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        uploader = PTTNewsUploader(conn, CRAWLERHOST)
-        uploader.upload_by_hours(task.params["hours"])
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            uploader = PTTNewsUploader(conn, CRAWLERHOST)
+            uploader.upload_by_hours(task.params["hours"])
 
     elif task.task_type == "moneyudn_news":
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        uploader = MoneyUDNNewsUploader(conn, CRAWLERHOST)
-        uploader.upload_by_hours(task.params["hours"])
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            uploader = MoneyUDNNewsUploader(conn, CRAWLERHOST)
+            uploader.upload_by_hours(task.params["hours"])
 
     elif task.task_type == "tdcc":
-        conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
-        uploader = TDCCUploader(conn, CRAWLERHOST)
-        uploader.upload()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "TWSE") as conn:
+            uploader = TDCCUploader(conn, CRAWLERHOST)
+            uploader.upload()
 
     elif task.task_type == "oil_price":
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-        uploader = OilPriceUploader(conn, CRAWLERHOST)
-        date = task.params.get("date")
-        if date:
-            uploader.upload(date)
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            uploader = OilPriceUploader(conn, CRAWLERHOST)
+            date = task.params.get("date")
+            if date:
+                uploader.upload(date)
 
     elif task.task_type == "gold_price":
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-        uploader = GoldPriceUploader(conn, CRAWLERHOST)
-        date = task.params.get("date")
-        if date:
-            uploader.upload(date)
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            uploader = GoldPriceUploader(conn, CRAWLERHOST)
+            date = task.params.get("date")
+            if date:
+                uploader.upload(date)
 
     elif task.task_type == "bitcoin_price":
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-        uploader = BitcoinPriceUploader(conn, CRAWLERHOST)
-        date = task.params.get("date")
-        if date:
-            uploader.upload(date)
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            uploader = BitcoinPriceUploader(conn, CRAWLERHOST)
+            date = task.params.get("date")
+            if date:
+                uploader.upload(date)
 
     elif task.task_type == "currency_price":
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-        uploader = CurrencyPriceUploader(conn, CRAWLERHOST)
-        date = task.params.get("date")
-        if date:
-            uploader.upload(date)
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            uploader = CurrencyPriceUploader(conn, CRAWLERHOST)
+            date = task.params.get("date")
+            if date:
+                uploader.upload(date)
 
     elif task.task_type == "indices_price":
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-        uploader = IndicesPriceUploader(conn, CRAWLERHOST)
-        date = task.params.get("date")
-        if date:
-            uploader.upload(date)
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            uploader = IndicesPriceUploader(conn, CRAWLERHOST)
+            date = task.params.get("date")
+            if date:
+                uploader.upload(date)
 
     else:
         raise ValueError(f"不支援的重試任務類型：{task.task_type}")
@@ -830,63 +819,74 @@ def run_ctee_news_upload_job(job_id, start_date, end_date):
     with jobs_lock:
         upload_jobs[job_id]["status"] = "running"
 
-    conn = None
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        uploader = CTEENewsUploader(conn, CRAWLERHOST)
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            uploader = CTEENewsUploader(conn, CRAWLERHOST)
 
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
 
-        total_records = 0
-        total_files = 0
-        current = start_dt
-        failed_dates = []
-        unavailable_dates = []
+            total_records = 0
+            total_files = 0
+            current = start_dt
+            failed_dates = []
+            unavailable_dates = []
 
-        while current <= end_dt:
-            date_str = current.strftime("%Y-%m-%d")
+            while current <= end_dt:
+                date_str = current.strftime("%Y-%m-%d")
+                with jobs_lock:
+                    upload_jobs[job_id]["date"] = date_str
+
+                # 單日失敗不得中斷整段回補：逐日隔離例外，最後再彙總回報。
+                # 否則首日若超出來源回溯範圍，後面能補的日期會一筆都補不到。
+                try:
+                    result = uploader.upload(date_str)
+                    total_records += result["record_count"]
+                    total_files += result["file_count"]
+                except OutOfRangeError as e:
+                    logger.warning(
+                        "CTEE 新聞 %s 超出來源可回溯範圍，略過：%s",
+                        date_str, e,
+                    )
+                    unavailable_dates.append(date_str)
+                except SourceError as e:
+                    # 抓取不完整：已取得的部分早已落地，須把實際筆數計入總數，
+                    # 否則介面顯示 0 筆會被誤判成「完全沒抓到」。該日仍列入
+                    # failed_dates 以便重抓補齊剩餘資料。
+                    partial = e.partial_result or {}
+                    total_records += partial.get("record_count", 0)
+                    total_files += partial.get("file_count", 0)
+                    logger.warning(
+                        "CTEE 新聞 %s 抓取不完整（已存入 %d 筆）：%s",
+                        date_str, partial.get("record_count", 0), e,
+                    )
+                    failed_dates.append(date_str)
+                except NetworkError as e:
+                    logger.warning(
+                        "CTEE 新聞 %s 抓取失敗：%s", date_str, e
+                    )
+                    failed_dates.append(date_str)
+                current += timedelta(days=1)
+
             with jobs_lock:
-                upload_jobs[job_id]["date"] = date_str
-
-            # 單日失敗不得中斷整段回補：逐日隔離例外，最後再彙總回報。
-            # 否則首日若超出來源回溯範圍，後面能補的日期會一筆都補不到。
-            try:
-                result = uploader.upload(date_str)
-                total_records += result["record_count"]
-                total_files += result["file_count"]
-            except OutOfRangeError as e:
-                logger.warning(
-                    "CTEE 新聞 %s 超出來源可回溯範圍，略過：%s",
-                    date_str, e,
+                upload_jobs[job_id]["status"] = (
+                    "failed" if failed_dates else "completed"
                 )
-                unavailable_dates.append(date_str)
-            except NetworkError as e:
-                logger.warning(
-                    "CTEE 新聞 %s 抓取失敗：%s", date_str, e
-                )
-                failed_dates.append(date_str)
-            current += timedelta(days=1)
-
-        with jobs_lock:
-            upload_jobs[job_id]["status"] = (
-                "failed" if failed_dates else "completed"
+                upload_jobs[job_id]["record_count"] = total_records
+                upload_jobs[job_id]["file_count"] = total_files
+                if failed_dates:
+                    upload_jobs[job_id]["error"] = (
+                        "下列日期抓取失敗：" + "、".join(failed_dates)
+                    )
+                if unavailable_dates:
+                    upload_jobs[job_id]["unavailable_dates"] = unavailable_dates
+                upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+            logger.info(
+                "CTEE 新聞任務結束 %s（%d 筆 metadata，%d 個檔案，"
+                "失敗 %d 日、超出回溯範圍 %d 日）",
+                job_id, total_records, total_files,
+                len(failed_dates), len(unavailable_dates),
             )
-            upload_jobs[job_id]["record_count"] = total_records
-            upload_jobs[job_id]["file_count"] = total_files
-            if failed_dates:
-                upload_jobs[job_id]["error"] = (
-                    "下列日期抓取失敗：" + "、".join(failed_dates)
-                )
-            if unavailable_dates:
-                upload_jobs[job_id]["unavailable_dates"] = unavailable_dates
-            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-        logger.info(
-            "CTEE 新聞任務結束 %s（%d 筆 metadata，%d 個檔案，"
-            "失敗 %d 日、超出回溯範圍 %d 日）",
-            job_id, total_records, total_files,
-            len(failed_dates), len(unavailable_dates),
-        )
 
     except Exception as e:
         logger.error("CTEE 新聞任務失敗 %s: %s", job_id, e)
@@ -894,10 +894,6 @@ def run_ctee_news_upload_job(job_id, start_date, end_date):
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 def run_ctee_news_hours_job(job_id, hours):
@@ -914,11 +910,10 @@ def run_ctee_news_hours_job(job_id, hours):
         upload_jobs[job_id]["status"] = "running"
 
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        uploader = CTEENewsUploader(conn, CRAWLERHOST)
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            uploader = CTEENewsUploader(conn, CRAWLERHOST)
 
-        result = uploader.upload_by_hours(hours)
-        conn.close()
+            result = uploader.upload_by_hours(hours)
 
         with jobs_lock:
             upload_jobs[job_id]["status"] = "completed"
@@ -929,6 +924,30 @@ def run_ctee_news_hours_job(job_id, hours):
             "CTEE 新聞任務完成 %s（hours=%d，%d 筆 metadata，%d 個檔案）",
             job_id, hours, result["record_count"], result["file_count"],
         )
+
+    except SourceError as e:
+        # 抓取不完整：已取得的部分早已落地，如實回報筆數，
+        # 否則介面顯示 0 筆會被誤判成「完全沒抓到」。
+        partial = e.partial_result or {}
+        logger.warning(
+            "CTEE 新聞任務抓取不完整 %s（已存入 %d 筆）：%s",
+            job_id, partial.get("record_count", 0), e,
+        )
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["record_count"] = partial.get(
+                "record_count", 0
+            )
+            upload_jobs[job_id]["file_count"] = partial.get(
+                "file_count", 0
+            )
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        if retry_queue is not None:
+            retry_queue.add(
+                "ctee_news", {"hours": hours}, str(e),
+                created_by_job_id=job_id,
+            )
 
     except NetworkError as e:
         logger.warning("CTEE 新聞任務網路失敗 %s: %s", job_id, e)
@@ -990,63 +1009,74 @@ def run_cnyes_news_upload_job(job_id, start_date, end_date):
     with jobs_lock:
         upload_jobs[job_id]["status"] = "running"
 
-    conn = None
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        uploader = CNYESNewsUploader(conn, CRAWLERHOST)
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            uploader = CNYESNewsUploader(conn, CRAWLERHOST)
 
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
 
-        total_records = 0
-        total_files = 0
-        current = start_dt
-        failed_dates = []
-        unavailable_dates = []
+            total_records = 0
+            total_files = 0
+            current = start_dt
+            failed_dates = []
+            unavailable_dates = []
 
-        while current <= end_dt:
-            date_str = current.strftime("%Y-%m-%d")
+            while current <= end_dt:
+                date_str = current.strftime("%Y-%m-%d")
+                with jobs_lock:
+                    upload_jobs[job_id]["date"] = date_str
+
+                # 單日失敗不得中斷整段回補：逐日隔離例外，最後再彙總回報。
+                # 否則首日若超出來源回溯範圍，後面能補的日期會一筆都補不到。
+                try:
+                    result = uploader.upload(date_str)
+                    total_records += result["record_count"]
+                    total_files += result["file_count"]
+                except OutOfRangeError as e:
+                    logger.warning(
+                        "CNYES 新聞 %s 超出來源可回溯範圍，略過：%s",
+                        date_str, e,
+                    )
+                    unavailable_dates.append(date_str)
+                except SourceError as e:
+                    # 抓取不完整：已取得的部分早已落地，須把實際筆數計入總數，
+                    # 否則介面顯示 0 筆會被誤判成「完全沒抓到」。該日仍列入
+                    # failed_dates 以便重抓補齊剩餘資料。
+                    partial = e.partial_result or {}
+                    total_records += partial.get("record_count", 0)
+                    total_files += partial.get("file_count", 0)
+                    logger.warning(
+                        "CNYES 新聞 %s 抓取不完整（已存入 %d 筆）：%s",
+                        date_str, partial.get("record_count", 0), e,
+                    )
+                    failed_dates.append(date_str)
+                except NetworkError as e:
+                    logger.warning(
+                        "CNYES 新聞 %s 抓取失敗：%s", date_str, e
+                    )
+                    failed_dates.append(date_str)
+                current += timedelta(days=1)
+
             with jobs_lock:
-                upload_jobs[job_id]["date"] = date_str
-
-            # 單日失敗不得中斷整段回補：逐日隔離例外，最後再彙總回報。
-            # 否則首日若超出來源回溯範圍，後面能補的日期會一筆都補不到。
-            try:
-                result = uploader.upload(date_str)
-                total_records += result["record_count"]
-                total_files += result["file_count"]
-            except OutOfRangeError as e:
-                logger.warning(
-                    "CNYES 新聞 %s 超出來源可回溯範圍，略過：%s",
-                    date_str, e,
+                upload_jobs[job_id]["status"] = (
+                    "failed" if failed_dates else "completed"
                 )
-                unavailable_dates.append(date_str)
-            except NetworkError as e:
-                logger.warning(
-                    "CNYES 新聞 %s 抓取失敗：%s", date_str, e
-                )
-                failed_dates.append(date_str)
-            current += timedelta(days=1)
-
-        with jobs_lock:
-            upload_jobs[job_id]["status"] = (
-                "failed" if failed_dates else "completed"
+                upload_jobs[job_id]["record_count"] = total_records
+                upload_jobs[job_id]["file_count"] = total_files
+                if failed_dates:
+                    upload_jobs[job_id]["error"] = (
+                        "下列日期抓取失敗：" + "、".join(failed_dates)
+                    )
+                if unavailable_dates:
+                    upload_jobs[job_id]["unavailable_dates"] = unavailable_dates
+                upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+            logger.info(
+                "CNYES 新聞任務結束 %s（%d 筆 metadata，%d 個檔案，"
+                "失敗 %d 日、超出回溯範圍 %d 日）",
+                job_id, total_records, total_files,
+                len(failed_dates), len(unavailable_dates),
             )
-            upload_jobs[job_id]["record_count"] = total_records
-            upload_jobs[job_id]["file_count"] = total_files
-            if failed_dates:
-                upload_jobs[job_id]["error"] = (
-                    "下列日期抓取失敗：" + "、".join(failed_dates)
-                )
-            if unavailable_dates:
-                upload_jobs[job_id]["unavailable_dates"] = unavailable_dates
-            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-        logger.info(
-            "CNYES 新聞任務結束 %s（%d 筆 metadata，%d 個檔案，"
-            "失敗 %d 日、超出回溯範圍 %d 日）",
-            job_id, total_records, total_files,
-            len(failed_dates), len(unavailable_dates),
-        )
 
     except Exception as e:
         logger.error("CNYES 新聞任務失敗 %s: %s", job_id, e)
@@ -1054,10 +1084,6 @@ def run_cnyes_news_upload_job(job_id, start_date, end_date):
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 def run_cnyes_news_hours_job(job_id, hours):
@@ -1074,11 +1100,10 @@ def run_cnyes_news_hours_job(job_id, hours):
         upload_jobs[job_id]["status"] = "running"
 
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        uploader = CNYESNewsUploader(conn, CRAWLERHOST)
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            uploader = CNYESNewsUploader(conn, CRAWLERHOST)
 
-        result = uploader.upload_by_hours(hours)
-        conn.close()
+            result = uploader.upload_by_hours(hours)
 
         with jobs_lock:
             upload_jobs[job_id]["status"] = "completed"
@@ -1089,6 +1114,30 @@ def run_cnyes_news_hours_job(job_id, hours):
             "CNYES 新聞任務完成 %s（hours=%d，%d 筆 metadata，%d 個檔案）",
             job_id, hours, result["record_count"], result["file_count"],
         )
+
+    except SourceError as e:
+        # 抓取不完整：已取得的部分早已落地，如實回報筆數，
+        # 否則介面顯示 0 筆會被誤判成「完全沒抓到」。
+        partial = e.partial_result or {}
+        logger.warning(
+            "CNYES 新聞任務抓取不完整 %s（已存入 %d 筆）：%s",
+            job_id, partial.get("record_count", 0), e,
+        )
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["record_count"] = partial.get(
+                "record_count", 0
+            )
+            upload_jobs[job_id]["file_count"] = partial.get(
+                "file_count", 0
+            )
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        if retry_queue is not None:
+            retry_queue.add(
+                "cnyes_news", {"hours": hours}, str(e),
+                created_by_job_id=job_id,
+            )
 
     except NetworkError as e:
         logger.warning("CNYES 新聞任務網路失敗 %s: %s", job_id, e)
@@ -1150,63 +1199,74 @@ def run_ptt_news_upload_job(job_id, start_date, end_date):
     with jobs_lock:
         upload_jobs[job_id]["status"] = "running"
 
-    conn = None
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        uploader = PTTNewsUploader(conn, CRAWLERHOST)
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            uploader = PTTNewsUploader(conn, CRAWLERHOST)
 
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
 
-        total_records = 0
-        total_files = 0
-        current = start_dt
-        failed_dates = []
-        unavailable_dates = []
+            total_records = 0
+            total_files = 0
+            current = start_dt
+            failed_dates = []
+            unavailable_dates = []
 
-        while current <= end_dt:
-            date_str = current.strftime("%Y-%m-%d")
+            while current <= end_dt:
+                date_str = current.strftime("%Y-%m-%d")
+                with jobs_lock:
+                    upload_jobs[job_id]["date"] = date_str
+
+                # 單日失敗不得中斷整段回補：逐日隔離例外，最後再彙總回報。
+                # 否則首日若超出來源回溯範圍，後面能補的日期會一筆都補不到。
+                try:
+                    result = uploader.upload(date_str)
+                    total_records += result["record_count"]
+                    total_files += result["file_count"]
+                except OutOfRangeError as e:
+                    logger.warning(
+                        "PTT 新聞 %s 超出來源可回溯範圍，略過：%s",
+                        date_str, e,
+                    )
+                    unavailable_dates.append(date_str)
+                except SourceError as e:
+                    # 抓取不完整：已取得的部分早已落地，須把實際筆數計入總數，
+                    # 否則介面顯示 0 筆會被誤判成「完全沒抓到」。該日仍列入
+                    # failed_dates 以便重抓補齊剩餘資料。
+                    partial = e.partial_result or {}
+                    total_records += partial.get("record_count", 0)
+                    total_files += partial.get("file_count", 0)
+                    logger.warning(
+                        "PTT 新聞 %s 抓取不完整（已存入 %d 筆）：%s",
+                        date_str, partial.get("record_count", 0), e,
+                    )
+                    failed_dates.append(date_str)
+                except NetworkError as e:
+                    logger.warning(
+                        "PTT 新聞 %s 抓取失敗：%s", date_str, e
+                    )
+                    failed_dates.append(date_str)
+                current += timedelta(days=1)
+
             with jobs_lock:
-                upload_jobs[job_id]["date"] = date_str
-
-            # 單日失敗不得中斷整段回補：逐日隔離例外，最後再彙總回報。
-            # 否則首日若超出來源回溯範圍，後面能補的日期會一筆都補不到。
-            try:
-                result = uploader.upload(date_str)
-                total_records += result["record_count"]
-                total_files += result["file_count"]
-            except OutOfRangeError as e:
-                logger.warning(
-                    "PTT 新聞 %s 超出來源可回溯範圍，略過：%s",
-                    date_str, e,
+                upload_jobs[job_id]["status"] = (
+                    "failed" if failed_dates else "completed"
                 )
-                unavailable_dates.append(date_str)
-            except NetworkError as e:
-                logger.warning(
-                    "PTT 新聞 %s 抓取失敗：%s", date_str, e
-                )
-                failed_dates.append(date_str)
-            current += timedelta(days=1)
-
-        with jobs_lock:
-            upload_jobs[job_id]["status"] = (
-                "failed" if failed_dates else "completed"
+                upload_jobs[job_id]["record_count"] = total_records
+                upload_jobs[job_id]["file_count"] = total_files
+                if failed_dates:
+                    upload_jobs[job_id]["error"] = (
+                        "下列日期抓取失敗：" + "、".join(failed_dates)
+                    )
+                if unavailable_dates:
+                    upload_jobs[job_id]["unavailable_dates"] = unavailable_dates
+                upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+            logger.info(
+                "PTT 新聞任務結束 %s（%d 筆 metadata，%d 個檔案，"
+                "失敗 %d 日、超出回溯範圍 %d 日）",
+                job_id, total_records, total_files,
+                len(failed_dates), len(unavailable_dates),
             )
-            upload_jobs[job_id]["record_count"] = total_records
-            upload_jobs[job_id]["file_count"] = total_files
-            if failed_dates:
-                upload_jobs[job_id]["error"] = (
-                    "下列日期抓取失敗：" + "、".join(failed_dates)
-                )
-            if unavailable_dates:
-                upload_jobs[job_id]["unavailable_dates"] = unavailable_dates
-            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-        logger.info(
-            "PTT 新聞任務結束 %s（%d 筆 metadata，%d 個檔案，"
-            "失敗 %d 日、超出回溯範圍 %d 日）",
-            job_id, total_records, total_files,
-            len(failed_dates), len(unavailable_dates),
-        )
 
     except Exception as e:
         logger.error("PTT 新聞任務失敗 %s: %s", job_id, e)
@@ -1214,10 +1274,6 @@ def run_ptt_news_upload_job(job_id, start_date, end_date):
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 def run_ptt_news_hours_job(job_id, hours):
@@ -1234,11 +1290,10 @@ def run_ptt_news_hours_job(job_id, hours):
         upload_jobs[job_id]["status"] = "running"
 
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        uploader = PTTNewsUploader(conn, CRAWLERHOST)
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            uploader = PTTNewsUploader(conn, CRAWLERHOST)
 
-        result = uploader.upload_by_hours(hours)
-        conn.close()
+            result = uploader.upload_by_hours(hours)
 
         with jobs_lock:
             upload_jobs[job_id]["status"] = "completed"
@@ -1249,6 +1304,30 @@ def run_ptt_news_hours_job(job_id, hours):
             "PTT 新聞任務完成 %s（hours=%d，%d 筆 metadata，%d 個檔案）",
             job_id, hours, result["record_count"], result["file_count"],
         )
+
+    except SourceError as e:
+        # 抓取不完整：已取得的部分早已落地，如實回報筆數，
+        # 否則介面顯示 0 筆會被誤判成「完全沒抓到」。
+        partial = e.partial_result or {}
+        logger.warning(
+            "PTT 新聞任務抓取不完整 %s（已存入 %d 筆）：%s",
+            job_id, partial.get("record_count", 0), e,
+        )
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["record_count"] = partial.get(
+                "record_count", 0
+            )
+            upload_jobs[job_id]["file_count"] = partial.get(
+                "file_count", 0
+            )
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        if retry_queue is not None:
+            retry_queue.add(
+                "ptt_news", {"hours": hours}, str(e),
+                created_by_job_id=job_id,
+            )
 
     except NetworkError as e:
         logger.warning("PTT 新聞任務網路失敗 %s: %s", job_id, e)
@@ -1311,63 +1390,74 @@ def run_moneyudn_news_upload_job(job_id, start_date, end_date):
     with jobs_lock:
         upload_jobs[job_id]["status"] = "running"
 
-    conn = None
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        uploader = MoneyUDNNewsUploader(conn, CRAWLERHOST)
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            uploader = MoneyUDNNewsUploader(conn, CRAWLERHOST)
 
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
 
-        total_records = 0
-        total_files = 0
-        current = start_dt
-        failed_dates = []
-        unavailable_dates = []
+            total_records = 0
+            total_files = 0
+            current = start_dt
+            failed_dates = []
+            unavailable_dates = []
 
-        while current <= end_dt:
-            date_str = current.strftime("%Y-%m-%d")
+            while current <= end_dt:
+                date_str = current.strftime("%Y-%m-%d")
+                with jobs_lock:
+                    upload_jobs[job_id]["date"] = date_str
+
+                # 單日失敗不得中斷整段回補：逐日隔離例外，最後再彙總回報。
+                # 否則首日若超出來源回溯範圍，後面能補的日期會一筆都補不到。
+                try:
+                    result = uploader.upload(date_str)
+                    total_records += result["record_count"]
+                    total_files += result["file_count"]
+                except OutOfRangeError as e:
+                    logger.warning(
+                        "MoneyUDN 新聞 %s 超出來源可回溯範圍，略過：%s",
+                        date_str, e,
+                    )
+                    unavailable_dates.append(date_str)
+                except SourceError as e:
+                    # 抓取不完整：已取得的部分早已落地，須把實際筆數計入總數，
+                    # 否則介面顯示 0 筆會被誤判成「完全沒抓到」。該日仍列入
+                    # failed_dates 以便重抓補齊剩餘資料。
+                    partial = e.partial_result or {}
+                    total_records += partial.get("record_count", 0)
+                    total_files += partial.get("file_count", 0)
+                    logger.warning(
+                        "MoneyUDN 新聞 %s 抓取不完整（已存入 %d 筆）：%s",
+                        date_str, partial.get("record_count", 0), e,
+                    )
+                    failed_dates.append(date_str)
+                except NetworkError as e:
+                    logger.warning(
+                        "MoneyUDN 新聞 %s 抓取失敗：%s", date_str, e
+                    )
+                    failed_dates.append(date_str)
+                current += timedelta(days=1)
+
             with jobs_lock:
-                upload_jobs[job_id]["date"] = date_str
-
-            # 單日失敗不得中斷整段回補：逐日隔離例外，最後再彙總回報。
-            # 否則首日若超出來源回溯範圍，後面能補的日期會一筆都補不到。
-            try:
-                result = uploader.upload(date_str)
-                total_records += result["record_count"]
-                total_files += result["file_count"]
-            except OutOfRangeError as e:
-                logger.warning(
-                    "MoneyUDN 新聞 %s 超出來源可回溯範圍，略過：%s",
-                    date_str, e,
+                upload_jobs[job_id]["status"] = (
+                    "failed" if failed_dates else "completed"
                 )
-                unavailable_dates.append(date_str)
-            except NetworkError as e:
-                logger.warning(
-                    "MoneyUDN 新聞 %s 抓取失敗：%s", date_str, e
-                )
-                failed_dates.append(date_str)
-            current += timedelta(days=1)
-
-        with jobs_lock:
-            upload_jobs[job_id]["status"] = (
-                "failed" if failed_dates else "completed"
+                upload_jobs[job_id]["record_count"] = total_records
+                upload_jobs[job_id]["file_count"] = total_files
+                if failed_dates:
+                    upload_jobs[job_id]["error"] = (
+                        "下列日期抓取失敗：" + "、".join(failed_dates)
+                    )
+                if unavailable_dates:
+                    upload_jobs[job_id]["unavailable_dates"] = unavailable_dates
+                upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+            logger.info(
+                "MoneyUDN 新聞任務結束 %s（%d 筆 metadata，%d 個檔案，"
+                "失敗 %d 日、超出回溯範圍 %d 日）",
+                job_id, total_records, total_files,
+                len(failed_dates), len(unavailable_dates),
             )
-            upload_jobs[job_id]["record_count"] = total_records
-            upload_jobs[job_id]["file_count"] = total_files
-            if failed_dates:
-                upload_jobs[job_id]["error"] = (
-                    "下列日期抓取失敗：" + "、".join(failed_dates)
-                )
-            if unavailable_dates:
-                upload_jobs[job_id]["unavailable_dates"] = unavailable_dates
-            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-        logger.info(
-            "MoneyUDN 新聞任務結束 %s（%d 筆 metadata，%d 個檔案，"
-            "失敗 %d 日、超出回溯範圍 %d 日）",
-            job_id, total_records, total_files,
-            len(failed_dates), len(unavailable_dates),
-        )
 
     except Exception as e:
         logger.error("MoneyUDN 新聞任務失敗 %s: %s", job_id, e)
@@ -1375,10 +1465,6 @@ def run_moneyudn_news_upload_job(job_id, start_date, end_date):
             upload_jobs[job_id]["status"] = "failed"
             upload_jobs[job_id]["error"] = str(e)
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 def run_moneyudn_news_hours_job(job_id, hours):
@@ -1395,11 +1481,10 @@ def run_moneyudn_news_hours_job(job_id, hours):
         upload_jobs[job_id]["status"] = "running"
 
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        uploader = MoneyUDNNewsUploader(conn, CRAWLERHOST)
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            uploader = MoneyUDNNewsUploader(conn, CRAWLERHOST)
 
-        result = uploader.upload_by_hours(hours)
-        conn.close()
+            result = uploader.upload_by_hours(hours)
 
         with jobs_lock:
             upload_jobs[job_id]["status"] = "completed"
@@ -1410,6 +1495,30 @@ def run_moneyudn_news_hours_job(job_id, hours):
             "MoneyUDN 新聞任務完成 %s（hours=%d，%d 筆 metadata，%d 個檔案）",
             job_id, hours, result["record_count"], result["file_count"],
         )
+
+    except SourceError as e:
+        # 抓取不完整：已取得的部分早已落地，如實回報筆數，
+        # 否則介面顯示 0 筆會被誤判成「完全沒抓到」。
+        partial = e.partial_result or {}
+        logger.warning(
+            "MoneyUDN 新聞任務抓取不完整 %s（已存入 %d 筆）：%s",
+            job_id, partial.get("record_count", 0), e,
+        )
+        with jobs_lock:
+            upload_jobs[job_id]["status"] = "failed"
+            upload_jobs[job_id]["error"] = str(e)
+            upload_jobs[job_id]["record_count"] = partial.get(
+                "record_count", 0
+            )
+            upload_jobs[job_id]["file_count"] = partial.get(
+                "file_count", 0
+            )
+            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+        if retry_queue is not None:
+            retry_queue.add(
+                "moneyudn_news", {"hours": hours}, str(e),
+                created_by_job_id=job_id,
+            )
 
     except NetworkError as e:
         logger.warning("MoneyUDN 新聞任務網路失敗 %s: %s", job_id, e)
@@ -1461,10 +1570,9 @@ def run_tdcc_upload_job(job_id):
         upload_jobs[job_id]["status"] = "running"
 
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
-        uploader = TDCCUploader(conn, CRAWLERHOST)
-        result = uploader.upload()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "TWSE") as conn:
+            uploader = TDCCUploader(conn, CRAWLERHOST)
+            result = uploader.upload()
 
         with jobs_lock:
             upload_jobs[job_id]["status"] = "completed"
@@ -1503,10 +1611,9 @@ def run_company_info_upload_job(job_id):
         upload_jobs[job_id]["status"] = "running"
 
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
-        uploader = CompanyInfoUploader(conn, CRAWLERHOST)
-        result = uploader.upload()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "TWSE") as conn:
+            uploader = CompanyInfoUploader(conn, CRAWLERHOST)
+            result = uploader.upload()
 
         with jobs_lock:
             upload_jobs[job_id]["status"] = "completed"
@@ -1566,10 +1673,9 @@ def run_yt_transcript_upload_job(job_id, date):
         upload_jobs[job_id]["status"] = "running"
 
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        uploader = YTTranscriptUploader(conn)
-        result = uploader.upload(date)
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            uploader = YTTranscriptUploader(conn)
+            result = uploader.upload(date)
 
         with jobs_lock:
             upload_jobs[job_id]["status"] = (
@@ -1634,25 +1740,23 @@ def run_oil_price_upload_job(job_id, start_date, end_date):
         upload_jobs[job_id]["status"] = "running"
 
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-        uploader = OilPriceUploader(conn, CRAWLERHOST)
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            uploader = OilPriceUploader(conn, CRAWLERHOST)
 
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
 
-        total_records = 0
-        current = start_dt
+            total_records = 0
+            current = start_dt
 
-        while current <= end_dt:
-            date_str = current.strftime("%Y-%m-%d")
-            with jobs_lock:
-                upload_jobs[job_id]["date"] = date_str
+            while current <= end_dt:
+                date_str = current.strftime("%Y-%m-%d")
+                with jobs_lock:
+                    upload_jobs[job_id]["date"] = date_str
 
-            result = uploader.upload(date_str)
-            total_records += result["record_count"]
-            current += timedelta(days=1)
-
-        conn.close()
+                result = uploader.upload(date_str)
+                total_records += result["record_count"]
+                current += timedelta(days=1)
 
         with jobs_lock:
             upload_jobs[job_id]["status"] = "completed"
@@ -1729,25 +1833,23 @@ def run_gold_price_upload_job(job_id, start_date, end_date):
         upload_jobs[job_id]["status"] = "running"
 
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-        uploader = GoldPriceUploader(conn, CRAWLERHOST)
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            uploader = GoldPriceUploader(conn, CRAWLERHOST)
 
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
 
-        total_records = 0
-        current = start_dt
+            total_records = 0
+            current = start_dt
 
-        while current <= end_dt:
-            date_str = current.strftime("%Y-%m-%d")
-            with jobs_lock:
-                upload_jobs[job_id]["date"] = date_str
+            while current <= end_dt:
+                date_str = current.strftime("%Y-%m-%d")
+                with jobs_lock:
+                    upload_jobs[job_id]["date"] = date_str
 
-            result = uploader.upload(date_str)
-            total_records += result["record_count"]
-            current += timedelta(days=1)
-
-        conn.close()
+                result = uploader.upload(date_str)
+                total_records += result["record_count"]
+                current += timedelta(days=1)
 
         with jobs_lock:
             upload_jobs[job_id]["status"] = "completed"
@@ -1827,25 +1929,23 @@ def run_bitcoin_price_upload_job(job_id, start_date, end_date):
         upload_jobs[job_id]["status"] = "running"
 
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-        uploader = BitcoinPriceUploader(conn, CRAWLERHOST)
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            uploader = BitcoinPriceUploader(conn, CRAWLERHOST)
 
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
 
-        total_records = 0
-        current = start_dt
+            total_records = 0
+            current = start_dt
 
-        while current <= end_dt:
-            date_str = current.strftime("%Y-%m-%d")
-            with jobs_lock:
-                upload_jobs[job_id]["date"] = date_str
+            while current <= end_dt:
+                date_str = current.strftime("%Y-%m-%d")
+                with jobs_lock:
+                    upload_jobs[job_id]["date"] = date_str
 
-            result = uploader.upload(date_str)
-            total_records += result["record_count"]
-            current += timedelta(days=1)
-
-        conn.close()
+                result = uploader.upload(date_str)
+                total_records += result["record_count"]
+                current += timedelta(days=1)
 
         with jobs_lock:
             upload_jobs[job_id]["status"] = "completed"
@@ -1925,25 +2025,23 @@ def run_currency_price_upload_job(job_id, start_date, end_date):
         upload_jobs[job_id]["status"] = "running"
 
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-        uploader = CurrencyPriceUploader(conn, CRAWLERHOST)
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            uploader = CurrencyPriceUploader(conn, CRAWLERHOST)
 
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
 
-        total_records = 0
-        current = start_dt
+            total_records = 0
+            current = start_dt
 
-        while current <= end_dt:
-            date_str = current.strftime("%Y-%m-%d")
-            with jobs_lock:
-                upload_jobs[job_id]["date"] = date_str
+            while current <= end_dt:
+                date_str = current.strftime("%Y-%m-%d")
+                with jobs_lock:
+                    upload_jobs[job_id]["date"] = date_str
 
-            result = uploader.upload(date_str)
-            total_records += result["record_count"]
-            current += timedelta(days=1)
-
-        conn.close()
+                result = uploader.upload(date_str)
+                total_records += result["record_count"]
+                current += timedelta(days=1)
 
         with jobs_lock:
             upload_jobs[job_id]["status"] = "completed"
@@ -2023,25 +2121,23 @@ def run_indices_price_upload_job(job_id, start_date, end_date):
         upload_jobs[job_id]["status"] = "running"
 
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-        uploader = IndicesPriceUploader(conn, CRAWLERHOST)
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            uploader = IndicesPriceUploader(conn, CRAWLERHOST)
 
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
 
-        total_records = 0
-        current = start_dt
+            total_records = 0
+            current = start_dt
 
-        while current <= end_dt:
-            date_str = current.strftime("%Y-%m-%d")
-            with jobs_lock:
-                upload_jobs[job_id]["date"] = date_str
+            while current <= end_dt:
+                date_str = current.strftime("%Y-%m-%d")
+                with jobs_lock:
+                    upload_jobs[job_id]["date"] = date_str
 
-            result = uploader.upload(date_str)
-            total_records += result["record_count"]
-            current += timedelta(days=1)
-
-        conn.close()
+                result = uploader.upload(date_str)
+                total_records += result["record_count"]
+                current += timedelta(days=1)
 
         with jobs_lock:
             upload_jobs[job_id]["status"] = "completed"
@@ -2126,31 +2222,27 @@ def run_special_info_backfill_job(
     errors = []
 
     for task_type, uploader_cls in SPECIAL_INFO_ASSETS:
-        conn = None
         try:
-            conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-            uploader = uploader_cls(conn, CRAWLERHOST)
-            summary = uploader.backfill_missing(days=days, deep=deep)
-            total_records += summary["records"]
-            summaries.append(summary)
+            with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+                uploader = uploader_cls(conn, CRAWLERHOST)
+                summary = uploader.backfill_missing(days=days, deep=deep)
+                total_records += summary["records"]
+                summaries.append(summary)
 
-            # 網路失敗的日期交由 retry_queue 後續重試（沿用既有機制）。
-            if retry_queue is not None:
-                for date_str in summary["network_errors"]:
-                    retry_queue.add(
-                        task_type,
-                        {"date": date_str},
-                        "缺漏自我修復網路失敗",
-                        created_by_job_id=job_id,
-                    )
+                # 網路失敗的日期交由 retry_queue 後續重試（沿用既有機制）。
+                if retry_queue is not None:
+                    for date_str in summary["network_errors"]:
+                        retry_queue.add(
+                            task_type,
+                            {"date": date_str},
+                            "缺漏自我修復網路失敗",
+                            created_by_job_id=job_id,
+                        )
         except Exception as e:  # noqa: BLE001 逐商品隔離，避免單一失敗中斷全部
             logger.error(
                 "SPECIAL_INFO 缺漏自我修復 %s 失敗：%s", task_type, e
             )
             errors.append(f"{task_type}: {e}")
-        finally:
-            if conn is not None:
-                conn.close()
 
     with jobs_lock:
         upload_jobs[job_id]["status"] = "completed" if not errors else "failed"
@@ -2514,10 +2606,9 @@ def run_quarter_revenue_job(job_id, year, quarter):
         upload_jobs[job_id]["status"] = "running"
 
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
-        uploader = QuarterRevenueUploader(conn)
-        record_count = uploader.upload(year, quarter)
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "TWSE") as conn:
+            uploader = QuarterRevenueUploader(conn)
+            record_count = uploader.upload(year, quarter)
 
         with jobs_lock:
             upload_jobs[job_id]["status"] = "completed"
@@ -2580,16 +2671,14 @@ def list_uploaded_quarters():
         dict: 包含 uploaded 欄位的已上傳記錄清單。
     """
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
-
-        rows = conn.execute(
-            text(
-                "SELECT Year, Quarter "
-                "FROM QuarterRevenueUploaded "
-                "ORDER BY Year DESC, Quarter DESC"
-            )
-        ).fetchall()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "TWSE") as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT Year, Quarter "
+                    "FROM QuarterRevenueUploaded "
+                    "ORDER BY Year DESC, Quarter DESC"
+                )
+            ).fetchall()
 
         uploaded = [
             {
@@ -2640,15 +2729,13 @@ def list_uploaded_tdcc():
         dict: 包含 uploaded 欄位的已上傳日期清單（最近 20 筆）。
     """
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
-
-        rows = conn.execute(
-            text(
-                "SELECT DISTINCT Date FROM TDCC "
-                "ORDER BY Date DESC LIMIT 20"
-            )
-        ).fetchall()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "TWSE") as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT DISTINCT Date FROM TDCC "
+                    "ORDER BY Date DESC LIMIT 20"
+                )
+            ).fetchall()
 
         uploaded = [str(row[0]) for row in rows]
         return {"uploaded": uploaded}
@@ -2768,15 +2855,13 @@ def list_uploaded_ctee_news():
         dict: 包含 uploaded 欄位的已上傳日期清單（最近 50 筆）。
     """
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-
-        rows = conn.execute(
-            text(
-                "SELECT Date FROM CTEEUploaded "
-                "ORDER BY Date DESC LIMIT 50"
-            )
-        ).fetchall()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT Date FROM CTEEUploaded "
+                    "ORDER BY Date DESC LIMIT 50"
+                )
+            ).fetchall()
 
         uploaded = [str(row[0]) for row in rows]
         return {"uploaded": uploaded}
@@ -2896,15 +2981,13 @@ def list_uploaded_cnyes_news():
         dict: 包含 uploaded 欄位的已上傳日期清單（最近 50 筆）。
     """
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-
-        rows = conn.execute(
-            text(
-                "SELECT Date FROM CNYESUploaded "
-                "ORDER BY Date DESC LIMIT 50"
-            )
-        ).fetchall()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT Date FROM CNYESUploaded "
+                    "ORDER BY Date DESC LIMIT 50"
+                )
+            ).fetchall()
 
         uploaded = [str(row[0]) for row in rows]
         return {"uploaded": uploaded}
@@ -3024,15 +3107,13 @@ def list_uploaded_ptt_news():
         dict: 包含 uploaded 欄位的已上傳日期清單（最近 50 筆）。
     """
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-
-        rows = conn.execute(
-            text(
-                "SELECT Date FROM PTTUploaded "
-                "ORDER BY Date DESC LIMIT 50"
-            )
-        ).fetchall()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT Date FROM PTTUploaded "
+                    "ORDER BY Date DESC LIMIT 50"
+                )
+            ).fetchall()
 
         uploaded = [str(row[0]) for row in rows]
         return {"uploaded": uploaded}
@@ -3152,15 +3233,13 @@ def list_uploaded_moneyudn_news():
         dict: 包含 uploaded 欄位的已上傳日期清單（最近 50 筆）。
     """
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-
-        rows = conn.execute(
-            text(
-                "SELECT Date FROM MoneyUDNUploaded "
-                "ORDER BY Date DESC LIMIT 50"
-            )
-        ).fetchall()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT Date FROM MoneyUDNUploaded "
+                    "ORDER BY Date DESC LIMIT 50"
+                )
+            ).fetchall()
 
         uploaded = [str(row[0]) for row in rows]
         return {"uploaded": uploaded}
@@ -3270,15 +3349,14 @@ def list_uploaded_yt_transcript():
         dict: 包含 uploaded 欄位的已上傳日期清單（最近 50 筆）。
     """
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        rows = conn.execute(
-            text(
-                "SELECT Date FROM YTTranscript "
-                "WHERE Status = 'success' "
-                "ORDER BY Date DESC LIMIT 50"
-            )
-        ).fetchall()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT Date FROM YTTranscript "
+                    "WHERE Status = 'success' "
+                    "ORDER BY Date DESC LIMIT 50"
+                )
+            ).fetchall()
         uploaded = [str(row[0]) for row in rows]
         return {"uploaded": uploaded}
     except Exception as e:
@@ -3356,15 +3434,14 @@ def get_yt_transcript_status(
         dict: 包含逐字稿狀態資訊。
     """
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "NEWS").mysql_conn
-        row = conn.execute(
-            text(
-                "SELECT Date, Title, url, Duration, ContentFile, "
-                "Status, ErrorMessage FROM YTTranscript WHERE Date = :date"
-            ),
-            {"date": date},
-        ).fetchone()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "NEWS") as conn:
+            row = conn.execute(
+                text(
+                    "SELECT Date, Title, url, Duration, ContentFile, "
+                    "Status, ErrorMessage FROM YTTranscript WHERE Date = :date"
+                ),
+                {"date": date},
+            ).fetchone()
 
         if not row:
             return {"exists": False}
@@ -3436,15 +3513,13 @@ def list_uploaded_oil_price():
         dict: 包含 uploaded 欄位的已上傳日期清單（最近 50 筆）。
     """
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-
-        rows = conn.execute(
-            text(
-                "SELECT Date FROM OilPriceUploaded "
-                "ORDER BY Date DESC LIMIT 50"
-            )
-        ).fetchall()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT Date FROM OilPriceUploaded "
+                    "ORDER BY Date DESC LIMIT 50"
+                )
+            ).fetchall()
 
         uploaded = [str(row[0]) for row in rows]
         return {"uploaded": uploaded}
@@ -3563,15 +3638,13 @@ def list_uploaded_gold_price():
         dict: 包含 uploaded 欄位的已上傳日期清單（最近 50 筆）。
     """
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-
-        rows = conn.execute(
-            text(
-                "SELECT Date FROM GoldPriceUploaded "
-                "ORDER BY Date DESC LIMIT 50"
-            )
-        ).fetchall()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT Date FROM GoldPriceUploaded "
+                    "ORDER BY Date DESC LIMIT 50"
+                )
+            ).fetchall()
 
         uploaded = [str(row[0]) for row in rows]
         return {"uploaded": uploaded}
@@ -3690,15 +3763,13 @@ def list_uploaded_bitcoin_price():
         dict: 包含 uploaded 欄位的已上傳日期清單（最近 50 筆）。
     """
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-
-        rows = conn.execute(
-            text(
-                "SELECT Date FROM BitcoinPriceUploaded "
-                "ORDER BY Date DESC LIMIT 50"
-            )
-        ).fetchall()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT Date FROM BitcoinPriceUploaded "
+                    "ORDER BY Date DESC LIMIT 50"
+                )
+            ).fetchall()
 
         uploaded = [str(row[0]) for row in rows]
         return {"uploaded": uploaded}
@@ -3817,15 +3888,13 @@ def list_uploaded_currency_price():
         dict: 包含 uploaded 欄位的已上傳日期清單（最近 50 筆）。
     """
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-
-        rows = conn.execute(
-            text(
-                "SELECT Date FROM CurrencyPriceUploaded "
-                "ORDER BY Date DESC LIMIT 50"
-            )
-        ).fetchall()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT Date FROM CurrencyPriceUploaded "
+                    "ORDER BY Date DESC LIMIT 50"
+                )
+            ).fetchall()
 
         uploaded = [str(row[0]) for row in rows]
         return {"uploaded": uploaded}
@@ -3944,15 +4013,13 @@ def list_uploaded_indices_price():
         dict: 包含 uploaded 欄位的已上傳日期清單（最近 50 筆）。
     """
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "SPECIAL_INFO").mysql_conn
-
-        rows = conn.execute(
-            text(
-                "SELECT Date FROM IndicesPriceUploaded "
-                "ORDER BY Date DESC LIMIT 50"
-            )
-        ).fetchall()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT Date FROM IndicesPriceUploaded "
+                    "ORDER BY Date DESC LIMIT 50"
+                )
+            ).fetchall()
 
         uploaded = [str(row[0]) for row in rows]
         return {"uploaded": uploaded}
@@ -4159,15 +4226,13 @@ def get_company_info_status():
         dict: 包含 company_info_count 和 industry_map_count。
     """
     try:
-        conn = MySQLRouter(HOST, USER, PASSWORD, "TWSE").mysql_conn
-
-        company_count = conn.execute(
-            text("SELECT COUNT(*) FROM CompanyInfo")
-        ).scalar()
-        industry_count = conn.execute(
-            text("SELECT COUNT(*) FROM IndustryMap")
-        ).scalar()
-        conn.close()
+        with db_conn(HOST, USER, PASSWORD, "TWSE") as conn:
+            company_count = conn.execute(
+                text("SELECT COUNT(*) FROM CompanyInfo")
+            ).scalar()
+            industry_count = conn.execute(
+                text("SELECT COUNT(*) FROM IndustryMap")
+            ).scalar()
 
         return {
             "company_info_count": company_count,

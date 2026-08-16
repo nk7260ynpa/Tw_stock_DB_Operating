@@ -62,7 +62,7 @@ class TestIndicesPriceAPI(unittest.TestCase):
 
         self.assertEqual(res.status_code, 400)
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_list_uploaded_indices_price(self, mock_router_cls):
         """測試列出已上傳的股市指數價格日期。"""
         mock_conn = MagicMock()
@@ -81,7 +81,7 @@ class TestIndicesPriceAPI(unittest.TestCase):
         self.assertEqual(len(data["uploaded"]), 2)
         self.assertEqual(data["uploaded"][0], "2026-03-19")
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_list_uploaded_indices_price_empty(self, mock_router_cls):
         """測試無已上傳記錄時回傳空清單。"""
         mock_conn = MagicMock()
@@ -94,7 +94,7 @@ class TestIndicesPriceAPI(unittest.TestCase):
         data = res.json()
         self.assertEqual(data["uploaded"], [])
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_list_uploaded_indices_price_db_error(self, mock_router_cls):
         """測試資料庫連線失敗時回傳空清單。"""
         mock_router_cls.side_effect = Exception("連線失敗")

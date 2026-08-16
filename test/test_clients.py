@@ -3,6 +3,8 @@
 import unittest
 from unittest.mock import patch, MagicMock
 
+from sqlalchemy.pool import NullPool
+
 from clients import mysql_conn, mysql_conn_db
 
 
@@ -20,7 +22,7 @@ class TestMysqlConn(unittest.TestCase):
         result = mysql_conn("localhost:3306", "root", "password")
 
         mock_create_engine.assert_called_once_with(
-            "mysql+pymysql://root:password@localhost:3306"
+            "mysql+pymysql://root:password@localhost:3306", poolclass=NullPool
         )
         mock_engine.connect.assert_called_once()
         self.assertEqual(result, mock_conn)
@@ -36,7 +38,7 @@ class TestMysqlConn(unittest.TestCase):
         result = mysql_conn("192.168.1.100:3307", "admin", "secret")
 
         mock_create_engine.assert_called_once_with(
-            "mysql+pymysql://admin:secret@192.168.1.100:3307"
+            "mysql+pymysql://admin:secret@192.168.1.100:3307", poolclass=NullPool
         )
         self.assertEqual(result, mock_conn)
 
@@ -55,7 +57,7 @@ class TestMysqlConnDb(unittest.TestCase):
         result = mysql_conn_db("localhost:3306", "root", "password", "TWSE")
 
         mock_create_engine.assert_called_once_with(
-            "mysql+pymysql://root:password@localhost:3306/TWSE"
+            "mysql+pymysql://root:password@localhost:3306/TWSE", poolclass=NullPool
         )
         mock_engine.connect.assert_called_once()
         self.assertEqual(result, mock_conn)
@@ -71,7 +73,7 @@ class TestMysqlConnDb(unittest.TestCase):
         result = mysql_conn_db("localhost:3306", "root", "stock", "TPEX")
 
         mock_create_engine.assert_called_once_with(
-            "mysql+pymysql://root:stock@localhost:3306/TPEX"
+            "mysql+pymysql://root:stock@localhost:3306/TPEX", poolclass=NullPool
         )
         self.assertEqual(result, mock_conn)
 

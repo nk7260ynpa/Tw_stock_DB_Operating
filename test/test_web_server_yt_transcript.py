@@ -82,7 +82,7 @@ class TestYTTranscriptAPI(unittest.TestCase):
         self.assertEqual(job["type"], "yt_transcript")
         self.assertEqual(job["date"], "2026-03-11")
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_list_uploaded_success(self, mock_router_cls):
         """測試列出已上傳的 YT 逐字稿日期。"""
         mock_conn = MagicMock()
@@ -100,7 +100,7 @@ class TestYTTranscriptAPI(unittest.TestCase):
         data = res.json()
         self.assertEqual(len(data["uploaded"]), 2)
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_list_uploaded_db_error(self, mock_router_cls):
         """測試資料庫連線失敗時回傳空清單。"""
         mock_router_cls.side_effect = Exception("連線失敗")
@@ -142,7 +142,7 @@ class TestYTTranscriptAPI(unittest.TestCase):
 
         self.assertEqual(res.status_code, 400)
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_get_status_exists(self, mock_router_cls):
         """測試查詢存在的 YT 逐字稿狀態。"""
         mock_conn = MagicMock()
@@ -170,7 +170,7 @@ class TestYTTranscriptAPI(unittest.TestCase):
         self.assertEqual(data["status"], "success")
         self.assertEqual(data["title"], "測試標題")
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_get_status_not_found(self, mock_router_cls):
         """測試查詢不存在的 YT 逐字稿狀態。"""
         mock_conn = MagicMock()

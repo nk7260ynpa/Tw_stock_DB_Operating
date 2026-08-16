@@ -1,5 +1,7 @@
 """MySQL 連線路由模組。"""
 
+from contextlib import contextmanager
+
 from clients import mysql_conn, mysql_conn_db
 
 
@@ -49,3 +51,32 @@ class MySQLRouter:
             >>> conn.close()
         """
         return self.conn
+
+
+@contextmanager
+def db_conn(host, user, password, db_name=None):
+    """以 context manager 取得 MySQL 連線，離開時保證關閉。
+
+    這是本專案取得連線的**唯一**建議方式。直接呼叫 `MySQLRouter(...).mysql_conn`
+    的寫法只在成功路徑執行 `conn.close()`，任何例外（爬蟲失敗、SQL 錯誤、
+    KeyError 等）都會讓連線一路洩漏到垃圾回收為止；重試佇列一輪可能執行數十個
+    任務，累積下來足以耗盡 MySQL 的 `max_connections`。
+
+    Args:
+        host (str): MySQL 主機位址。
+        user (str): MySQL 使用者名稱。
+        password (str): MySQL 密碼。
+        db_name (str | None): 資料庫名稱，預設為 None（不指定資料庫）。
+
+    Yields:
+        sqlalchemy.engine.Connection: MySQL 連線物件。
+
+    Example:
+        >>> with db_conn(HOST, USER, PASSWORD, "TWSE") as conn:
+        ...     conn.execute(text("SELECT 1"))
+    """
+    conn = MySQLRouter(host, user, password, db_name).mysql_conn
+    try:
+        yield conn
+    finally:
+        conn.close()

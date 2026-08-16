@@ -93,7 +93,7 @@ class TestQuarterRevenueAPI(unittest.TestCase):
         self.assertEqual(data["status"], "queued")
         self.assertIn("queue_position", data)
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_list_uploaded_quarters(self, mock_router_cls):
         """測試列出已上傳的季度記錄。"""
         mock_conn = MagicMock()
@@ -112,7 +112,7 @@ class TestQuarterRevenueAPI(unittest.TestCase):
         self.assertEqual(data["uploaded"][0]["year"], 113)
         self.assertEqual(data["uploaded"][0]["quarter"], "1")
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_list_uploaded_quarters_empty(self, mock_router_cls):
         """測試無已上傳記錄時回傳空清單。"""
         mock_conn = MagicMock()
@@ -125,7 +125,7 @@ class TestQuarterRevenueAPI(unittest.TestCase):
         data = res.json()
         self.assertEqual(data["uploaded"], [])
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_list_uploaded_quarters_db_error(self, mock_router_cls):
         """測試資料庫連線失敗時回傳空清單。"""
         mock_router_cls.side_effect = Exception("連線失敗")

@@ -11,7 +11,7 @@ from sqlalchemy import text
 import schedule
 
 import upload
-from routers import MySQLRouter
+from routers import db_conn
 from data_upload.base import NetworkError, SourceError
 
 # 設定 logging，輸出至 logs/ 資料夾
@@ -110,20 +110,19 @@ def get_missing_dates(db_name, days=30):
     """
     actual_db = DB_MAPPING.get(db_name, db_name)
     upload_date_table = UPLOAD_DATE_TABLE.get(db_name, "UploadDate")
-    conn = MySQLRouter(HOST, USER, PASSWORD, actual_db).mysql_conn
 
     date_list = [
         (datetime.datetime.now() - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
         for i in range(days)
     ]
 
-    uploaded_dates = conn.execute(
-        text(
-            f"SELECT Date FROM {upload_date_table} "
-            f"WHERE Date >= '{date_list[-1]}'"
-        )
-    ).fetchall()
-    conn.close()
+    with db_conn(HOST, USER, PASSWORD, actual_db) as conn:
+        uploaded_dates = conn.execute(
+            text(
+                f"SELECT Date FROM {upload_date_table} "
+                f"WHERE Date >= '{date_list[-1]}'"
+            )
+        ).fetchall()
 
     uploaded_set = {row[0].strftime("%Y-%m-%d") for row in uploaded_dates}
     missing_dates = [d for d in date_list if d not in uploaded_set]
@@ -199,13 +198,12 @@ def clear_price_orphans(
         today = datetime.datetime.now().date()
 
     start = today - datetime.timedelta(days=days - 1)
-    conn = MySQLRouter(
+    with db_conn(
         host if host is not None else HOST,
         user if user is not None else USER,
         password if password is not None else PASSWORD,
         actual_db,
-    ).mysql_conn
-    try:
+    ) as conn:
         rows = conn.execute(
             text(
                 f"SELECT Date FROM {upload_date_table} "
@@ -234,8 +232,6 @@ def clear_price_orphans(
             )
         if orphans:
             conn.commit()
-    finally:
-        conn.close()
 
     return orphans
 

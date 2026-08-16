@@ -194,7 +194,7 @@ class TestRunBackfill(unittest.TestCase):
 class TestClassifyDates(unittest.TestCase):
     """測試 _classify_dates 函式。"""
 
-    @patch("backfill_price.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_classifies_filled_and_non_trading(self, mock_router_cls):
         """測試依帳本 Open 值分類為已補回／仍非交易日。"""
         import backfill_price
@@ -213,7 +213,7 @@ class TestClassifyDates(unittest.TestCase):
         self.assertEqual(unrestored, [])
         mock_conn.close.assert_called_once()
 
-    @patch("backfill_price.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_missing_ledger_row_counts_as_unrestored(self, mock_router_cls):
         """測試帳本查無該日（重抓失敗未回填）歸類為未回填而非非交易日。
 
@@ -235,7 +235,7 @@ class TestClassifyDates(unittest.TestCase):
         self.assertEqual(non_trading, 0)
         self.assertEqual(unrestored, ["2026-01-06"])
 
-    @patch("backfill_price.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_empty_dates_no_connection(self, mock_router_cls):
         """測試無日期時直接回傳 (0, 0, []) 且不建立連線。"""
         import backfill_price

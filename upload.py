@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timedelta
 
 import data_upload
-from routers import MySQLRouter
+from routers import db_conn
 
 # MGTS、FAOI 已合併至 TWSE 資料庫，連線時需對應至 TWSE
 DB_MAPPING = {
@@ -58,13 +58,14 @@ def day_upload(date, opt):
         f"連線至 MySQL 資料庫 {actual_db}，主機 {HOST}，使用者 {USER}"
         f"（資料來源：{DBNAME}）"
     )
-    conn = MySQLRouter(HOST, USER, PASSWORD, actual_db).mysql_conn
     package_name = DBNAME.lower()
 
     logger.info(f"上傳資料：模組 {package_name}，日期 {date}")
-    uploader = data_upload.__dict__[package_name].Uploader(conn, CRAWLERHOST)
-    uploader.upload(date)
-    conn.close()
+    with db_conn(HOST, USER, PASSWORD, actual_db) as conn:
+        uploader = data_upload.__dict__[package_name].Uploader(
+            conn, CRAWLERHOST
+        )
+        uploader.upload(date)
 
     logger.info("資料上傳完成。")
 

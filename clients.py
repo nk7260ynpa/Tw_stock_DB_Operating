@@ -1,6 +1,14 @@
-"""MySQL 連線函式模組。"""
+"""MySQL 連線函式模組。
+
+本模組每次呼叫都會建立**全新的 Engine**，該 Engine 用完即棄、不會被重複使用，
+故一律指定 `NullPool`：預設的 `QueuePool` 會在 `conn.close()` 後把實體連線留在
+池中「備用」，但這個池永遠不會有第二個使用者，等於每呼叫一次就長期佔住一條
+MySQL 連線，直到 Engine 被垃圾回收才釋放。改用 `NullPool` 後 `conn.close()`
+即真正關閉實體連線。
+"""
 
 from sqlalchemy import create_engine
+from sqlalchemy.pool import NullPool
 
 
 def mysql_conn(host, user, password):
@@ -20,7 +28,7 @@ def mysql_conn(host, user, password):
         >>> conn.close()
     """
     address = f"mysql+pymysql://{user}:{password}@{host}"
-    engine = create_engine(address)
+    engine = create_engine(address, poolclass=NullPool)
     conn = engine.connect()
     return conn
 
@@ -43,6 +51,6 @@ def mysql_conn_db(host, user, password, db_name):
         >>> conn.close()
     """
     address = f"mysql+pymysql://{user}:{password}@{host}/{db_name}"
-    engine = create_engine(address)
+    engine = create_engine(address, poolclass=NullPool)
     conn = engine.connect()
     return conn

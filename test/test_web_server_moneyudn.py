@@ -104,7 +104,7 @@ class TestMoneyUDNNewsAPI(unittest.TestCase):
         self.assertEqual(data["status"], "queued")
         self.assertIn("queue_position", data)
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_list_uploaded(self, mock_router_cls):
         """測試列出已上傳的 MoneyUDN 新聞日期。"""
         mock_conn = MagicMock()
@@ -123,7 +123,7 @@ class TestMoneyUDNNewsAPI(unittest.TestCase):
         self.assertEqual(len(data["uploaded"]), 2)
         self.assertEqual(data["uploaded"][0], "2026-02-28")
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_list_uploaded_empty(self, mock_router_cls):
         """測試無已上傳記錄時回傳空清單。"""
         mock_conn = MagicMock()
@@ -136,7 +136,7 @@ class TestMoneyUDNNewsAPI(unittest.TestCase):
         data = res.json()
         self.assertEqual(data["uploaded"], [])
 
-    @patch("web_server.MySQLRouter")
+    @patch("routers.MySQLRouter")
     def test_list_uploaded_db_error(self, mock_router_cls):
         """測試資料庫連線失敗時回傳空清單。"""
         mock_router_cls.side_effect = Exception("連線失敗")

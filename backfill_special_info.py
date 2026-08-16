@@ -27,7 +27,7 @@ from data_upload.currency_price import CurrencyPriceUploader
 from data_upload.gold_price import GoldPriceUploader
 from data_upload.indices_price import IndicesPriceUploader
 from data_upload.oil_price import OilPriceUploader
-from routers import MySQLRouter
+from routers import db_conn
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,14 +87,11 @@ def run_backfill(days, host, user, password, crawlerhost):
     """
     summaries = []
     for uploader_cls in UPLOADER_CLASSES:
-        conn = MySQLRouter(host, user, password, "SPECIAL_INFO").mysql_conn
-        try:
+        with db_conn(host, user, password, "SPECIAL_INFO") as conn:
             uploader = uploader_cls(conn, crawlerhost)
             # deep=True：先清孤兒帳本再交由爬蟲重驗，救回被誤標的真實交易日。
             summary = uploader.backfill_missing(days=days, deep=True)
             summaries.append(summary)
-        finally:
-            conn.close()
     return summaries
 
 
