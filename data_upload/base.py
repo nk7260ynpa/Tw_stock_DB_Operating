@@ -153,10 +153,13 @@ _UNBOUNDED_LOSS_REASONS = frozenset({
 # 1. **重跑成本高**：retry queue 是同步重跑整個 48 小時窗（CTEE 正常
 #    210~230 秒），且每小時觸發一次。若沿用舊的「1 篇失敗就重抓」，
 #    PTT／MoneyUDN 在新契約下天天都會排重試（舊契約這些情形只回 `ok`）。
-# 2. **detail-only 的損失會自癒**：全文抓失敗的文章被爬蟲**整篇排除**在
-#    `data` 之外（不是留空白內容），因此不會寫進 MySQL；隔天早上的排程
+# 2. **detail-only 的損失多半會自癒**：全文抓失敗的文章被爬蟲**整篇排除**
+#    在 `data` 之外（不是留空白內容），因此不會寫進 MySQL；隔天早上的排程
 #    以 48 小時窗重抓時，這些 URL 仍是「新記錄」而會被正常補上——等於
 #    每篇文章本來就有第二次免費機會，不需付出額外重跑成本。
+#    界線：每日視窗只往前推 48 小時，故「今天視窗中較舊的那 24 小時」不會
+#    被明天的視窗涵蓋，每篇文章總共只有兩次機會。連兩天同一篇都失敗時
+#    才會真的漏掉，而那種系統性失敗即使立刻重抓通常也救不回來。
 # 3. **門檻要抓的是系統性異常**：失敗率高到五分之一，多半代表來源端正在
 #    擋人或全文頁改版，明天大概也修不好，值得立刻再試一次；零星幾篇失敗
 #    交給隔日的自然重抓即可。
@@ -240,7 +243,9 @@ def partial_retry_reason(result):
     判讀順序：
 
     1. `meta.retryable` 存在（爬蟲 v2.14.0 起）→ 以它為**主判準**。
-       爬蟲已彙整過所有成因，`retryable=False` 代表重抓結果不會改變。
+       爬蟲已彙整過所有成因，`retryable=False` 代表重抓結果不會改變
+       （但需有 `non_retryable_reasons`／`source_truncated` 佐證，
+       兩者皆空的退化回應仍保守重抓）。
     2. `retryable=True` 時再以 `retryable_reasons` 決定「值不值得」：
        只有全文抓取失敗（`detail_failed`）時看 `detail_failed_ratio`
        是否達 `DETAIL_FAILED_RETRY_RATIO`；其餘成因一律重抓。
@@ -274,7 +279,20 @@ def _retry_reason_from_contract(meta):
         str | None: 值得重抓時回傳原因說明，否則 None。
     """
     if not meta.get("retryable"):
-        return None
+        # 第二道防線：`retryable=False` 必須有硬限制佐證才採信。
+        #
+        # 爬蟲 `classify_meta` 是以 `retryable = bool(retryable_reasons)`
+        # 推導的，`partial` 必定至少帶一個成因碼，故正常情況不會走到這裡。
+        # 但「不重抓」是本 repo 唯一會把失敗永久遮蔽的方向，若日後爬蟲回了
+        # 退化的 `retryable: false`（兩個成因清單都空），寧可多跑一次也不能
+        # 誤判成「重抓拿不到」。此分支只會把「不重抓」翻成「重抓」，
+        # 不會反向削弱 `retryable` 作為單一判準的地位。
+        blocked = [
+            r for r in (meta.get("non_retryable_reasons") or []) if r
+        ]
+        if blocked or meta.get(_PERMANENT_PARTIAL_META):
+            return None
+        return "爬蟲標記不可重試但未提供硬限制佐證"
 
     reasons = [str(r) for r in (meta.get("retryable_reasons") or []) if r]
     if not reasons:

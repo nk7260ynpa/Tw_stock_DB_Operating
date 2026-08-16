@@ -396,6 +396,11 @@ body {
   color: var(--color-error);
 }
 
+.message-warning {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+
 /* Uploaded grid */
 .uploaded-grid {
   display: flex;

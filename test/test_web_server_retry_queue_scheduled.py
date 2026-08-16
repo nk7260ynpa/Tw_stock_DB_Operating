@@ -208,6 +208,7 @@ class TestManualRetryEndpointSharesGuard(unittest.TestCase):
 
         mock_run.assert_called_once_with()
         self.assertIn("已觸發", response["message"])
+        self.assertTrue(response["started"])
 
     def test_endpoint_reports_skip_when_already_running(self):
         """測試上一輪仍在執行時據實回報略過，而非假稱已觸發。"""
@@ -219,6 +220,8 @@ class TestManualRetryEndpointSharesGuard(unittest.TestCase):
             response = web_server.retry_all_pending()
 
         self.assertIn("略過", response["message"])
+        # 前端據此改用警示樣式；略過不該顯示成綠色成功。
+        self.assertFalse(response["started"])
 
 
 if __name__ == "__main__":

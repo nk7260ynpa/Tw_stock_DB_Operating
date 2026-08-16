@@ -59,7 +59,11 @@ function RetryQueue() {
       const res = await apiFetch('/api/retry-queue/retry-all', { method: 'POST' })
       if (res.ok) {
         const json = await res.json()
-        setActionMsg({ type: 'success', text: json.message })
+        // started 為 false 代表上一輪仍在跑而略過，不可顯示成綠色成功。
+        setActionMsg({
+          type: json.started === false ? 'warning' : 'success',
+          text: json.message,
+        })
         setTimeout(fetchData, 2000)
       }
     } catch {

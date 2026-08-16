@@ -4337,11 +4337,12 @@ def retry_all_pending():
     會產生重複列）。
 
     Returns:
-        dict: 操作結果訊息。
+        dict: 操作結果訊息與 `started`（是否真的啟動了一輪重試）。前端據
+            `started` 區分成功與略過的樣式，避免「略過」被顯示成綠色成功。
     """
     if run_retry_queue_scheduled():
-        return {"message": "已觸發重試所有 pending 任務"}
-    return {"message": "上一輪重試尚未結束，本次略過"}
+        return {"message": "已觸發重試所有 pending 任務", "started": True}
+    return {"message": "上一輪重試尚未結束，本次略過", "started": False}
 
 
 @app.post("/api/retry-queue/reset-exhausted")

@@ -110,6 +110,26 @@ class TestRetryableIsPrimaryCriterion(unittest.TestCase):
         reason = partial_retry_reason(_partial({"retryable": True}))
         self.assertIsNotNone(reason)
 
+    def test_retryable_false_without_evidence_still_retries(self):
+        """測試 `retryable=False` 但無硬限制佐證時仍保守重抓。
+
+        爬蟲現行邏輯（`retryable = bool(retryable_reasons)`）不會產生這種
+        退化回應，但「不重抓」是唯一會把失敗永久遮蔽的方向，缺乏佐證時
+        寧可多跑一次。此防線只把「不重抓」翻成「重抓」，不會反向削弱
+        `retryable` 的單一判準地位。
+        """
+        metas = {
+            "兩個成因清單皆空": {"retryable": False},
+            "只有空清單": {
+                "retryable": False,
+                "retryable_reasons": [],
+                "non_retryable_reasons": [],
+            },
+        }
+        for label, meta in metas.items():
+            with self.subTest(meta=label):
+                self.assertIsNotNone(partial_retry_reason(_partial(meta)))
+
     def test_unknown_reason_code_still_retries(self):
         """測試遇到未知成因代碼（爬蟲日後新增）時保守重抓。
 
@@ -575,6 +595,67 @@ class TestPartialDoesNotShortCircuitDataHandling(unittest.TestCase):
         self.assertEqual(len(passed_df), 1)
         # 去重後全數已存在 → 什麼都沒寫，帳本也不可寫。
         mock_ledger.assert_not_called()
+
+
+class TestSkipNoteReachesWarningLog(unittest.TestCase):
+    """測試「不重抓」的理由確實寫進 warning log（守住接線）。
+
+    `partial_skip_note()` 本身有單元測試，但四支上傳器把它接到
+    `logger.warning` 的那條線若被改回固定字串，不會有任何測試轉紅。
+    不重抓有兩種成因——「來源硬限制，重抓也拿不到」與「低於門檻，缺的留待
+    隔日補回」——語意天差地遠，log 分不出來就等於排查時被誤導。
+    """
+
+    TRUNCATED_META = {
+        "retryable": False,
+        "non_retryable_reasons": ["source_truncated"],
+        "source_truncated": True,
+    }
+    BELOW_THRESHOLD_META = {
+        "retryable": True,
+        "retryable_reasons": ["detail_failed"],
+        "detail_failed": 1,
+        "detail_total": 100,
+        "detail_failed_ratio": 0.01,
+    }
+
+    def _warning_text(self, cls, target, meta):
+        """跑一次上傳並取回 warning log 全文。
+
+        Args:
+            cls: 上傳器類別。
+            target (str): requests.get 的 patch 目標。
+            meta (dict): 回應的 meta 物件。
+
+        Returns:
+            str: 該模組 logger 輸出的 warning 訊息全文。
+        """
+        uploader = cls(MagicMock(), "crawler:6738")
+        with patch(target) as mock_get:
+            mock_get.return_value = _response(_partial(meta))
+            with patch.object(uploader, "record_uploaded_date"):
+                with self.assertLogs(cls.__module__, level="WARNING") as cm:
+                    uploader.upload_by_hours(48)
+        return "\n".join(cm.output)
+
+    def test_source_truncated_warning_says_hard_limit(self):
+        """測試來源硬限制的告警寫明「重抓也拿不到」。"""
+        for cls, target in UPLOADERS:
+            with self.subTest(uploader=cls.__name__):
+                text = self._warning_text(cls, target, self.TRUNCATED_META)
+                self.assertIn("來源硬限制", text)
+                self.assertIn("source_truncated", text)
+
+    def test_below_threshold_warning_says_threshold(self):
+        """測試低於門檻的告警寫明失敗率與門檻，而非硬限制。"""
+        for cls, target in UPLOADERS:
+            with self.subTest(uploader=cls.__name__):
+                text = self._warning_text(
+                    cls, target, self.BELOW_THRESHOLD_META,
+                )
+                self.assertIn("低於門檻", text)
+                self.assertIn(str(DETAIL_FAILED_RETRY_RATIO), text)
+                self.assertNotIn("來源硬限制", text)
 
 
 if __name__ == "__main__":
