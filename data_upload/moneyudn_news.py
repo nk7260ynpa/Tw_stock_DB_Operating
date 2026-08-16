@@ -89,6 +89,9 @@ class MoneyUDNNewsUploader:
         Returns:
             pd.DataFrame: 新聞資料 DataFrame，爬取失敗時回傳空 DataFrame。
         """
+        # 重置狀態，避免範圍模式共用實例時殘留上一次的結果。
+        self._last_status = None
+        self._last_partial_reason = None
         url = f"http://{self.crawler_host}/moneyudn_news"
         try:
             resp = requests.get(url, params={"date": date}, timeout=600)
@@ -130,6 +133,9 @@ class MoneyUDNNewsUploader:
         Returns:
             pd.DataFrame: 新聞資料 DataFrame，爬取失敗時回傳空 DataFrame。
         """
+        # 重置狀態，避免範圍模式共用實例時殘留上一次的結果。
+        self._last_status = None
+        self._last_partial_reason = None
         url = f"http://{self.crawler_host}/moneyudn_news"
         try:
             resp = requests.get(
@@ -478,6 +484,11 @@ class MoneyUDNNewsUploader:
 
         Returns:
             dict: 包含 date、record_count、file_count 的結果字典。
+
+        Raises:
+            NetworkError: 爬取失敗或結果不完整且重抓有機會補齊時拋出
+                （可重試，資料已取得的部分先落地）。
+            OutOfRangeError: 日期超出來源可回溯範圍時拋出（不可重試）。
         """
         raw_df = self.crawl_data(date)
 
@@ -526,6 +537,11 @@ class MoneyUDNNewsUploader:
 
         Returns:
             dict: 包含 hours、record_count、file_count、dates 的結果字典。
+
+        Raises:
+            NetworkError: 爬取失敗或結果不完整且重抓有機會補齊時拋出
+                （可重試，資料已取得的部分先落地）。
+            OutOfRangeError: 區間超出來源可回溯範圍時拋出（不可重試）。
         """
         raw_df = self.crawl_data_by_hours(hours)
 

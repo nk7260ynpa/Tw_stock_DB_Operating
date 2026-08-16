@@ -186,9 +186,36 @@ class TestPartialRetryReason(unittest.TestCase):
         )
         self.assertIsNone(reason)
 
-    def test_no_meta_is_not_retryable(self):
-        """測試無 meta 時判為重抓無用。"""
-        self.assertIsNone(partial_retry_reason({"status": "partial"}))
+    def test_no_meta_defaults_to_retryable(self):
+        """測試無 meta 時預設判為值得重抓（保守策略）。
+
+        各爬蟲對 partial 的 meta 標註並不一致（如 CNYES 的「翻頁中途
+        失敗」只帶 fetched／pages），若無 meta 就判定重抓無用，會把
+        暫時性失敗誤判成永久缺漏而漏抓。
+        """
+        self.assertIsNotNone(partial_retry_reason({"status": "partial"}))
+
+    def test_message_used_as_reason_when_meta_absent(self):
+        """測試無 meta 時以 message 作為重抓原因說明。"""
+        reason = partial_retry_reason(
+            {"status": "partial", "message": "翻頁中途失敗"}
+        )
+        self.assertIn("翻頁中途失敗", reason)
+
+    def test_cnyes_style_partial_is_retryable(self):
+        """測試 CNYES 式 partial（只帶 fetched／pages）判為值得重抓。
+
+        對應 tw_crawler/cnyes_news.py 的 status_meta，其「翻頁中途失敗」
+        為明確的暫時性錯誤，卻無專屬 meta 標記。
+        """
+        reason = partial_retry_reason(
+            {
+                "status": "partial",
+                "message": "CNYES 抓取可能不完整：翻頁中途失敗",
+                "meta": {"fetched": 12, "pages": 3},
+            }
+        )
+        self.assertIsNotNone(reason)
 
     def test_mixed_meta_is_retryable(self):
         """測試同時有硬上限與暫時性失敗時仍判為值得重抓。"""
@@ -309,13 +336,14 @@ class TestUploadNeverMarksLedgerOnFailure(unittest.TestCase):
         Returns:
             list[str]: 對 UploadDate 做 INSERT／UPDATE／DELETE 的 SQL 清單。
         """
+        write_verbs = ("INSERT", "UPDATE", "DELETE")
         return [
             sql
             for call in self.mock_conn.execute.call_args_list
             if call.args
             for sql in [str(call.args[0])]
             if "UploadDate" in sql
-            and any(verb in sql.upper() for verb in ("INSERT", "UPDATE", "DELETE"))
+            and any(verb in sql.upper() for verb in write_verbs)
         ]
 
     @patch("data_upload.base.requests.get")

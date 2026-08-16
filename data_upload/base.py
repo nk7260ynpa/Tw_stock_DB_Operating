@@ -82,9 +82,11 @@ STATUS_ERROR = "error"
 # 代表「抓取成功」、可直接依 data 筆數繼續處理的狀態。
 _PASSTHROUGH_STATUSES = frozenset({STATUS_OK, STATUS_EMPTY})
 
-# `partial` 時代表「重試有機會補齊」的 meta 標記；只有來源硬上限
-# （source_truncated）造成的不完整重試也沒用，不應進 retry queue。
+# `partial` 時明確代表「重試有機會補齊」的 meta 標記。
 _TRANSIENT_PARTIAL_META = ("detail_failed", "skipped_by_deadline")
+
+# `partial` 時明確代表「重試也拿不到」的 meta 標記（來源硬上限）。
+_PERMANENT_PARTIAL_META = "source_truncated"
 
 
 def check_crawl_status(result, source, context="", allow_partial=False):
@@ -156,26 +158,38 @@ def check_crawl_status(result, source, context="", allow_partial=False):
 def partial_retry_reason(result):
     """判斷 `partial` 回應是否值得重抓，回傳原因說明。
 
-    只有「來源硬上限」造成的不完整重試也沒用（來源就是不再提供），
-    其餘（部分全文抓取失敗、因逾時提前收工）重抓有機會補齊。
+    採**預設重抓**的保守策略：唯有 meta 明確指出不完整**只**源自來源硬
+    上限（`source_truncated`）時，才判定重抓無用。
+
+    刻意不採白名單（只認 `detail_failed`／`skipped_by_deadline` 才重抓）：
+    各爬蟲對 `partial` 的 meta 標註並不一致——例如 CNYES 的「翻頁中途失敗」
+    這種明確的暫時性錯誤只帶 `fetched`／`pages`，CTEE 的「列表抓取部分失敗」
+    亦無對應 meta key。白名單會把這些**該重試**的情形誤判成「重試無用」而
+    永久漏抓，與 `check_crawl_status` 對未知狀態的保守原則自相矛盾。
+    多重試的代價有上限（`max_retries` 與每日重排次數皆有限）且新聞以 URL
+    去重、重抓為冪等，遠低於漏抓的代價（新聞回溯窗有限，錯過即永久遺失）。
 
     Args:
         result (dict): 爬蟲回應的 JSON 物件。
 
     Returns:
-        str | None: 值得重抓時回傳原因說明，否則回傳 None。
+        str | None: 值得重抓時回傳原因說明，重抓無用時回傳 None。
     """
     if not isinstance(result, dict):
-        return None
+        return "未提供狀態細節"
+
     meta = result.get("meta") or {}
-    reasons = [
+    transient = [
         f"{key}={meta[key]}"
         for key in _TRANSIENT_PARTIAL_META
         if meta.get(key)
     ]
-    if not reasons:
+    if transient:
+        # 即使同時有來源硬上限，暫時性失敗仍值得重抓補齊。
+        return "、".join(transient)
+    if meta.get(_PERMANENT_PARTIAL_META):
         return None
-    return "、".join(reasons)
+    return result.get("message") or "爬蟲未說明不完整的原因"
 
 
 class DataUploadBase(ABC):

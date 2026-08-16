@@ -214,5 +214,77 @@ class TestNewsUploadPersistsBeforeRetry(unittest.TestCase):
                         mock_upload.assert_called_once()
 
 
+class TestNewsPartialOnEarlyReturnPaths(unittest.TestCase):
+    """測試 partial 於各提前返回路徑仍會排入重試（易漏的分支）。"""
+
+    def test_all_records_already_exist_still_raises(self):
+        """測試「記錄皆已存在」早退路徑仍拋 NetworkError。
+
+        時數模式重跑與 retry 時最常走到這個分支：若此處漏掉檢查，
+        不完整的抓取會被當成「已全部上傳」而永遠補不齊。
+        """
+        for cls, target in UPLOADERS:
+            with self.subTest(uploader=cls.__name__):
+                uploader = cls(MagicMock(), "crawler:6738")
+                with patch(target) as mock_get:
+                    mock_get.return_value = _response(
+                        {"date": "2026-08-16", "status": "partial",
+                         "data": [{"url": "u1", "Date": "2026-08-16"}],
+                         "meta": {"detail_failed": 1}}
+                    )
+                    with patch.object(
+                        uploader, "filter_new_records",
+                        return_value=pd.DataFrame(),
+                    ):
+                        with self.assertRaises(NetworkError):
+                            uploader.upload("2026-08-16")
+
+    def test_empty_partial_result_still_raises(self):
+        """測試「爬取 0 筆但不完整」早退路徑仍拋 NetworkError。"""
+        for cls, target in UPLOADERS:
+            with self.subTest(uploader=cls.__name__):
+                uploader = cls(MagicMock(), "crawler:6738")
+                with patch(target) as mock_get:
+                    mock_get.return_value = _response(
+                        {"hours": 48, "status": "partial", "data": [],
+                         "meta": {"skipped_by_deadline": 3}}
+                    )
+                    with self.assertRaises(NetworkError):
+                        uploader.upload_by_hours(48)
+
+    def test_source_truncated_empty_does_not_raise(self):
+        """測試來源硬上限造成的 0 筆不完整不重試（重抓也拿不到）。"""
+        for cls, target in UPLOADERS:
+            with self.subTest(uploader=cls.__name__):
+                uploader = cls(MagicMock(), "crawler:6738")
+                with patch(target) as mock_get:
+                    mock_get.return_value = _response(
+                        {"hours": 48, "status": "partial", "data": [],
+                         "meta": {"source_truncated": True}}
+                    )
+                    result = uploader.upload_by_hours(48)
+                    self.assertEqual(result["record_count"], 0)
+
+    def test_state_reset_between_dates(self):
+        """測試範圍模式共用實例時，狀態不會殘留到下一個日期。"""
+        for cls, target in UPLOADERS:
+            with self.subTest(uploader=cls.__name__):
+                uploader = cls(MagicMock(), "crawler:6738")
+                with patch(target) as mock_get:
+                    mock_get.return_value = _response(
+                        {"date": "2026-08-15", "status": "partial",
+                         "data": [], "meta": {"detail_failed": 1}}
+                    )
+                    with self.assertRaises(NetworkError):
+                        uploader.upload("2026-08-15")
+
+                    # 次日抓取正常，不應被前一日的 partial 狀態污染。
+                    mock_get.return_value = _response(
+                        {"date": "2026-08-16", "status": "empty", "data": []}
+                    )
+                    result = uploader.upload("2026-08-16")
+                    self.assertEqual(result["record_count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
