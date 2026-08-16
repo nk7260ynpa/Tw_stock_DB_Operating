@@ -264,7 +264,7 @@ class TestCrawDataStatusContract(unittest.TestCase):
         self.assertTrue(df.empty)
 
     @patch("data_upload.base.requests.get")
-    def test_partial_raises_network_error(self, mock_get):
+    def test_partial_raises_source_error(self, mock_get):
         """測試 status=partial 時拋出 SourceError 且不回傳部分資料。
 
         `DailyPrice` 為 append 寫入且無去重，存入部分資料會在重抓時
