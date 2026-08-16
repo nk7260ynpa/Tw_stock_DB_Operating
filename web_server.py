@@ -31,6 +31,7 @@ from data_upload.base import (
     CrawlError,
     NetworkError,
     OutOfRangeError,
+    SourceError,
 )
 from data_upload.quarter_revenue import QuarterRevenueUploader
 from data_upload.tdcc import TDCCUploader
@@ -486,8 +487,9 @@ def process_retry_queue():
     """處理重試佇列中的 pending 任務。
 
     檢查網路連通後，逐一執行 pending 任務。
-    成功則標為 success，NetworkError 則 retry_count+1 並中斷，
-    非網路錯誤或超過重試上限則標為 exhausted。
+    成功則標為 success；`SourceError`（爬蟲可達、來源端抓取失敗）維持
+    pending 並**續處理其餘任務**；`NetworkError`（爬蟲不可達）則維持
+    pending 並中斷本輪；非網路錯誤或超過重試上限則標為 exhausted。
     """
     global retry_queue
     if retry_queue is None:
@@ -522,6 +524,17 @@ def process_retry_queue():
             _execute_retry_task(task)
             retry_queue.update_status(task.task_id, "success")
             logger.info("重試任務 %s 成功。", task.task_id)
+        except SourceError as e:
+            # 爬蟲仍可達，只是這筆任務在來源端抓取失敗：維持 pending 待下輪
+            # 重試，但**不可中斷整個佇列**，否則單一「毒任務」會癱瘓其後所有
+            # 待重試任務（達 max_retries 後才會由迴圈開頭標為 exhausted）。
+            logger.warning(
+                "重試任務 %s 來源端抓取失敗：%s，續處理其餘任務。",
+                task.task_id, e,
+            )
+            retry_queue.update_status(
+                task.task_id, "pending", str(e)
+            )
         except NetworkError as e:
             logger.warning(
                 "重試任務 %s 仍然網路失敗：%s，中斷本輪重試。",

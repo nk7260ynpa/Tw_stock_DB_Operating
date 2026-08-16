@@ -265,6 +265,63 @@ class TestNewsPartialOnEarlyReturnPaths(unittest.TestCase):
                     result = uploader.upload_by_hours(48)
                     self.assertEqual(result["record_count"], 0)
 
+    def test_success_path_still_raises(self):
+        """測試日期模式「成功寫入」路徑仍拋 NetworkError。
+
+        資料已落地不代表抓齊了；若此處漏掉檢查，缺的那幾篇不會被重抓。
+        """
+        for cls, target in UPLOADERS:
+            with self.subTest(uploader=cls.__name__):
+                uploader = cls(MagicMock(), "crawler:6738")
+                records = [{
+                    "Date": "2026-08-16", "Time": "10:00:00",
+                    "Author": "記者", "Head": "標題", "SubHead": "副標",
+                    "HashTag": "tag", "url": "https://example.com/1",
+                    "Content": "內文", "Board": "Stock", "PushCount": 1,
+                }]
+                with patch(target) as mock_get:
+                    mock_get.return_value = _response(
+                        {"date": "2026-08-16", "status": "partial",
+                         "data": records, "meta": {"detail_failed": 1}}
+                    )
+                    with patch.object(
+                        uploader, "filter_new_records",
+                        side_effect=lambda df, d: df,
+                    ), patch.object(
+                        uploader, "upload_metadata", return_value=1,
+                    ) as mock_upload, patch.object(
+                        uploader, "save_contents", return_value=1,
+                    ), patch.object(
+                        uploader, "record_uploaded_date",
+                    ):
+                        with self.assertRaises(NetworkError):
+                            uploader.upload("2026-08-16")
+                        # 關鍵：例外必須發生在資料寫入「之後」。
+                        mock_upload.assert_called_once()
+
+    def test_state_reset_between_hours_runs(self):
+        """測試時數模式共用實例時，狀態不會殘留到下一輪。
+
+        每日排程走的正是時數模式，且 retry 會重跑同一個實例。
+        """
+        for cls, target in UPLOADERS:
+            with self.subTest(uploader=cls.__name__):
+                uploader = cls(MagicMock(), "crawler:6738")
+                with patch(target) as mock_get:
+                    mock_get.return_value = _response(
+                        {"hours": 48, "status": "partial", "data": [],
+                         "meta": {"detail_failed": 1}}
+                    )
+                    with self.assertRaises(NetworkError):
+                        uploader.upload_by_hours(48)
+
+                    # 下一輪抓取正常，不應被前一輪的 partial 狀態污染。
+                    mock_get.return_value = _response(
+                        {"hours": 48, "status": "empty", "data": []}
+                    )
+                    result = uploader.upload_by_hours(48)
+                    self.assertEqual(result["record_count"], 0)
+
     def test_state_reset_between_dates(self):
         """測試範圍模式共用實例時，狀態不會殘留到下一個日期。"""
         for cls, target in UPLOADERS:

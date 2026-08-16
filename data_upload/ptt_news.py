@@ -17,6 +17,7 @@ from sqlalchemy import text
 from data_upload.base import (
     NetworkError,
     STATUS_PARTIAL,
+    SourceError,
     check_crawl_status,
     partial_retry_reason,
 )
@@ -173,7 +174,7 @@ class PTTNewsUploader:
 
         `partial` 代表抓到的資料不完整。此時已抓到的部分一律先寫入（新聞以
         URL 去重，重抓為冪等，不會重複），再依 meta 判斷重抓是否有意義：
-        部分全文抓取失敗或因逾時提前收工 → 重抓可補齊，拋 `NetworkError`
+        部分全文抓取失敗或因逾時提前收工 → 重抓可補齊，拋 `SourceError`
         排入 retry queue；來源硬上限（`source_truncated`）→ 重抓也拿不到，
         僅記錄警告，避免無謂的重試循環。
 
@@ -181,7 +182,8 @@ class PTTNewsUploader:
             context (str): 情境說明，如「（2026-08-16）」。
 
         Raises:
-            NetworkError: 不完整且重抓有機會補齊時拋出。
+            SourceError: 不完整且重抓有機會補齊時拋出（爬蟲仍可達，
+                呼叫端應僅跳過該筆、繼續處理後續日期）。
         """
         if self._last_status != STATUS_PARTIAL:
             return
@@ -192,7 +194,7 @@ class PTTNewsUploader:
                 SOURCE_LABEL, context,
             )
             return
-        raise NetworkError(
+        raise SourceError(
             f"{SOURCE_LABEL}{context} 抓取不完整（{reason}），"
             "已存入取得的部分，排入重試以補齊剩餘資料"
         )
@@ -352,7 +354,7 @@ class PTTNewsUploader:
             dict: 包含 date、record_count、file_count 的結果字典。
 
         Raises:
-            NetworkError: 爬取失敗或結果不完整且重抓有機會補齊時拋出
+            SourceError: 爬取失敗或結果不完整且重抓有機會補齊時拋出
                 （可重試，資料已取得的部分先落地）。
             OutOfRangeError: 日期超出來源可回溯範圍時拋出（不可重試）。
         """
@@ -405,7 +407,7 @@ class PTTNewsUploader:
             dict: 包含 hours、record_count、file_count、dates 的結果字典。
 
         Raises:
-            NetworkError: 爬取失敗或結果不完整且重抓有機會補齊時拋出
+            SourceError: 爬取失敗或結果不完整且重抓有機會補齊時拋出
                 （可重試，資料已取得的部分先落地）。
             OutOfRangeError: 區間超出來源可回溯範圍時拋出（不可重試）。
         """

@@ -346,13 +346,18 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:latest python -m pytest test/
 |---|---|---|---|
 | `ok` | 正常寫入 | 依資料筆數 | — |
 | `empty` | 該日確實無資料 | `Open=False` | 否 |
-| `partial` | 資料不完整 | **不寫** | 是（`NetworkError`） |
-| `error` | 抓取失敗，0 筆不代表沒有 | **不寫** | 是（`NetworkError`） |
+| `partial` | 資料不完整 | **不寫** | 是（`SourceError`） |
+| `error` | 抓取失敗，0 筆不代表沒有 | **不寫** | 是（`SourceError`） |
 | `out_of_range` | 來源不再提供，重抓無用 | **不寫** | 否（`OutOfRangeError`） |
 
 - `OutOfRangeError` 刻意繼承 `CrawlError` 而非 `NetworkError`，故**不進** retry queue
   （本專案以「是否為 `NetworkError`」作為可重試判準），避免對來源根本拿不到的日期反覆重抓。
 - **未知狀態**保守視為可重試失敗。寧可多重試，也不可把失敗誤記成「當日無資料」。
+- **`SourceError` 與 `NetworkError` 的批次策略相反**：`SourceError`（繼承 `NetworkError`，
+  故仍可重試）代表「爬蟲可達、只有這一筆抓不到」，`daily_craw` 與 `process_retry_queue`
+  **只跳過該筆並繼續**；`NetworkError`（連不上爬蟲）則整批排入重試並**中止本輪**。若兩者
+  不分，`missing_dates` 昇冪排序下最舊的「毒日期」會每天在同一處中斷補抓，其後日期永遠
+  不被嘗試，直到滑出 30 天視窗即永久遺失。
 - **`status` 缺席時放行**，維持既有行為以相容舊版爬蟲。
 - **新聞類的 `partial` 例外**：新聞以 URL 去重、重抓為冪等，故 `partial` 的資料**先落地**
   再依 `meta` 決定是否重試——`detail_failed`／`skipped_by_deadline`（暫時性）排入 retry

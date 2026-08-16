@@ -43,6 +43,22 @@ class NetworkError(CrawlError):
     """
 
 
+class SourceError(NetworkError):
+    """爬蟲可達、但該次抓取於來源端失敗時拋出（可重試）。
+
+    刻意繼承 `NetworkError` 以維持「可重試」語意（仍會進 retry queue），
+    但與傳輸層失敗區分開來，因為兩者該有的**批次策略相反**：
+
+    * `NetworkError`（連不上爬蟲）：其後的日期／任務必然同樣失敗，
+      應整批排入重試並**中止本輪**。
+    * `SourceError`（爬蟲活著、只是這天抓不到）：僅該筆失敗，
+      應**繼續處理後續**日期／任務。
+
+    若不區分，`daily_craw` 會在昇冪排序的缺漏清單第一個「毒日期」上
+    每天重複中斷，其後日期永遠不會被嘗試，直到滑出 30 天視窗即永久遺失。
+    """
+
+
 class OutOfRangeError(CrawlError):
     """查詢日期超出來源可回溯範圍時拋出（重試無用）。
 
@@ -100,7 +116,7 @@ def check_crawl_status(result, source, context="", allow_partial=False):
     |----------------|----------------------------------------|--------|
     | `ok`/`empty`   | 放行，由呼叫端依 data 筆數處理         | —      |
     | `partial`      | 視 `allow_partial` 而定                | 是     |
-    | `error`        | 拋 `NetworkError`（0 筆不代表沒有）    | 是     |
+    | `error`        | 拋 `SourceError`（0 筆不代表沒有）     | 是     |
     | `out_of_range` | 拋 `OutOfRangeError`（重試也沒用）     | 否     |
 
     **相容性**：`status` 缺席時（舊版爬蟲或非制式回應）一律放行，維持既有
@@ -113,15 +129,16 @@ def check_crawl_status(result, source, context="", allow_partial=False):
         context (str): 補充情境，如「（2026-08-16）」。
         allow_partial (bool): 為 True 時 `partial` 不拋例外而回傳狀態值，
             供「資料照存、之後再補」的來源（新聞類）使用；為 False 時
-            `partial` 拋 `NetworkError`（行情類：`DailyPrice` 為 append
+            `partial` 拋 `SourceError`（行情類：`DailyPrice` 為 append
             寫入且無去重，存入部分資料會在重抓時產生重複列）。
 
     Returns:
         str: 判定後的狀態值（`ok`／`empty`／`partial`）。
 
     Raises:
-        NetworkError: `error`、未知狀態，或 `allow_partial` 為 False 的
-            `partial`（皆可重試）。
+        SourceError: `error`、未知狀態，或 `allow_partial` 為 False 的
+            `partial`。皆可重試，但屬來源端失敗（爬蟲仍可達），呼叫端
+            應僅跳過該筆、繼續處理後續日期。
         OutOfRangeError: `out_of_range`（不可重試）。
     """
     if not isinstance(result, dict):
@@ -146,13 +163,13 @@ def check_crawl_status(result, source, context="", allow_partial=False):
     if status == STATUS_PARTIAL:
         if allow_partial:
             return STATUS_PARTIAL
-        raise NetworkError(f"{label} 爬取結果不完整，需重抓：{detail}")
+        raise SourceError(f"{label} 爬取結果不完整，需重抓：{detail}")
 
     if status == STATUS_ERROR:
-        raise NetworkError(f"{label} 爬取失敗，0 筆不代表無資料：{detail}")
+        raise SourceError(f"{label} 爬取失敗，0 筆不代表無資料：{detail}")
 
     # 未知狀態：保守視為可重試失敗，絕不當成「當日無資料」寫入帳本。
-    raise NetworkError(f"{label} 回傳未知狀態 {status!r}：{detail}")
+    raise SourceError(f"{label} 回傳未知狀態 {status!r}：{detail}")
 
 
 def partial_retry_reason(result):
@@ -230,8 +247,9 @@ class DataUploadBase(ABC):
             pd.DataFrame: 包含每日資料的 DataFrame。
 
         Raises:
-            NetworkError: 網路連線失敗、請求逾時，或爬蟲回報
-                `error`／`partial`／未知狀態時拋出（可重試）。
+            NetworkError: 網路連線失敗或請求逾時（爬蟲不可達，可重試）。
+            SourceError: 爬蟲回報 `error`／`partial`／未知狀態
+                （爬蟲可達但該日抓取失敗，可重試）。
             OutOfRangeError: 爬蟲回報 `out_of_range` 時拋出（不可重試）。
             CrawlError: 其他爬取失敗時拋出（不可重試）。
         """
