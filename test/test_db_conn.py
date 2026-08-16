@@ -7,6 +7,7 @@
 
 import ast
 import pathlib
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -16,8 +17,12 @@ from routers import db_conn
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # 允許直接取得連線的檔案：`routers.py` 是唯一的連線取得點，
-# `clients.py` 是它底層的 Engine 建立函式。
-_CONN_OWNER_FILES = {"routers.py", "clients.py"}
+# `clients.py` 是它底層的 Engine 建立函式。以「相對路徑」比對而非檔名，
+# 避免日後出現同名檔（如 `data_upload/clients.py`）被無聲豁免。
+_CONN_OWNER_FILES = {
+    pathlib.PurePath("routers.py"),
+    pathlib.PurePath("clients.py"),
+}
 
 # 掃描範圍：正式程式碼（排除測試、前端與虛擬環境）。
 _SKIP_DIRS = {"test", "frontend", "node_modules", ".git", "static", "logs"}
@@ -31,13 +36,18 @@ def _iter_production_files():
     """
     for path in sorted(REPO_ROOT.rglob("*.py")):
         rel = path.relative_to(REPO_ROOT)
-        if rel.parts[0] in _SKIP_DIRS or rel.name in _CONN_OWNER_FILES:
+        if rel.parts[0] in _SKIP_DIRS or rel in _CONN_OWNER_FILES:
             continue
         yield path
 
 
 def _find_raw_acquisitions(path):
     """找出檔案中未經 `db_conn` 的連線取得點。
+
+    偵測三種樣式：直接取用 `.mysql_conn`、直接呼叫底層的
+    `mysql_conn()`／`mysql_conn_db()`，以及自行建構 `MySQLRouter(...)`
+    ——`MySQLRouter.__init__` 當場就會建立連線，即使不碰 `.mysql_conn`
+    也已經佔著一條連線。
 
     Args:
         path (pathlib.Path): 待檢查的 .py 檔路徑。
@@ -58,6 +68,10 @@ def _find_raw_acquisitions(path):
             )
             if name in ("mysql_conn", "mysql_conn_db"):
                 hits.append(f"{path.name}:{node.lineno} 直接呼叫 {name}()")
+            elif name == "MySQLRouter":
+                hits.append(
+                    f"{path.name}:{node.lineno} 直接建構 MySQLRouter()"
+                )
     return hits
 
 
@@ -143,20 +157,49 @@ class TestNoRawConnectionAcquisition(unittest.TestCase):
         ):
             self.assertIn(expected, names)
 
-    def test_detector_catches_raw_pattern(self):
-        """測試偵測器本身有效：對已知的裸連線樣式必須報違規。"""
-        sample = REPO_ROOT / "test" / "_conn_detector_sample.py"
-        sample.write_text(
-            "from routers import MySQLRouter\n"
-            "def bad():\n"
-            "    conn = MySQLRouter('h', 'u', 'p', 'TWSE').mysql_conn\n"
-            "    conn.close()\n",
-            encoding="utf-8",
-        )
-        try:
-            self.assertTrue(_find_raw_acquisitions(sample))
-        finally:
-            sample.unlink()
+    def test_detector_catches_raw_patterns(self):
+        """測試偵測器本身有效：對已知的裸連線樣式必須報違規。
+
+        樣本寫進暫存目錄而非工作樹，避免測試中斷時留下殘檔。
+        """
+        samples = {
+            "屬性取用": (
+                "from routers import MySQLRouter\n"
+                "def bad(h, u, p):\n"
+                "    conn = MySQLRouter(h, u, p, 'TWSE').mysql_conn\n"
+                "    conn.close()\n"
+            ),
+            "底層函式": (
+                "from clients import mysql_conn_db\n"
+                "def bad(h, u, p):\n"
+                "    return mysql_conn_db(h, u, p, 'NEWS')\n"
+            ),
+            "僅建構 router": (
+                "from routers import MySQLRouter\n"
+                "def bad(h, u, p):\n"
+                "    router = MySQLRouter(h, u, p)\n"
+                "    return router.conn\n"
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            for label, source in samples.items():
+                with self.subTest(sample=label):
+                    sample = pathlib.Path(tmp_dir) / "sample.py"
+                    sample.write_text(source, encoding="utf-8")
+                    self.assertTrue(_find_raw_acquisitions(sample))
+
+    def test_detector_accepts_db_conn_usage(self):
+        """測試合規寫法不會被誤報（避免偵測器過度敏感）。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sample = pathlib.Path(tmp_dir) / "good.py"
+            sample.write_text(
+                "from routers import db_conn\n"
+                "def good(h, u, p):\n"
+                "    with db_conn(h, u, p, 'TWSE') as conn:\n"
+                "        return conn\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(_find_raw_acquisitions(sample), [])
 
 
 if __name__ == "__main__":

@@ -44,11 +44,13 @@ class MySQLRouter:
         Returns:
             sqlalchemy.engine.Connection: MySQL 連線物件。
 
+        Note:
+            正式程式碼請改用 `db_conn` context manager，勿自行取用本屬性後
+            手動 `close()`——例外路徑會漏關而洩漏連線。
+
         Example:
-            >>> router = MySQLRouter(host, user, password, db_name)
-            >>> conn = router.mysql_conn
-            >>> conn.execute("SELECT 1")
-            >>> conn.close()
+            >>> with db_conn(host, user, password, db_name) as conn:
+            ...     conn.execute(text("SELECT 1"))
         """
         return self.conn
 
