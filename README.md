@@ -4,7 +4,9 @@
 
 ## 功能說明
 
-- **DB 存取層**：透過 SQLAlchemy 建立 MySQL 連線（`clients.py`、`routers.py`）
+- **DB 存取層**：透過 SQLAlchemy 建立 MySQL 連線（`clients.py`、`routers.py`）。所有取用點一律經
+  `routers.db_conn` context manager 取得連線，離開區塊（含拋例外）必定關閉；引擎以 `NullPool`
+  建立，不留連線池，避免長期累積閒置連線
 - **DB 上傳層**：爬蟲資料預處理、schema 驗證與批次上傳（`data_upload/`）
 - **批次上傳**：支援日期範圍批次上傳（`upload.py`）
 - **每日排程**：自動檢查過去 30 天，補抓缺漏資料（`DailyUpload.py`）
@@ -22,6 +24,10 @@
 - **匯率**：從爬蟲取得匯率資料（USDTWD/JPYTWD），metadata 存入 SPECIAL_INFO 資料庫的 CurrencyPrice 表（`data_upload/currency_price.py`）
 - **股市指數**：從爬蟲取得國際股市指數價格（道瓊工業指數/納斯達克指數），資料存入 SPECIAL_INFO 資料庫的 IndicesPrice 表（`data_upload/indices_price.py`）
 - **失敗重試佇列**：排程任務失敗時自動加入重試佇列。網路中斷每小時檢查網路並重試，最多 5 次；非網路錯誤（如「資料尚未發布」）標為 exhausted 後，每日（預設 06:30）「隔日重排」重設為 pending 再試一輪，最多 3 次，避免永久放棄隔日才會出現的資料（`retry_queue.py`）
+- **新聞 partial 如實回報筆數**：新聞抓取不完整（`status=partial`）時，已取得的部分**先寫入**
+  MySQL 與 `NewsContents/` 才拋 `SourceError` 排入重試；例外會帶上已落地統計
+  （`SourceError.partial_result`），Web 介面的任務因此顯示實際筆數而非固定 0，避免誤判成
+  「完全沒抓到」而做多餘的人工補抓
 - **行情類 empty-crawl 孤兒帳本自我修復**：TWSE/TPEX/TAIFEX/FAOI/MGTS 五個行情來源的每日排程（07:30 `daily_craw`）在補抓前，會先清除「近 7 天、落在平日、帳本標記 Open=False」的孤兒帳本並重新查詢，修復「交易日但當時資料尚未發布→爬空→被誤標非交易日而永久遮蔽」的真實行情；週末與更早於視窗的日期保留標記不重試。歷史（超出日常視窗）孤兒帳本以 `backfill_price.py` 較大視窗一次性 deep 修復（`DailyUpload.clear_price_orphans`）
 - **SPECIAL_INFO 缺漏自我修復**：每日（預設 07:57，排在各商品 07:36~07:44 抓取之後補齊）對原油／黃金／比特幣／匯率／股市指數掃描近 30 天缺漏並自動補回，以「問爬蟲」為交易日／休市的唯一真相來源（回傳該日自身 K 棒即補上，只回更早日期即視為非交易日）。掃描窗遠大於各商品排程的「過去 7 天」回補窗，足以自癒管線停擺數週造成的缺漏。共用邏輯於 `data_upload/special_info_common.py`，一次性修復與孤兒帳本清理入口為 `backfill_special_info.py`
 
@@ -52,8 +58,8 @@
 
 ```
 Tw_stock_DB_Operating/
-├── clients.py                # MySQL 連線函式
-├── routers.py                # MySQLRouter 路由類別
+├── clients.py                # MySQL 連線函式（NullPool，不留連線池）
+├── routers.py                # MySQLRouter 路由類別 + db_conn context manager
 ├── upload.py                 # 批次上傳入口程式
 ├── DailyUpload.py            # 每日排程上傳（含行情類 empty-crawl 孤兒帳本每日重驗）
 ├── backfill_special_info.py  # SPECIAL_INFO 缺漏一次性回補與孤兒帳本清理入口
@@ -116,6 +122,8 @@ Tw_stock_DB_Operating/
 ├── test/                     # 單元測試
 │   ├── test_base.py
 │   ├── test_clients.py
+│   ├── test_db_conn.py                   # 連線生命週期（含 AST 掃描防止裸連線復發）
+│   ├── test_partial_result_reporting.py  # partial 已落地筆數如實回報
 │   ├── test_daily_upload.py
 │   ├── test_backfill_price.py            # 行情類孤兒帳本 deep 修復入口
 │   ├── test_clear_price_orphans_db.py    # 清孤兒三條安全邊界（真實 SQL 引擎）
