@@ -29,11 +29,16 @@ class TestSettledEndDate(unittest.TestCase):
         self.assertEqual(web_server.settled_end_date(now), "2026-08-31")
 
     def test_default_uses_now(self):
-        """未指定基準時間時以當下計算。"""
+        """未指定基準時間時以當下計算。
+
+        取呼叫前後兩個時點作為可接受集合，避免測試恰好跨午夜執行時偶發紅燈。
+        """
         import web_server
 
-        expected = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        self.assertEqual(web_server.settled_end_date(), expected)
+        before = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        actual = web_server.settled_end_date()
+        after = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        self.assertIn(actual, {before, after})
 
 
 class TestPriceSchedulesUseSettledEndDate(unittest.TestCase):
@@ -57,29 +62,37 @@ class TestPriceSchedulesUseSettledEndDate(unittest.TestCase):
         web_server.upload_jobs.clear()
 
     def test_end_date_is_yesterday(self):
-        """排入佇列的 end_date 與任務紀錄的日期皆為昨日。"""
-        import web_server
+        """排入佇列的 end_date 與任務紀錄的日期皆為昨日。
 
-        today = datetime.now().strftime("%Y-%m-%d")
-        yesterday = (
-            datetime.now() - timedelta(days=1)
-        ).strftime("%Y-%m-%d")
+        以呼叫前後兩個時點組成可接受集合，避免恰好跨午夜執行時偶發紅燈；
+        「今日」則明確排除，區間上界退回今日就會紅燈。
+        """
+        import web_server
 
         for job_type, sched_name, job_name in self.SCHEDULES:
             with self.subTest(job_type=job_type):
                 web_server.upload_jobs.clear()
+                before = datetime.now()
                 with patch.object(web_server, "job_queue") as mock_queue:
                     getattr(web_server, sched_name)()
+                after = datetime.now()
+                yesterdays = {
+                    (t - timedelta(days=1)).strftime("%Y-%m-%d")
+                    for t in (before, after)
+                }
+                todays = {
+                    t.strftime("%Y-%m-%d") for t in (before, after)
+                }
 
                 mock_queue.enqueue.assert_called_once()
                 job_id, func, params = mock_queue.enqueue.call_args.args
                 self.assertEqual(func, getattr(web_server, job_name))
                 # params = (job_id, start_date, end_date)
-                self.assertEqual(params[2], yesterday)
-                self.assertNotEqual(params[2], today)
+                self.assertIn(params[2], yesterdays)
+                self.assertNotIn(params[2], todays)
                 job = web_server.upload_jobs[job_id]
-                self.assertEqual(job["end_date"], yesterday)
-                self.assertEqual(job["date"], yesterday)
+                self.assertIn(job["end_date"], yesterdays)
+                self.assertIn(job["date"], yesterdays)
                 self.assertLess(job["start_date"], job["end_date"])
 
 
@@ -95,20 +108,22 @@ class TestBackfillScheduleUsesSettledEndDate(unittest.TestCase):
         """排程須把昨日當成 backfill_missing 的掃描基準日傳下去。"""
         import web_server
 
-        yesterday = (
-            datetime.now() - timedelta(days=1)
-        ).strftime("%Y-%m-%d")
-
+        before = datetime.now()
         with patch.object(web_server, "job_queue") as mock_queue:
             web_server.run_special_info_backfill_scheduled()
+        after = datetime.now()
+        yesterdays = {
+            (t - timedelta(days=1)).strftime("%Y-%m-%d")
+            for t in (before, after)
+        }
 
         job_id, func, params = mock_queue.enqueue.call_args.args
         self.assertEqual(func, web_server.run_special_info_backfill_job)
         # params = (job_id, days, deep, today)
         self.assertEqual(params[2], False)
-        self.assertEqual(params[3], yesterday)
-        self.assertEqual(
-            web_server.upload_jobs[job_id]["end_date"], yesterday
+        self.assertIn(params[3], yesterdays)
+        self.assertIn(
+            web_server.upload_jobs[job_id]["end_date"], yesterdays
         )
 
     def test_job_forwards_today_to_uploader(self):

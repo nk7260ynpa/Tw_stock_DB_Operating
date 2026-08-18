@@ -129,19 +129,19 @@ class TestSpecialInfoBackfillJob(unittest.TestCase):
         mock_retry = MagicMock()
         with patch.object(
             web_server.OilPriceUploader, "backfill_missing",
-            return_value=fake_summary,
+            autospec=True, return_value=fake_summary,
         ), patch.object(
             web_server.GoldPriceUploader, "backfill_missing",
-            return_value=fake_summary,
+            autospec=True, return_value=fake_summary,
         ), patch.object(
             web_server.BitcoinPriceUploader, "backfill_missing",
-            return_value=fake_summary,
+            autospec=True, return_value=fake_summary,
         ), patch.object(
             web_server.CurrencyPriceUploader, "backfill_missing",
-            return_value=fake_summary,
+            autospec=True, return_value=fake_summary,
         ), patch.object(
             web_server.IndicesPriceUploader, "backfill_missing",
-            return_value=fake_summary,
+            autospec=True, return_value=fake_summary,
         ), patch.object(web_server, "retry_queue", mock_retry):
             web_server.run_special_info_backfill_job(job_id, days=30)
 

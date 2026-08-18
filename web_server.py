@@ -2009,6 +2009,10 @@ def yt_transcript_target_date(schedule_time=None, now=None):
     前一晚延遲補跑的任務，排程日往前推一天。與 Tw_stock_crawer 的「YT 抓昨天」
     契約維持一致（準時執行時結果與 `now - 1 天` 完全相同）。
 
+    界線：本函式只還原「單次過期任務」的排程日。宿主連睡超過 24 小時時
+    `schedule` 套件本身也只補跑一次，中間那天仍會漏——那是套件限制，需人工
+    以 Web 介面補抓。
+
     Args:
         schedule_time (str | None): 排定時刻（HH:MM），預設讀設定檔。
         now (datetime.datetime | None): 基準時間，預設為當下（供測試注入）。
@@ -2146,7 +2150,10 @@ def run_oil_price_scheduled():
         job_id, run_oil_price_upload_job,
         (job_id, start_date, end_date),
     )
-    logger.info("原油價格排程任務已建立 %s（%s ~ %s）", job_id, start_date, end_date)
+    logger.info(
+        "原油價格排程任務已建立 %s（%s ~ %s）",
+        job_id, start_date, end_date,
+    )
 
 
 def run_oil_price_upload_job(job_id, start_date, end_date):
@@ -2241,7 +2248,10 @@ def run_gold_price_scheduled():
         job_id, run_gold_price_upload_job,
         (job_id, start_date, end_date),
     )
-    logger.info("黃金價格排程任務已建立 %s（%s ~ %s）", job_id, start_date, end_date)
+    logger.info(
+        "黃金價格排程任務已建立 %s（%s ~ %s）",
+        job_id, start_date, end_date,
+    )
 
 
 def run_gold_price_upload_job(job_id, start_date, end_date):
