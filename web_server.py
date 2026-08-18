@@ -53,10 +53,23 @@ from routers import db_conn
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
 LOG_DIR = BASE_DIR / "logs"
-CONFIG_PATH = LOG_DIR / "config.json"
 
-# 確保 logs 資料夾存在
+# 持久化設定目錄：**刻意與 logs/ 分離**。設定檔曾寄生在 log 目錄（logs/config.json），
+# 但部署（CI deploy）把 logs 掛成具名 volume、手動 run.sh 掛 host 的 ./logs，兩條路徑
+# 的 log 目錄內容不同，設定會隨掛載方式在容器間「靜默消失」（Web 介面改完排程，換個
+# 啟動方式就回到程式碼預設值）。故設定改放獨立的 config/ 目錄，run.sh 與 CI deploy
+# 掛載**同一個** host 絕對路徑，兩條路徑不再分岔。
+CONFIG_DIR = Path(os.environ.get("CONFIG_DIR") or (BASE_DIR / "config"))
+CONFIG_PATH = CONFIG_DIR / "config.json"
+
+# 舊設定位置（寄生在 log 目錄），僅供一次性遷移讀取，不再寫入。
+LEGACY_CONFIG_PATH = LOG_DIR / "config.json"
+# 一次性遷移成功後，舊設定檔改名保留為備份（避免每次啟動重複判讀新舊來源）。
+LEGACY_CONFIG_BACKUP_PATH = LOG_DIR / "config.json.migrated"
+
+# 確保 logs 與 config 資料夾存在
 os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(CONFIG_DIR, exist_ok=True)
 
 # Logging 設定
 log_formatter = logging.Formatter(
@@ -236,9 +249,60 @@ def _migrate_crawl_schedule_window(config, default):
     return changed
 
 
+def migrate_legacy_config():
+    """把寄生在 log 目錄的舊設定檔一次性搬遷到獨立設定目錄。
+
+    舊版把 config.json 放在 logs/ 內，而部署時 logs/ 是具名 volume、手動 run.sh 是
+    host bind，導致設定隨掛載方式而消失。本函式在服務讀取設定前執行，若新位置尚無
+    設定、舊位置有，就**原樣**（含 config_version）搬過去，讓既有排程自訂不被丟棄，
+    且後續 version-gated 的一次性遷移仍照原語意判讀。
+
+    優先順序：新位置（CONFIG_PATH）永遠優先。兩邊都存在時不覆寫新位置，只記錄
+    warning 提示舊檔已失效；兩邊都不存在時不做任何事（由 load_config 回傳預設值）。
+    搬遷成功後把舊檔改名為 config.json.migrated 保留備份，避免每次啟動重複判讀。
+
+    Returns:
+        bool: 實際發生搬遷時回傳 True，否則 False。
+    """
+    try:
+        if not LEGACY_CONFIG_PATH.exists():
+            return False
+        if CONFIG_PATH.exists():
+            logger.warning(
+                "設定檔新舊位置同時存在，一律以新位置 %s 為準；舊檔 %s 已失效，"
+                "可自行刪除。", CONFIG_PATH, LEGACY_CONFIG_PATH,
+            )
+            return False
+        with open(LEGACY_CONFIG_PATH, "r", encoding="utf-8") as f:
+            legacy_config = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("讀取舊設定檔 %s 失敗，改用預設值：%s",
+                       LEGACY_CONFIG_PATH, exc)
+        return False
+
+    try:
+        save_config(legacy_config)
+    except OSError as exc:
+        # 寫不進新位置時**不可**動舊檔：留著它，下次啟動還能再試一次搬遷，
+        # 使用者設定不會被丟掉；本輪則退回預設值啟動而非讓服務起不來。
+        logger.error("舊設定搬遷失敗（無法寫入 %s）：%s；已保留舊檔 %s。",
+                     CONFIG_PATH, exc, LEGACY_CONFIG_PATH)
+        return False
+    logger.info("已將舊設定檔 %s 一次性搬遷至 %s（設定內容原樣保留）。",
+                LEGACY_CONFIG_PATH, CONFIG_PATH)
+    try:
+        LEGACY_CONFIG_PATH.rename(LEGACY_CONFIG_BACKUP_PATH)
+    except OSError as exc:
+        # 改名失敗不影響設定正確性（新位置已寫入且優先），僅下次啟動會再記一次
+        # 「新舊並存」warning。
+        logger.warning("舊設定檔 %s 改名備份失敗：%s", LEGACY_CONFIG_PATH, exc)
+    return True
+
+
 def load_config():
     """讀取設定檔。
 
+    讀取前先呼叫 migrate_legacy_config 處理「舊設定檔仍在 log 目錄」的情形。
     首次讀取既有（舊版）config.json 時，會依 config_version 觸發一次性遷移，
     把落在 07:30~08:00 窗外的爬蟲抓取排程收斂到新預設並寫回，之後保留使用者的
     窗內自訂（見 _migrate_crawl_schedule_window）。
@@ -252,6 +316,9 @@ def load_config():
             indices_price_schedule、special_info_backfill_schedule
             與 config_version 欄位。
     """
+    # 舊版設定寄生在 log 目錄，先一次性搬遷到獨立設定目錄，避免使用者自訂被丟棄。
+    migrate_legacy_config()
+
     # 所有爬取排程集中於 07:30~08:00 之間並彼此錯開，避免同時併發搶爬蟲資源。
     default = {
         "config_version": CONFIG_VERSION,
@@ -333,11 +400,15 @@ def load_config():
 
 
 def save_config(config):
-    """儲存設定檔。
+    """儲存設定檔至獨立設定目錄（CONFIG_PATH）。
+
+    寫入前確保設定目錄存在：容器可能以尚未建立的 host 路徑掛載設定目錄，
+    或執行期被外部刪除，缺目錄時寫入會失敗而讓 Web 介面的修改整個丟失。
 
     Args:
         config (dict): 設定內容。
     """
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
