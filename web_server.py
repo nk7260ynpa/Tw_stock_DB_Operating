@@ -2218,8 +2218,9 @@ def run_oil_price_upload_job(job_id, start_date, end_date):
     """執行原油價格上傳任務（背景執行緒）。
 
     支援日期範圍上傳，依序處理每一天的資料。單日的來源端失敗（SourceError）
-    只跳過該日並排入重試佇列，不中斷整個區間；連不上爬蟲或回傳格式異常才
-    中止整批（見 special_info_common.upload_date_range）。
+    與該日的資料格式異常（CrawlError）都只跳過該日並排入重試佇列，不中斷
+    整個區間；只有連不上爬蟲（NetworkError）才中止整批
+    （見 special_info_common.upload_date_range）。
 
     Args:
         job_id (str): 任務 ID。
@@ -2303,8 +2304,9 @@ def run_gold_price_upload_job(job_id, start_date, end_date):
     """執行黃金價格上傳任務（背景執行緒）。
 
     支援日期範圍上傳，依序處理每一天的資料。單日的來源端失敗（SourceError）
-    只跳過該日並排入重試佇列，不中斷整個區間；連不上爬蟲或回傳格式異常才
-    中止整批（見 special_info_common.upload_date_range）。
+    與該日的資料格式異常（CrawlError）都只跳過該日並排入重試佇列，不中斷
+    整個區間；只有連不上爬蟲（NetworkError）才中止整批
+    （見 special_info_common.upload_date_range）。
 
     Args:
         job_id (str): 任務 ID。
@@ -2388,8 +2390,9 @@ def run_bitcoin_price_upload_job(job_id, start_date, end_date):
     """執行比特幣價格上傳任務（背景執行緒）。
 
     支援日期範圍上傳，依序處理每一天的資料。單日的來源端失敗（SourceError）
-    只跳過該日並排入重試佇列，不中斷整個區間；連不上爬蟲或回傳格式異常才
-    中止整批（見 special_info_common.upload_date_range）。
+    與該日的資料格式異常（CrawlError）都只跳過該日並排入重試佇列，不中斷
+    整個區間；只有連不上爬蟲（NetworkError）才中止整批
+    （見 special_info_common.upload_date_range）。
 
     Args:
         job_id (str): 任務 ID。
@@ -2473,8 +2476,9 @@ def run_currency_price_upload_job(job_id, start_date, end_date):
     """執行匯率上傳任務（背景執行緒）。
 
     支援日期範圍上傳，依序處理每一天的資料。單日的來源端失敗（SourceError）
-    只跳過該日並排入重試佇列，不中斷整個區間；連不上爬蟲或回傳格式異常才
-    中止整批（見 special_info_common.upload_date_range）。
+    與該日的資料格式異常（CrawlError）都只跳過該日並排入重試佇列，不中斷
+    整個區間；只有連不上爬蟲（NetworkError）才中止整批
+    （見 special_info_common.upload_date_range）。
 
     Args:
         job_id (str): 任務 ID。
@@ -2558,8 +2562,9 @@ def run_indices_price_upload_job(job_id, start_date, end_date):
     """執行股市指數價格上傳任務（背景執行緒）。
 
     支援日期範圍上傳，依序處理每一天的資料。單日的來源端失敗（SourceError）
-    只跳過該日並排入重試佇列，不中斷整個區間；連不上爬蟲或回傳格式異常才
-    中止整批（見 special_info_common.upload_date_range）。
+    與該日的資料格式異常（CrawlError）都只跳過該日並排入重試佇列，不中斷
+    整個區間；只有連不上爬蟲（NetworkError）才中止整批
+    （見 special_info_common.upload_date_range）。
 
     Args:
         job_id (str): 任務 ID。

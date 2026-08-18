@@ -23,7 +23,7 @@
 - **比特幣價格**：從爬蟲取得比特幣價格，metadata 存入 SPECIAL_INFO 資料庫的 BitcoinPrice 表（`data_upload/bitcoin_price.py`）
 - **匯率**：從爬蟲取得匯率資料（USDTWD/JPYTWD），metadata 存入 SPECIAL_INFO 資料庫的 CurrencyPrice 表（`data_upload/currency_price.py`）
 - **股市指數**：從爬蟲取得國際股市指數價格（道瓊工業指數/納斯達克指數），資料存入 SPECIAL_INFO 資料庫的 IndicesPrice 表（`data_upload/indices_price.py`）
-- **失敗重試佇列**：排程任務失敗時自動加入重試佇列（相同 `(task_type, params)` 已在 pending／retrying 時**不重複排入**，避免逐日隔離後一次整體失敗排進上百筆等效任務）。網路中斷每小時檢查網路並重試，最多 5 次；非網路錯誤（如「資料尚未發布」）標為 exhausted 後，每日（預設 06:30）「隔日重排」重設為 pending 再試一輪，最多 3 次，避免永久放棄隔日才會出現的資料（`retry_queue.py`）。整輪重試於**背景執行緒**執行（`run_retry_queue_scheduled`），不阻塞排程執行緒
+- **失敗重試佇列**：排程任務失敗時自動加入重試佇列（相同 `(task_type, params)` 已在 **pending** 時不重複排入，避免逐日隔離後一次整體失敗排進上百筆等效任務；去重刻意**不含 `retrying`**，且載入時把卡在 `retrying` 的任務復原為 `pending`，見[重試佇列去重與當機復原](#重試佇列去重與當機復原)）。網路中斷每小時檢查網路並重試，最多 5 次；非網路錯誤（如「資料尚未發布」）標為 exhausted 後，每日（預設 06:30）「隔日重排」重設為 pending 再試一輪，最多 3 次，避免永久放棄隔日才會出現的資料（`retry_queue.py`）。整輪重試於**背景執行緒**執行（`run_retry_queue_scheduled`），不阻塞排程執行緒
 - **重抓決策依爬蟲 `meta.retryable`**：新聞抓取不完整時，以爬蟲 v2.14.0 的
   `meta.retryable` 為單一判準決定「重抓有沒有機會補回來」，並以
   `detail_failed_ratio ≥ 0.2` 決定「值不值得付出整批重跑的成本」；舊版爬蟲回應
@@ -681,6 +681,24 @@ docker run --rm --network db_network \
 > 主要落在 2026-03-23~03-31 管線停擺期與 05-05、06-02、07-09）。修復後全時段「非
 > 週末孤兒帳本」由 53 筆降至 18 筆，且 18 筆全部是美股假日（元旦、MLK、總統日、
 > 耶穌受難日、陣亡將士紀念日、六月節、國慶補假），比特幣（24/7）孤兒為 0。
+
+### 重試佇列去重與當機復原
+
+補抓改為「逐日隔離」後，一次來源端整體失敗會讓每個失敗日期各排一筆重試
+（30 天 × 5 商品 ≈ 150 筆），且多數在下一輪掃描仍會失敗、再排一次。故
+`RetryQueue.add()` 對相同 `(task_type, params)` 去重。
+
+> **去重範圍刻意只含 `pending`，不含 `retrying`。** `process_retry_queue`
+> 會先把任務標成 `retrying` 才執行；若行程在這期間結束（CI deploy 的
+> `rm -f`、當機），該任務就永遠停在 `retrying`——`get_pending()` 只回
+> `pending`、隔日重排只處理 `exhausted`，沒有任何機制會把它撿回來。若把
+> `retrying` 也納入去重，其後所有同名失敗都會被吞進這筆永遠不會執行的
+> 任務。對 `params` 為常數的 `tdcc`（`{}`）與新聞類（`{"hours": 48}`），
+> 等於該來源的重試佇列從此永久失效且無告警——正是本專案再三要消滅的
+> 「失敗被靜默永久遮蔽」模式。
+>
+> 另於 `RetryQueue._load()` 把載入時仍是 `retrying` 的任務復原為
+> `pending`，順帶清掉既有的孤兒殘留。
 
 ## 行情類 empty-crawl 帳本語意與自我修復
 

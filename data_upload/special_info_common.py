@@ -171,7 +171,10 @@ def parse_price_response(uploader, result, date):
     raw_status = result.get("status")
 
     # 行情類不接受 partial：缺商品即為不完整的一天，整批重抓語意較單純。
-    status = check_crawl_status(result, label, context, allow_partial=False)
+    # 刻意不接回傳值：check_crawl_status 會把「status 缺席」正規化成 ok，
+    # 後續若用它判斷就會把舊版空回應誤判成「ok 卻 0 筆」。一律用未經正規化
+    # 的 raw_status，才分得出「爬蟲說 ok」與「爬蟲沒說」。
+    check_crawl_status(result, label, context, allow_partial=False)
     record_crawl_state(uploader, raw_status, result.get("meta"))
 
     if raw_status is None and "error" in result:

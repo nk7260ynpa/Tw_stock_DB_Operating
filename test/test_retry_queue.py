@@ -93,6 +93,30 @@ class TestRetryQueueDedupe(unittest.TestCase):
         self.assertEqual(len({first, second, third}), 3)
         self.assertEqual(len(self.queue.get_all()), 3)
 
+    def test_retrying_task_does_not_swallow_new_failure(self):
+        """卡在 retrying 的任務不得吞掉後續同名失敗（否則永久靜默遮蔽）。
+
+        `process_retry_queue` 先把任務標成 retrying 才執行，行程若在此時
+        被中止（CI deploy 的 rm -f／當機），該任務不會被任何機制撿回。
+        """
+        first = self.queue.add("tdcc", {}, "失敗")
+        self.queue.update_status(first, "retrying")
+        second = self.queue.add("tdcc", {}, "又失敗")
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(len(self.queue.get_all()), 2)
+
+    def test_load_recovers_retrying_to_pending(self):
+        """重新載入時把卡在 retrying 的任務復原為 pending。"""
+        task_id = self.queue.add("tdcc", {}, "失敗")
+        self.queue.update_status(task_id, "retrying")
+
+        reloaded = RetryQueue(self.tmp.name)
+
+        recovered = reloaded.get_all()[0]
+        self.assertEqual(recovered.status, "pending")
+        self.assertEqual(len(reloaded.get_pending()), 1)
+
     def test_completed_task_does_not_block_new_one(self):
         """已成功的任務不算「待重試」，同日再失敗仍應排入新任務。"""
         first = self.queue.add("oil_price", {"date": "2026-08-17"}, "失敗")

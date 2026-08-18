@@ -81,9 +81,12 @@ class FakeUploader:
             responses (dict): {請求日: 實際日 | None}；None 表示回空 df。
             price_dates (set | None): 初始價格表日期。
             ledger_dates (set | None): 初始帳本日期。
-            statuses (dict | None): {請求日: 爬蟲 status}；未列出者為 None
-                （模擬舊版無 status 的回應）。
-            metas (dict | None): {請求日: 爬蟲 meta 物件}。
+            statuses (dict | None): {請求日: 爬蟲 status}；未列出者採健康
+                爬蟲預設（回空→"empty"、有資料→"ok"）。要模擬退化契約
+                （舊版無 status）請顯式傳入 None。
+            metas (dict | None): {請求日: 爬蟲 meta 物件}；未列出者採健康
+                爬蟲預設（含 target_date_available）。要模擬 meta 缺欄位
+                請顯式傳入 {}。
             errors (dict | None): {請求日: 要拋出的例外實例}。
         """
         self.is_continuous_market = is_continuous

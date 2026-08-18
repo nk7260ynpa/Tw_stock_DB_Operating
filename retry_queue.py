@@ -63,6 +63,13 @@ class RetryQueue:
     每次變更自動持久化至 JSON 檔案。
     """
 
+    # add() 去重時視為「已在佇列中待重試」的狀態。**刻意只含 pending**：
+    # retrying 期間重複排入最多多一筆任務，但若把 retrying 也納入，一旦有
+    # 任務因行程中止（CI deploy 的 rm -f、當機）卡在 retrying，其後所有同
+    # 名任務都會被吞進這筆永遠不會執行的任務——對 params 為常數的 tdcc
+    # （`{}`）與新聞類（`{"hours": 48}`）等於該來源重試佇列永久失效且無告警。
+    _ACTIVE_STATUSES = ("pending",)
+
     def __init__(self, persist_path):
         """初始化重試佇列。
 
@@ -81,13 +88,22 @@ class RetryQueue:
         try:
             with open(self._persist_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            recovered = 0
             for task_data in data:
                 task = RetryTask(**task_data)
+                if task.status == "retrying":
+                    # 上次行程在重試途中被中止（CI deploy 的 rm -f／當機）。
+                    # retrying 沒有任何機制會把它撿回來（get_pending 只看
+                    # pending、隔日重排只看 exhausted），不復原就是永久孤兒。
+                    task.status = "pending"
+                    recovered += 1
                 self._tasks[task.task_id] = task
             logger.info(
-                "已從 %s 載入 %d 筆重試任務。",
-                self._persist_path, len(self._tasks),
+                "已從 %s 載入 %d 筆重試任務（%d 筆自 retrying 復原為 pending）。",
+                self._persist_path, len(self._tasks), recovered,
             )
+            if recovered:
+                self._save()
         except Exception as e:
             logger.error("載入重試佇列失敗：%s", e)
 
@@ -104,17 +120,17 @@ class RetryQueue:
         except Exception as e:
             logger.error("持久化重試佇列失敗：%s", e)
 
-    # 佇列中仍會被自動重試的狀態；同一任務在這些狀態下不重複排入。
-    _ACTIVE_STATUSES = ("pending", "retrying")
-
     def add(self, task_type, params, error_message,
             created_by_job_id=None):
         """新增重試任務（同任務已在佇列中待重試時不重複排入）。
 
         去重是必要的：補抓作業改為「逐日隔離」後，一次來源端整體失敗會讓
         每個失敗日期各排一筆（30 天 × 5 商品 ≈ 150 筆），而其中大多數在下
-        一輪掃描仍會失敗、再排一次。相同 (task_type, params) 已在
-        pending／retrying 時再排一筆並不會加速任何事，只會灌爆佇列。
+        一輪掃描仍會失敗、再排一次。相同 (task_type, params) 已在 pending
+        時再排一筆並不會加速任何事，只會灌爆佇列。
+
+        去重範圍**只含 pending**（見 `_ACTIVE_STATUSES`），刻意不含
+        retrying，避免卡住的任務把後續同名失敗永久吞掉。
 
         Args:
             task_type (str): 任務類型。
@@ -123,8 +139,10 @@ class RetryQueue:
             created_by_job_id (str | None): 原始排程 job ID。
 
         Returns:
-            str: 新增任務的 task_id；已存在待重試的相同任務時回傳既有 ID。
+            str: 新增任務的 task_id；已存在 pending 的相同任務時回傳既有 ID。
         """
+        # 檢查與寫入須在同一個 critical section，否則兩執行緒可能同時查到
+        # 「沒有」而各排一筆（_save 不自行取鎖，由呼叫端持有，無重入風險）。
         with self._lock:
             for existing in self._tasks.values():
                 if (existing.task_type == task_type
@@ -136,17 +154,15 @@ class RetryQueue:
                     )
                     return existing.task_id
 
-        task_id = str(uuid.uuid4())[:8]
-        task = RetryTask(
-            task_id=task_id,
-            task_type=task_type,
-            params=params,
-            error_message=error_message,
-            failed_at=datetime.now().isoformat(),
-            created_by_job_id=created_by_job_id,
-        )
-        with self._lock:
-            self._tasks[task_id] = task
+            task_id = str(uuid.uuid4())[:8]
+            self._tasks[task_id] = RetryTask(
+                task_id=task_id,
+                task_type=task_type,
+                params=params,
+                error_message=error_message,
+                failed_at=datetime.now().isoformat(),
+                created_by_job_id=created_by_job_id,
+            )
             self._save()
         logger.info(
             "已加入重試佇列：%s（%s，%s）",
