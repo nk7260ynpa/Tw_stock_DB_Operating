@@ -44,8 +44,11 @@ class OilPriceUploader:
     原油為非 24/7 市場（is_continuous_market=False）。
 
     排程一律只請求「昨日」（web_server.settled_end_date），確保請求日的日 K
-    已定案；此前提成立時，爬蟲 fallback 到更早日期即代表請求日為非交易日，
-    故 fallback／空時標記請求日（詳見 special_info_common 帳本語意說明）。
+    已定案；此前提成立時，爬蟲 fallback 到更早日期即代表請求日為非交易日。
+    但記帳前仍以 special_info_common._is_settled 再守一次（人工／回填可能
+    請求今日），且只在爬蟲 status 為 empty／fallback 且
+    meta.target_date_available 非真時才標記；status 為 partial／error／未知
+    一律拋 SourceError 進重試佇列，絕不寫帳本（詳見 special_info_common）。
     """
 
     # 非 24/7 市場，供 special_info_common 判斷帳本語意與缺漏偵測行為。
@@ -89,13 +92,19 @@ class OilPriceUploader:
             pd.DataFrame: 原油價格 DataFrame。
 
         Raises:
-            NetworkError: 網路連線失敗。
-            CrawlError: 爬取失敗或資料格式異常。
+            NetworkError: 無法連線爬蟲（可重試，整批中止）。
+            SourceError: 來源端抓取失敗、不完整或狀態未知（可重試，
+                逐日隔離，一律不得寫入帳本）。
+            OutOfRangeError: 早於來源可回溯範圍（不重試）。
+            CrawlError: 爬蟲呼叫失敗或回傳資料缺少必要欄位。
         """
         url = f"http://{self.crawler_host}/oil_price"
         try:
             resp = requests.get(url, params={"date": date}, timeout=30)
             resp.raise_for_status()
+            # json() 必須留在 try 內：非 JSON body（如代理層錯誤頁）會拋
+            # JSONDecodeError，逃出去就成了未分類例外。
+            payload = resp.json()
         except (requests.ConnectionError, requests.Timeout) as e:
             raise NetworkError(
                 f"原油價格爬蟲網路連線失敗（{date}）：{e}"
@@ -105,49 +114,7 @@ class OilPriceUploader:
                 f"原油價格爬蟲呼叫失敗（{date}）：{e}"
             ) from e
 
-        result = resp.json()
-        if "error" in result:
-            error_msg = result["error"]
-            # 「無法取得任何」表示 yfinance 對該日無資料（週末/假日 fallback
-            # 給上個交易日後 parse 失敗），視為非交易日，回空 DataFrame
-            # 讓 upload() 走 _record_uploaded_date 分支，避免無限 retry 循環。
-            if "無法取得任何" in error_msg:
-                logger.info(
-                    "原油價格 %s 爬蟲回報無資料（非交易日）：%s",
-                    date, error_msg,
-                )
-                return pd.DataFrame()
-            raise CrawlError(
-                f"原油價格爬蟲回傳錯誤（{date}）：{error_msg}"
-            )
-        data = result.get("data")
-        if not data:
-            logger.info("原油價格 %s 無資料（可能非交易日）。", date)
-            return pd.DataFrame()
-
-        df = pd.DataFrame(data)
-
-        # 欄位名稱標準化：爬蟲回傳小寫，需映射至資料庫大寫
-        column_mapping = {
-            "product": "Product",
-            "date": "Date",
-            "open": "Open",
-            "high": "High",
-            "low": "Low",
-            "close": "Close",
-            "volume": "Volume",
-        }
-        df = df.rename(columns=column_mapping)
-
-        # 確保必要欄位存在
-        required = {"Date", "Product", "Open", "High", "Low", "Close", "Volume"}
-        if not required.issubset(set(df.columns)):
-            missing = required - set(df.columns)
-            raise CrawlError(
-                f"原油價格爬蟲回傳資料缺少欄位：{missing}"
-            )
-
-        return df
+        return special_info_common.parse_price_response(self, payload, date)
 
     def check_schema(self, df):
         """使用 Pydantic 驗證 DataFrame schema。
@@ -247,18 +214,22 @@ class OilPriceUploader:
         """
         return special_info_common.find_missing_dates(self, days=days)
 
-    def backfill_missing(self, days=30, today=None, deep=False):
+    def backfill_missing(self, days=30, today=None, deep=False,
+                         reverify_days=0):
         """掃描近 N 天缺漏並補抓（冪等、可重跑）。
 
         Args:
             days (int): 掃描天數，預設 30。
             today (str | datetime.date | None): 掃描基準日（含），預設當日。
                 排程呼叫時固定傳「昨日」，只重驗已定案的日 K。
-            deep (bool): 是否先清除孤兒帳本再重驗，預設 False。
+            deep (bool): 是否先清除整個窗的孤兒帳本再重驗，預設 False。
+            reverify_days (int): deep=False 時要清除孤兒帳本的天數，
+                預設 0（不清）。日常排程傳入小窗即可自我修復誤標。
 
         Returns:
             dict: 補抓摘要。
         """
         return special_info_common.backfill_missing(
-            self, days=days, today=today, deep=deep
+            self, days=days, today=today, deep=deep,
+            reverify_days=reverify_days,
         )
