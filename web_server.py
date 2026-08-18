@@ -253,6 +253,8 @@ def _migrate_crawl_schedule_window(config, default):
 # 「新舊設定並存」的 warning 只在第一次記錄：load_config 幾乎每個 API 端點都會呼叫，
 # 而舊檔依設計不會被自動刪除，若每次都記 warning 會把 log 洗掉。
 _legacy_coexist_warned = False
+# 舊設定檔讀取失敗的 warning 同理只記第一次。
+_legacy_read_warned = False
 
 
 # 設定檔暫存檔名的遞增序號（同一行程內唯一，配合 pid 即可避免併發互相覆蓋）。
@@ -336,11 +338,19 @@ def migrate_legacy_config():
             else:
                 logger.debug("設定檔新舊位置仍同時存在（以 %s 為準）。", CONFIG_PATH)
             return False
-        with open(LEGACY_CONFIG_PATH, "r", encoding="utf-8") as f:
-            legacy_config = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("讀取舊設定檔 %s 失敗，改用預設值：%s",
-                       LEGACY_CONFIG_PATH, exc)
+        legacy_config = read_config_file(LEGACY_CONFIG_PATH)
+    except (OSError, ValueError) as exc:
+        # ValueError 涵蓋 JSON 語法錯、非 UTF-8（UnicodeDecodeError）與頂層非物件；
+        # 舊檔壞掉不該讓服務起不來，也不該把垃圾內容搬進新位置。舊檔一律保留不動，
+        # 由使用者自行處置。warning 只記一次（load_config 幾乎每個端點都會呼叫）。
+        global _legacy_read_warned
+        if not _legacy_read_warned:
+            logger.warning("讀取舊設定檔 %s 失敗，改用預設值：%s",
+                           LEGACY_CONFIG_PATH, exc)
+            _legacy_read_warned = True
+        else:
+            logger.debug("舊設定檔 %s 仍無法讀取（改用預設值）。",
+                         LEGACY_CONFIG_PATH)
         return False
 
     try:
@@ -360,6 +370,98 @@ def migrate_legacy_config():
         # 「新舊並存」warning。
         logger.warning("舊設定檔 %s 改名備份失敗：%s", LEGACY_CONFIG_PATH, exc)
     return True
+
+
+def _save_config_best_effort(config, purpose):
+    """盡力寫回設定，寫不進去也不讓服務起不來。
+
+    load_config 內的兩處自動寫回（TDCC 週排程遷移、時間窗一次性遷移）都發生在
+    lifespan 啟動路徑上；若因唯讀檔案系統／權限問題拋 OSError，整個服務會起不來，
+    而這兩次寫回只是「持久化本來就已算好的結果」，記憶體內的設定仍然可用。
+
+    Args:
+        config (dict): 要寫回的設定內容。
+        purpose (str): 本次寫回的用途（僅供 log 描述）。
+    """
+    try:
+        save_config(config)
+    except OSError as exc:
+        logger.error("%s 無法寫回設定檔 %s：%s；本次以記憶體內的設定繼續執行。",
+                     purpose, CONFIG_PATH, exc)
+
+
+def _normalize_config(config, default):
+    """補齊缺漏欄位並執行 version-gated 的一次性遷移。
+
+    Args:
+        config (dict): 讀入的既有設定（就地修改）。
+        default (dict): 內含新版預設值的設定。
+
+    Returns:
+        dict: 正規化後的設定。
+
+    Raises:
+        TypeError: 設定內容第二層型別不符預期（例如 tdcc_schedule 為 null／數字）。
+        ValueError: 設定內容雖為 JSON 物件但語意上不可用。
+    """
+    # 向後相容：舊 config 可能沒有 tdcc_schedule
+    if "tdcc_schedule" not in config:
+        config["tdcc_schedule"] = default["tdcc_schedule"]
+    # 向後相容：舊格式含 day 欄位，遷移為新格式（僅保留 time）
+    elif "day" in config["tdcc_schedule"]:
+        config["tdcc_schedule"] = {
+            "time": config["tdcc_schedule"].get("time", "07:33"),
+        }
+        _save_config_best_effort(
+            config, "TDCC 排程設定從週排程遷移為每日排程")
+    # 向後相容：舊 config 可能沒有 ctee_schedule
+    if "ctee_schedule" not in config:
+        config["ctee_schedule"] = default["ctee_schedule"]
+    # 向後相容：舊 config 可能沒有 cnyes_schedule
+    if "cnyes_schedule" not in config:
+        config["cnyes_schedule"] = default["cnyes_schedule"]
+    # 向後相容：舊 config 可能沒有 ptt_schedule
+    if "ptt_schedule" not in config:
+        config["ptt_schedule"] = default["ptt_schedule"]
+    # 向後相容：舊 config 可能沒有 moneyudn_schedule
+    if "moneyudn_schedule" not in config:
+        config["moneyudn_schedule"] = default["moneyudn_schedule"]
+    # 向後相容：舊 config 可能沒有 yt_transcript_schedule
+    if "yt_transcript_schedule" not in config:
+        config["yt_transcript_schedule"] = default["yt_transcript_schedule"]
+    # 向後相容：舊 config 可能沒有 oil_price_schedule
+    if "oil_price_schedule" not in config:
+        config["oil_price_schedule"] = default["oil_price_schedule"]
+    # 向後相容：舊 config 可能沒有 gold_price_schedule
+    if "gold_price_schedule" not in config:
+        config["gold_price_schedule"] = default["gold_price_schedule"]
+    # 向後相容：舊 config 可能沒有 bitcoin_price_schedule
+    if "bitcoin_price_schedule" not in config:
+        config["bitcoin_price_schedule"] = default["bitcoin_price_schedule"]
+    # 向後相容：舊 config 可能沒有 currency_price_schedule
+    if "currency_price_schedule" not in config:
+        config["currency_price_schedule"] = default["currency_price_schedule"]
+    # 向後相容：舊 config 可能沒有 indices_price_schedule
+    if "indices_price_schedule" not in config:
+        config["indices_price_schedule"] = default["indices_price_schedule"]
+    # 向後相容：舊 config 可能沒有 special_info_backfill_schedule
+    if "special_info_backfill_schedule" not in config:
+        config["special_info_backfill_schedule"] = (
+            default["special_info_backfill_schedule"]
+        )
+    # 一次性遷移（version-gated）：把落在 07:30~08:00 窗外的爬蟲排程收斂到
+    # 新預設並寫回，讓部署重啟後持久化的舊時段自動更新；bump 版本後不再重跑，
+    # 保留使用者日後經 Web 介面所做的窗內自訂。
+    if config.get("config_version", 1) < CONFIG_VERSION:
+        migrated = _migrate_crawl_schedule_window(config, default)
+        config["config_version"] = CONFIG_VERSION
+        _save_config_best_effort(
+            config, "爬蟲抓取排程一次性遷移至 07:30~08:00 時間窗")
+        if migrated:
+            logger.info(
+                "已將舊時段的爬蟲抓取排程一次性遷移至 07:30~08:00 時間窗。"
+            )
+    return config
 
 
 def load_config():
@@ -428,63 +530,14 @@ def load_config():
                                      CONFIG_PATH, exc2)
                         config = None
     if config is not None:
-        # 向後相容：舊 config 可能沒有 tdcc_schedule
-        if "tdcc_schedule" not in config:
-            config["tdcc_schedule"] = default["tdcc_schedule"]
-        # 向後相容：舊格式含 day 欄位，遷移為新格式（僅保留 time）
-        elif "day" in config["tdcc_schedule"]:
-            config["tdcc_schedule"] = {
-                "time": config["tdcc_schedule"].get("time", "07:33"),
-            }
-            save_config(config)
-            logger.info("已將 TDCC 排程設定從週排程遷移為每日排程。")
-        # 向後相容：舊 config 可能沒有 ctee_schedule
-        if "ctee_schedule" not in config:
-            config["ctee_schedule"] = default["ctee_schedule"]
-        # 向後相容：舊 config 可能沒有 cnyes_schedule
-        if "cnyes_schedule" not in config:
-            config["cnyes_schedule"] = default["cnyes_schedule"]
-        # 向後相容：舊 config 可能沒有 ptt_schedule
-        if "ptt_schedule" not in config:
-            config["ptt_schedule"] = default["ptt_schedule"]
-        # 向後相容：舊 config 可能沒有 moneyudn_schedule
-        if "moneyudn_schedule" not in config:
-            config["moneyudn_schedule"] = default["moneyudn_schedule"]
-        # 向後相容：舊 config 可能沒有 yt_transcript_schedule
-        if "yt_transcript_schedule" not in config:
-            config["yt_transcript_schedule"] = default["yt_transcript_schedule"]
-        # 向後相容：舊 config 可能沒有 oil_price_schedule
-        if "oil_price_schedule" not in config:
-            config["oil_price_schedule"] = default["oil_price_schedule"]
-        # 向後相容：舊 config 可能沒有 gold_price_schedule
-        if "gold_price_schedule" not in config:
-            config["gold_price_schedule"] = default["gold_price_schedule"]
-        # 向後相容：舊 config 可能沒有 bitcoin_price_schedule
-        if "bitcoin_price_schedule" not in config:
-            config["bitcoin_price_schedule"] = default["bitcoin_price_schedule"]
-        # 向後相容：舊 config 可能沒有 currency_price_schedule
-        if "currency_price_schedule" not in config:
-            config["currency_price_schedule"] = default["currency_price_schedule"]
-        # 向後相容：舊 config 可能沒有 indices_price_schedule
-        if "indices_price_schedule" not in config:
-            config["indices_price_schedule"] = default["indices_price_schedule"]
-        # 向後相容：舊 config 可能沒有 special_info_backfill_schedule
-        if "special_info_backfill_schedule" not in config:
-            config["special_info_backfill_schedule"] = (
-                default["special_info_backfill_schedule"]
-            )
-        # 一次性遷移（version-gated）：把落在 07:30~08:00 窗外的爬蟲排程收斂到
-        # 新預設並寫回，讓部署重啟後持久化的舊時段自動更新；bump 版本後不再重跑，
-        # 保留使用者日後經 Web 介面所做的窗內自訂。
-        if config.get("config_version", 1) < CONFIG_VERSION:
-            migrated = _migrate_crawl_schedule_window(config, default)
-            config["config_version"] = CONFIG_VERSION
-            save_config(config)
-            if migrated:
-                logger.info(
-                    "已將舊時段的爬蟲抓取排程一次性遷移至 07:30~08:00 時間窗。"
-                )
-        return config
+        try:
+            return _normalize_config(config, default)
+        except (TypeError, ValueError, RecursionError) as exc:
+            # 頂層是物件、但第二層型別錯（如 "tdcc_schedule": null、
+            # "config_version": "3"）同樣算內容毀損：不隔離的話每次 load_config 都
+            # 會拋例外，--restart always 下就是重啟迴圈。處置與頂層毀損一致。
+            logger.error("設定檔 %s 內容不合預期：%s", CONFIG_PATH, exc)
+            quarantine_corrupt_config()
     return default
 
 

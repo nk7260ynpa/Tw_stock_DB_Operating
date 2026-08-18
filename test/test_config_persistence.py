@@ -268,6 +268,37 @@ class TestConfigWriteDurability(ConfigPathTestCase):
         self.assertNotEqual(names[0], names[1],
                             f"每次寫入的暫存檔名不可相同：{names}")
 
+    def test_second_level_type_error_is_quarantined(self):
+        """頂層是物件、但第二層型別錯也算毀損（否則照樣卡重啟迴圈）。"""
+        for payload in ({"tdcc_schedule": None},
+                        {"tdcc_schedule": 5},
+                        {"config_version": "3"}):
+            with self.subTest(payload=payload):
+                corrupt = self.config_path.with_name("config.json.corrupt")
+                if corrupt.exists():
+                    corrupt.unlink()
+                self.write_current(payload)
+
+                with self.assertLogs("web_server", level="ERROR"):
+                    config = web_server.load_config()
+
+                self.assertEqual(config["schedule_time"], "07:30")
+                self.assertTrue(corrupt.exists(), "第二層型別錯應被隔離。")
+
+    def test_write_back_failure_does_not_break_startup(self):
+        """一次性遷移寫回失敗時，服務仍須以記憶體內的設定繼續啟動。"""
+        self.write_current({"config_version": 1, "schedule_time": "23:00"})
+
+        with patch.object(web_server, "save_config",
+                          side_effect=OSError("唯讀檔案系統")):
+            with self.assertLogs("web_server", level="ERROR") as captured:
+                config = web_server.load_config()
+
+        # 遷移結果仍在記憶體內生效（窗外的 23:00 收斂回 07:30）
+        self.assertEqual(config["schedule_time"], "07:30")
+        self.assertEqual(config["config_version"], web_server.CONFIG_VERSION)
+        self.assertIn("以記憶體內的設定繼續執行", "\n".join(captured.output))
+
     def test_corrupt_config_lets_legacy_migration_run(self):
         """毀損的新設定被隔離後，舊位置的設定應能補上（不被永久遮蔽）。"""
         self.config_path.write_text("{ 壞掉了", encoding="utf-8")
@@ -411,6 +442,24 @@ class TestLegacyConfigMigration(ConfigPathTestCase):
         self.assertFalse(self.config_path.exists())
 
 
+class TestLegacyReadFailureWarnOnce(ConfigPathTestCase):
+    """測試舊設定檔毀損時的 warning 也只記一次。"""
+
+    def test_broken_legacy_warning_logged_only_once(self):
+        """load_config 被反覆呼叫時，毀損舊檔不應每次都刷 warning。"""
+        self.legacy_path.write_text("{ 壞掉了", encoding="utf-8")
+
+        with self.assertLogs("web_server", level="WARNING") as first:
+            web_server.load_config()
+        self.assertTrue(any("讀取舊設定檔" in line for line in first.output))
+
+        with self.assertLogs("web_server", level="DEBUG") as second:
+            web_server.load_config()
+        repeated = [line for line in second.output
+                    if line.startswith("WARNING") and "讀取舊設定檔" in line]
+        self.assertEqual(repeated, [], f"warning 不應重複記錄：{repeated}")
+
+
 class TestDeploymentMountsAgreement(unittest.TestCase):
     """測試 run.sh 與 CI deploy 掛載同一個設定位置（防止兩條路徑再度分岔）。
 
@@ -525,14 +574,25 @@ class TestDeploymentMountsAgreement(unittest.TestCase):
         self.assertIn(self.CONTAINER_CONFIG_PATH, ci_containers)
 
     def test_deployment_does_not_redirect_config_dir_env(self):
-        """兩處都不得用 -e CONFIG_DIR 把設定又導回 log 目錄（掛載對了也會破功）。"""
+        """兩處都不得用 CONFIG_DIR 把設定又導回 log 目錄（掛載對了也會破功）。
+
+        比對前先展開變數，避免 `-e CONFIG_DIR=$LOG_DIR` 這種間接寫法漏網。
+        """
+        log_dir_name = DEFAULT_LOG_DIR.name
         for name, text in (("run.sh", self.run_sh), (".gitlab-ci.yml", self.ci_yml)):
             with self.subTest(file=name):
-                overrides = re.findall(r"CONFIG_DIR[=:]\s*\"?([^\"\s]+)", text)
+                assigns = self._assignments(text)
+                overrides = re.findall(r'CONFIG_DIR[=:]\s*"?([^"\s]+)', text)
                 for value in overrides:
+                    expanded = self._expand(value, assigns)
                     self.assertNotIn(
-                        "logs", value,
-                        f"{name} 把 CONFIG_DIR 導向 log 目錄：{value}",
+                        log_dir_name, expanded.split("/"),
+                        f"{name} 把 CONFIG_DIR 導向 log 目錄："
+                        f"{value} → {expanded}",
+                    )
+                    self.assertNotIn(
+                        "LOG_DIR", expanded,
+                        f"{name} 把 CONFIG_DIR 導向 log 目錄變數：{value}",
                     )
 
     def test_config_is_not_served_by_logs_volume(self):
