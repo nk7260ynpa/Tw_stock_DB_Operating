@@ -170,8 +170,10 @@ Tw_stock_DB_Operating/
 │   ├── test_special_info_common.py       # 共用邏輯（帳本語意 + 缺漏偵測補抓）
 │   ├── test_web_server_special_info_backfill.py  # 缺漏自我修復 API 與作業
 │   ├── test_retry_queue.py
-│   └── test_job_queue.py
-└── logs/                     # 日誌資料夾
+│   ├── test_job_queue.py
+│   └── test_config_persistence.py        # 設定位置、舊位置遷移與掛載一致性
+├── logs/                     # 日誌資料夾（**不放設定**，見「設定持久化」）
+└── config/                   # 持久化設定資料夾（config.json）
 ```
 
 ## 使用方式
@@ -288,7 +290,7 @@ docker run --rm nk7260ynpa/tw_stock_db_operating:latest python -m pytest test/
 - **重試佇列**：檢視進入重試佇列的任務，可手動觸發重試、重設已耗盡（exhausted）任務、隔日重排、清除已完成或已放棄任務（exhausted 任務每日自動隔日重排，最多 3 次）
 - **任務佇列**：所有上傳任務透過 FIFO 佇列管理，同一時間只執行一個任務，其餘排隊等待，前端顯示排隊位置
 
-排程設定會儲存至 `logs/config.json`，重試佇列持久化至 `logs/retry_queue.json`，容器重啟後自動套用。
+排程設定會儲存至 `config/config.json`（**與 log 目錄分離**，理由見[設定持久化](#設定持久化設定為什麼不能放在-log-目錄)），重試佇列持久化至 `logs/retry_queue.json`，容器重啟後自動套用。
 
 ## 每日排程時間表（爬蟲抓取集中於 07:30~08:00）
 
@@ -430,10 +432,11 @@ CTEE 來源僅保留約 3 天，等不起。
 
 ### 排程時間的一次性遷移（config_version）
 
-排程時間有兩個來源：程式碼預設值（`load_config()`）與持久化的 `logs/config.json`
-（Web 介面修改後寫回、實際生效以此為準）。由於部署容器將 `logs/` 掛為**具名 volume**
-持久化，既有的舊時段設定會在重啟後覆蓋新的程式碼預設值。為此 `load_config()` 內建
-**版本控管的一次性遷移**（`config_version`）：
+排程時間有兩個來源：程式碼預設值（`load_config()`）與持久化的 `config/config.json`
+（Web 介面修改後寫回、實際生效以此為準，位置見
+[設定持久化](#設定持久化設定為什麼不能放在-log-目錄)）。既有的持久化設定會在重啟後
+覆蓋新的程式碼預設值，為此 `load_config()` 內建**版本控管的一次性遷移**
+（`config_version`）：
 
 - 讀取到 `config_version` 低於現行版本（或缺少）的舊設定時，將**落在 07:30~08:00
   窗外**的爬蟲抓取排程收斂到新預設並寫回 `config.json`，接著把版本標記為現行版本。
@@ -442,7 +445,57 @@ CTEE 來源僅保留約 3 天，等不起。
   重啟不會被再次覆蓋。
 
 因此升版部署後，服務**首次啟動即自動**把持久化的舊排程遷移到新的 07:30~08:00 窗，
-無需手動編輯 volume 內的 `config.json`。
+無需手動編輯 `config.json`。
+
+## 設定持久化：設定為什麼不能放在 log 目錄
+
+**設定檔位置為 `config/config.json`（容器內 `/workspace/config/config.json`），
+與 `logs/` 完全分離。** 這是踩過坑後的規定，改動前務必先讀完本節。
+
+### 曾經的坑
+
+設定檔原本寄生在 log 目錄（`logs/config.json`）。後來部署方式演進成：
+
+| 啟動路徑 | `logs/` 掛載方式 |
+|----------|------------------|
+| CI deploy（打 tag 自動部署） | 具名 volume `tw_stock_db_operating_logs` |
+| 手動 `./run.sh` | host bind `<repo>/logs` |
+
+兩者的 log 目錄**是不同的兩份資料**。設定寄生其中的後果：
+
+- 具名 volume 內從未有 `config.json`，容器實際跑的是**程式碼預設值**，host 上那份
+  使用者設定**再也不會被讀到**——而且**不會有任何錯誤訊息**。
+- 經 Web 介面改排程只會寫進當下掛載的那一份，換個啟動方式就「改動消失」。
+
+### 現在的規則
+
+- **設定**（`config.json`）放 `config/`；**log 與執行期狀態**（`*.log`、
+  `retry_queue.json`）放 `logs/`。程式端 `CONFIG_PATH` 不依附 `LOG_DIR`，
+  可用環境變數 `CONFIG_DIR` 覆寫（預設 `<專案根>/config`）。
+- `run.sh` 與 `.gitlab-ci.yml` 的 deploy job **掛載同一個 host 絕對路徑**
+  （`/Users/chen/AI/Tw_stock/Tw_stock_DB_Operating/config` → `/workspace/config`），
+  兩條啟動路徑共用同一份設定，不再分岔。設定用 bind mount（非具名 volume），
+  好處是 host 上可直接 `cat`／備份／比對。
+- `config/` 內容不進版控（`.gitignore`），且以 `.dockerignore` 排除於 build context
+  之外，避免把某次 build 當下的設定烤進 image。
+- 守門測試在 `test/test_config_persistence.py`：包含「`CONFIG_PATH` 不得位於
+  `LOG_DIR` 之下」與「`run.sh` 與 CI deploy 掛載同一設定路徑」的結構性檢查，
+  有人改回舊做法就會紅燈。
+
+### 舊設定的一次性遷移
+
+服務啟動讀設定前會呼叫 `migrate_legacy_config()`：
+
+1. 新位置有設定 → 直接使用，**新位置永遠優先**；此時若舊位置也還在，記一筆
+   warning 提示舊檔已失效（不覆寫、不刪除，保留人工比對機會）。
+2. 新位置沒有、舊位置（`logs/config.json`）有 → **原樣**搬遷（含 `config_version`，
+   確保後續的排程時間窗一次性遷移語意不變），並把舊檔改名為 `config.json.migrated`
+   保留備份，避免每次啟動重複判讀。
+3. 兩邊都沒有 → 回傳程式碼預設值，不憑空寫出設定檔。
+4. 舊檔毀損（JSON 壞掉／讀取失敗）→ 記 warning 後退回預設值，不讓服務啟動失敗。
+
+`run.sh` 另於 host 端做同語意的搬遷（`logs/config.json` → `config/config.json`），
+讓 host 上的舊設定也能被具名 volume 部署沿用。
 
 ## SPECIAL_INFO 帳本語意與缺漏自我修復
 
@@ -604,6 +657,10 @@ Pipeline 會自動：
   與 host／其他容器看到同一份真實目錄。
 - **logs 用具名 volume**：`tw_stock_db_operating_logs:/workspace/logs`（只有本服務寫入，
   不需與外部共享）。
+- **持久化設定綁絕對 host 路徑**：`-v /Users/chen/AI/Tw_stock/Tw_stock_DB_Operating/config:/workspace/config`
+  （**bind mount，非具名 volume**），與 `run.sh` 掛載同一份，兩條啟動路徑共用同一份設定。
+  設定**不可**放進 logs 具名 volume，理由見
+  [設定持久化](#設定持久化設定為什麼不能放在-log-目錄)。
 - **無對外 publish port**：Web 管理介面（容器內 8080）由 Dashboard 透過 `db_network`
   反向代理存取（`ROOT_PATH=/app/db-operating`，已烤入 image），故與 `run.sh` 一致不加 `-p`。
   查 log 改用 `docker logs tw_stock_db_operating`。
