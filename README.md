@@ -610,6 +610,14 @@ CTEE 來源僅保留約 3 天，等不起。
   整個日期區間；連不上爬蟲（`NetworkError`）才整批中止。任務有失敗日時狀態
   記為 `completed_with_errors`，避免部分成功被讀成全數成功。
 
+> **狀態欄位攔不住的殘缺資料**：來源（yfinance）偶爾回傳「有 `volume` 但
+> OHLC 全為 `null`」的殘缺 K 棒，爬蟲仍標記 `status=ok`、
+> `meta.target_date_available=true`，狀態欄位完全無從察覺（2026-08-17／08-18
+> 道瓊、納斯達克即為此類）。故資料層再守一道：**必要欄位含空值一律拋
+> `SourceError`、整批丟棄重抓、絕不寫帳本**（數值 `0` 不算空值，匯率
+> `volume=0` 為正常值）。若放行，`check_schema` 會拋出未歸類的 pydantic
+> `ValidationError`，直接炸掉整個多商品補抓作業。
+
 ### 帳本記帳語意（防止資料掉列）
 
 `*Uploaded` 帳本只記錄「爬蟲回傳 DataFrame 內每一筆的**實際交易日**」；
@@ -653,8 +661,18 @@ REST 端點：
 ```bash
 docker run --rm --network db_network \
   nk7260ynpa/tw_stock_db_operating:latest \
-  python backfill_special_info.py --days 30
+  python backfill_special_info.py --days 160
 ```
+
+失敗一律逐層隔離、絕不中斷整批：單日 `NetworkError`／`SourceError` 記入
+`network_errors`、`CrawlError` 記入 `crawl_errors`，單一商品的未預期例外只讓該商品
+中止。結束碼 0 表示全數成功，1 表示尚有日期／商品待再跑一次。
+
+> **2026-08-18 一次性修復紀錄**：以 `--days 160` 重驗 2026-03-12 起的窗，補回 **35 個
+> 被誤標為「已處理」的真實交易日**（原油 7、黃金 7、比特幣 8、匯率 6、股市指數 7，
+> 主要落在 2026-03-23~03-31 管線停擺期與 05-05、06-02、07-09）。修復後全時段「非
+> 週末孤兒帳本」由 53 筆降至 18 筆，且 18 筆全部是美股假日（元旦、MLK、總統日、
+> 耶穌受難日、陣亡將士紀念日、六月節、國慶補假），比特幣（24/7）孤兒為 0。
 
 ## 行情類 empty-crawl 帳本語意與自我修復
 
