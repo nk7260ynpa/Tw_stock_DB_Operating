@@ -28,9 +28,6 @@ DEFAULT_CONFIG_DIR = web_server.CONFIG_DIR
 DEFAULT_CONFIG_PATH = web_server.CONFIG_PATH
 DEFAULT_LOG_DIR = web_server.LOG_DIR
 
-# repo 根目錄（本檔位於 <repo>/test/）。
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
 
 class ConfigPathTestCase(unittest.TestCase):
     """提供「以暫存目錄取代真實設定路徑」的共用 setUp。"""
@@ -574,7 +571,10 @@ class TestScheduleEndpointTimeValidation(unittest.TestCase):
 
     def test_no_endpoint_uses_loose_time_parsing(self):
         """守門：任何排程端點都不得改回寬鬆的 split(":") 自行解析。"""
-        source = REPO_ROOT.joinpath("web_server.py").read_text(encoding="utf-8")
+        # 用 web_server.BASE_DIR 而非本檔路徑推算，確保掃到的正是被 import 的
+        # 那份 web_server.py（image 內另有 build/lib 等複本）。
+        source = (web_server.BASE_DIR / "web_server.py").read_text(
+            encoding="utf-8")
         self.assertNotIn(
             'time_parts = req.time.split(":")', source,
             "排程時間驗證請統一改用 _is_valid_time。",

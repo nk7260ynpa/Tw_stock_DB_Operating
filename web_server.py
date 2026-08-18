@@ -199,6 +199,8 @@ _SUPERSEDED_IN_WINDOW_DEFAULTS = {
 
 # 排程時間字串的合法格式（HH:MM，24 小時制）。schedule 套件的 .at() 只吃這種格式，
 # 其餘值（None、數字、"sunday 07:33"）會讓排程註冊當場拋例外而使服務起不來。
+# **務必以 fullmatch 使用**：本 pattern 不含 ^$ 錨點，改用 match／search 會讓
+# "07:30:00"、"07:30\n" 被靜默放行。
 _TIME_PATTERN = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 
 
@@ -430,6 +432,7 @@ def _normalize_config(config, default):
     Returns:
         dict: 正規化後的設定。
     """
+    global _repaired_fields_warned
     write_back_reasons = []
 
     # 向後相容：舊格式的 tdcc_schedule 含 day 欄位，遷移為新格式（僅保留 time）。
@@ -487,7 +490,6 @@ def _normalize_config(config, default):
     if repaired:
         # 同一組壞欄位只警告一次：load_config 幾乎每個 API 端點都會呼叫，每次都記
         # 會把 log 洗掉；壞欄位換一組（使用者又改壞別的）時仍會再警告。
-        global _repaired_fields_warned
         fields = tuple(repaired)
         if fields != _repaired_fields_warned:
             logger.warning(
@@ -501,6 +503,10 @@ def _normalize_config(config, default):
         else:
             logger.debug("設定檔 %s 的欄位格式問題仍在：%s",
                          CONFIG_PATH, "、".join(repaired))
+    else:
+        # 壞欄位已被修好（例如經 Web 介面重新寫入），旗標歸零；日後又改壞同一組
+        # 欄位時仍會再警告一次，而不是被誤判為「已警告過」。
+        _repaired_fields_warned = ()
 
     if write_back_reasons:
         _save_config_best_effort(config, "、".join(write_back_reasons))
