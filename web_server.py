@@ -6,6 +6,7 @@
 
 import os
 import re
+import itertools
 import json
 import uuid
 import time
@@ -254,6 +255,37 @@ def _migrate_crawl_schedule_window(config, default):
 _legacy_coexist_warned = False
 
 
+# 設定檔暫存檔名的遞增序號（同一行程內唯一，配合 pid 即可避免併發互相覆蓋）。
+_config_tmp_counter = itertools.count()
+
+
+def read_config_file(path):
+    """讀取設定檔並驗證其形狀。
+
+    刻意把「讀不到」與「內容壞掉」分成兩種例外，因為兩者的正確處置相反：前者不該
+    動使用者的檔案，後者才需要隔離。
+
+    Args:
+        path (pathlib.Path): 設定檔路徑。
+
+    Returns:
+        dict: 設定內容。
+
+    Raises:
+        OSError: 檔案讀取失敗（權限不足、暫時性 IO 錯誤等），**不代表內容毀損**。
+        ValueError: 內容無法解析或頂層不是 JSON 物件。涵蓋 json.JSONDecodeError 與
+            UnicodeDecodeError（兩者皆為 ValueError 子類），以及 list/int 等非物件
+            內容——後者若直接回傳，會在後續補欄位時炸成 TypeError。
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"設定檔頂層須為 JSON 物件，實際為 {type(config).__name__}"
+        )
+    return config
+
+
 def quarantine_corrupt_config():
     """把毀損的新設定檔改名隔離，讓後續流程能退回預設值或重新搬遷舊設定。
 
@@ -367,21 +399,34 @@ def load_config():
         "indices_price_schedule": {"time": "07:44"},
         "special_info_backfill_schedule": {"time": "07:57"},
     }
+    global _legacy_coexist_warned
     config = None
     if CONFIG_PATH.exists():
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                config = json.load(f)
-        except (OSError, json.JSONDecodeError) as exc:
-            # 毀損的設定檔既讀不了、又會擋住舊設定搬遷，先隔離再給搬遷一次機會。
-            logger.error("讀取設定檔 %s 失敗：%s", CONFIG_PATH, exc)
-            if quarantine_corrupt_config() and migrate_legacy_config():
-                try:
-                    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                        config = json.load(f)
-                except (OSError, json.JSONDecodeError) as exc2:
-                    logger.error("搬遷後仍無法讀取設定檔 %s：%s", CONFIG_PATH, exc2)
-                    config = None
+            config = read_config_file(CONFIG_PATH)
+        except OSError as exc:
+            # 「讀不到」不等於「內容壞了」（權限、暫時性 IO 錯誤）：**絕不改名隔離**，
+            # 否則等於把內容完好的使用者設定靜默搬走。本輪退回預設值，原檔留著，
+            # 下次啟動仍可讀回。
+            logger.error("讀取設定檔 %s 失敗（保留原檔不動，本輪改用預設值）：%s",
+                         CONFIG_PATH, exc)
+        except ValueError as exc:
+            # 內容真的毀損（JSON 壞掉、非 UTF-8、頂層不是物件）：留著它會讓
+            # migrate_legacy_config 認定「新位置已有設定」而永不搬遷，也會讓每次
+            # load_config 都拋例外使服務卡在重啟迴圈。先隔離，再給舊設定一次機會。
+            logger.error("設定檔 %s 內容毀損：%s", CONFIG_PATH, exc)
+            config = None
+            if quarantine_corrupt_config():
+                # 毀損檔已移走，先前那次「新舊並存」判讀已不成立，重設旗標讓後續
+                # 真的並存時仍會告警一次。
+                _legacy_coexist_warned = False
+                if migrate_legacy_config():
+                    try:
+                        config = read_config_file(CONFIG_PATH)
+                    except (OSError, ValueError) as exc2:
+                        logger.error("搬遷後仍無法讀取設定檔 %s：%s",
+                                     CONFIG_PATH, exc2)
+                        config = None
     if config is not None:
         # 向後相容：舊 config 可能沒有 tdcc_schedule
         if "tdcc_schedule" not in config:
@@ -449,22 +494,34 @@ def save_config(config):
     寫入前確保設定目錄存在：容器可能以尚未建立的 host 路徑掛載設定目錄，
     或執行期被外部刪除，缺目錄時寫入會失敗而讓 Web 介面的修改整個丟失。
 
+    寫入為原子操作（暫存檔 + Path.replace），但**未做 fsync**：正常的容器重啟／
+    docker rm -f 不受影響，僅在主機層突然斷電或 VM 崩潰時可能丟失最後一次寫入。
+
     Args:
         config (dict): 設定內容。
+
+    Raises:
+        OSError: 設定目錄無法建立或檔案寫入失敗（呼叫端據此決定是否保留舊檔）。
     """
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     # 原子寫入：先寫同目錄的暫存檔再 os.replace 換上去。直接 open(..., "w") 會先
     # 截斷舊檔，寫到一半失敗（磁碟滿、容器被 kill）就留下毀損 JSON——而毀損的新檔
     # 會讓 migrate_legacy_config 認定「新位置已有設定」而永不再搬遷，等於把使用者
     # 設定連同備援一起弄丟。os.replace 在同一檔案系統上為原子操作。
-    tmp_path = CONFIG_PATH.with_name(CONFIG_PATH.name + ".tmp")
+    # 暫存檔名帶 pid + 遞增序號，確保每次寫入各用各的暫存檔：排程端點是同步 def
+    # （跑在 FastAPI threadpool），前端首屏會併發打十幾個 GET，共用固定暫存檔名時
+    # 兩個執行緒會互相寫壞對方的暫存檔。（不用 thread id：執行緒結束後 id 會被重用。）
+    tmp_path = CONFIG_PATH.with_name(
+        f"{CONFIG_PATH.name}.{os.getpid()}.{next(_config_tmp_counter)}.tmp"
+    )
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
         # Path.replace 即 os.replace，同檔案系統內為原子操作：換上去的一定是完整檔案。
         tmp_path.replace(CONFIG_PATH)
-    except OSError:
-        # 失敗時清掉暫存檔，避免殘留半截檔案；既有設定檔維持原樣不受影響。
+    except Exception:
+        # 任何失敗都要清掉暫存檔（含 json.dump 遇不可序列化物件的 TypeError），
+        # 避免殘留半截檔案；既有設定檔維持原樣不受影響。
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:

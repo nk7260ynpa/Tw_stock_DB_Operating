@@ -9,9 +9,10 @@
 3. 新舊並存時的優先順序明確（新位置優先），且兩邊都沒有時退回程式碼預設值。
 """
 
+import builtins
 import json
-import re
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -176,6 +177,96 @@ class TestConfigWriteDurability(ConfigPathTestCase):
         self.assertFalse(self.config_path.exists())
         corrupt = self.config_path.with_name(self.config_path.name + ".corrupt")
         self.assertTrue(corrupt.exists(), "毀損檔應改名保留供人工檢視。")
+
+    def test_invalid_utf8_config_is_quarantined(self):
+        """非 UTF-8 位元組（UnicodeDecodeError）也算毀損，須被隔離。"""
+        self.config_path.write_bytes(b'{"schedule_time": "\xff\xfe"}')
+
+        with self.assertLogs("web_server", level="ERROR"):
+            config = web_server.load_config()
+
+        self.assertEqual(config["schedule_time"], "07:30")
+        self.assertTrue(
+            self.config_path.with_name("config.json.corrupt").exists()
+        )
+
+    def test_non_object_config_is_quarantined(self):
+        """頂層不是 JSON 物件（如 list／int）也算毀損，不可讓它往下炸成 TypeError。"""
+        for payload in ("[]", "123", '"07:30"'):
+            with self.subTest(payload=payload):
+                corrupt = self.config_path.with_name("config.json.corrupt")
+                if corrupt.exists():
+                    corrupt.unlink()
+                self.config_path.write_text(payload, encoding="utf-8")
+
+                with self.assertLogs("web_server", level="ERROR"):
+                    config = web_server.load_config()
+
+                self.assertEqual(config["schedule_time"], "07:30")
+                self.assertTrue(corrupt.exists(), "非物件內容應被隔離。")
+
+    def test_unreadable_config_is_not_quarantined(self):
+        """讀不到（OSError）不等於內容壞掉：絕不改名隔離，原檔須原封不動。"""
+        self.write_current({"config_version": web_server.CONFIG_VERSION,
+                            "schedule_time": "20:15"})
+        before = self.config_path.read_text(encoding="utf-8")
+
+        real_open = builtins.open
+
+        def fake_open(file, *args, **kwargs):
+            if str(file) == str(self.config_path):
+                raise PermissionError("權限不足")
+            return real_open(file, *args, **kwargs)
+
+        with patch("builtins.open", side_effect=fake_open):
+            with self.assertLogs("web_server", level="ERROR") as captured:
+                config = web_server.load_config()
+
+        self.assertEqual(config["schedule_time"], "07:30",
+                         "讀不到時本輪退回預設值。")
+        self.assertTrue(self.config_path.exists(), "原設定檔不可被改名或刪除。")
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
+        self.assertFalse(
+            self.config_path.with_name("config.json.corrupt").exists(),
+            "讀取失敗不得把完好的設定改名為 .corrupt。",
+        )
+        self.assertIn("保留原檔不動", "\n".join(captured.output))
+
+    def test_unserializable_config_leaves_no_temp_file(self):
+        """json.dump 遇不可序列化物件（TypeError）時也要清掉暫存檔。"""
+        self.write_current({"config_version": web_server.CONFIG_VERSION,
+                            "schedule_time": "07:30"})
+
+        with self.assertRaises(TypeError):
+            web_server.save_config({"schedule_time": object()})
+
+        leftovers = [item.name for item in self.config_dir.iterdir()
+                     if item.name.endswith(".tmp")]
+        self.assertEqual(leftovers, [], f"不應殘留暫存檔：{leftovers}")
+
+    def test_temp_file_name_is_unique_per_write(self):
+        """每次寫入須用不同的暫存檔名，避免併發寫入互相覆蓋。
+
+        排程端點是同步 def（跑在 FastAPI threadpool），前端首屏會併發呼叫多個
+        load_config／save_config；共用固定暫存檔名時，兩個執行緒會寫壞對方的暫存檔，
+        原子替換也就失去意義。
+        """
+        real_dump = json.dump
+        names = []
+
+        def record_dump(obj, fp, **kwargs):
+            names.append(fp.name)
+            return real_dump(obj, fp, **kwargs)
+
+        with patch("json.dump", side_effect=record_dump):
+            web_server.save_config({"schedule_time": "07:30"})
+            web_server.save_config({"schedule_time": "07:31"})
+
+        self.assertEqual(len(names), 2)
+        for name in names:
+            self.assertTrue(name.endswith(".tmp"), name)
+        self.assertNotEqual(names[0], names[1],
+                            f"每次寫入的暫存檔名不可相同：{names}")
 
     def test_corrupt_config_lets_legacy_migration_run(self):
         """毀損的新設定被隔離後，舊位置的設定應能補上（不被永久遮蔽）。"""
@@ -350,7 +441,6 @@ class TestDeploymentMountsAgreement(unittest.TestCase):
             dict[str, str]: 變數名對應值；無法靜態解析者（如命令替換）自然不會入列。
         """
         assigns = {}
-        assigns.update(re.findall(r'^\s*(\w+)="([^"\n$]*)"\s*$', text, re.M))
         assigns.update(re.findall(r'^\s*(\w+)="([^"\n]*)"\s*$', text, re.M))
         assigns.update(re.findall(r'^\s+(\w+):\s+"([^"\n]+)"', text, re.M))
         return assigns
@@ -433,6 +523,17 @@ class TestDeploymentMountsAgreement(unittest.TestCase):
         ci_containers = {c for _, c in self._mounts(self.ci_yml)}
         self.assertIn(self.CONTAINER_CONFIG_PATH, run_sh_containers)
         self.assertIn(self.CONTAINER_CONFIG_PATH, ci_containers)
+
+    def test_deployment_does_not_redirect_config_dir_env(self):
+        """兩處都不得用 -e CONFIG_DIR 把設定又導回 log 目錄（掛載對了也會破功）。"""
+        for name, text in (("run.sh", self.run_sh), (".gitlab-ci.yml", self.ci_yml)):
+            with self.subTest(file=name):
+                overrides = re.findall(r"CONFIG_DIR[=:]\s*\"?([^\"\s]+)", text)
+                for value in overrides:
+                    self.assertNotIn(
+                        "logs", value,
+                        f"{name} 把 CONFIG_DIR 導向 log 目錄：{value}",
+                    )
 
     def test_config_is_not_served_by_logs_volume(self):
         """設定不得再由 logs 具名 volume 提供（原本被靜默丟棄的根因）。"""
