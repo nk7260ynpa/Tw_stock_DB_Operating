@@ -34,4 +34,6 @@ def isolate_config_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(
         web_server, "LEGACY_CONFIG_BACKUP_PATH", log_dir / "config.json.migrated"
     )
+    # 「新舊並存」warning 只記一次的旗標是模組層狀態，逐測試重設避免互相污染。
+    monkeypatch.setattr(web_server, "_legacy_coexist_warned", False)
     yield tmp_path

@@ -11,6 +11,11 @@
 .gitignore
 .github/
 
+# 開發者專屬文件與工具設定：image 會推上公開的 DockerHub，這些檔案既非執行所需，
+# 也不該隨映像散布（CLAUDE.md 在本 repo 亦已 gitignore）。
+CLAUDE.md
+.claude/
+
 # 注意：`.gitlab-ci.yml` **刻意保留**在 build context 內。
 # test/test_config_persistence.py 會比對 run.sh 與 deploy job 是否掛載同一個設定
 # 目錄，而測試也會在 image 內執行（見 README「執行測試」），排除它會讓那組守門

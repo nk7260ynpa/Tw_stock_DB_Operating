@@ -26,9 +26,15 @@ mkdir -p "${LOG_DIR}" "${CONFIG_DIR}"
 # 相容遷移：舊版設定檔寄生在 logs/ 內，若新位置尚無設定就搬過去（原樣保留內容），
 # 避免既有排程自訂在改用獨立設定目錄後被丟棄。容器內另有同語意的遷移邏輯，
 # 此處先於 host 處理，讓 host 上的舊設定也能被具名 volume 部署沿用。
+# 與容器內一致採「先複製、再把舊檔改名備份」，不用 mv 直接搬走：複製失敗時舊檔仍在，
+# 下次啟動可再試一次，使用者設定不會憑空消失。
 if [[ ! -f "${CONFIG_DIR}/config.json" && -f "${LOG_DIR}/config.json" ]]; then
   echo "偵測到舊設定檔 logs/config.json，搬遷至 config/config.json"
-  mv "${LOG_DIR}/config.json" "${CONFIG_DIR}/config.json"
+  if cp "${LOG_DIR}/config.json" "${CONFIG_DIR}/config.json"; then
+    mv "${LOG_DIR}/config.json" "${LOG_DIR}/config.json.migrated"
+  else
+    echo "設定搬遷失敗，保留舊檔 logs/config.json 待下次啟動重試。" >&2
+  fi
 fi
 
 # 檢查 image 是否存在

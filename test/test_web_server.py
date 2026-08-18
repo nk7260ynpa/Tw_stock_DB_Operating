@@ -151,19 +151,18 @@ class TestCrawlScheduleMigration(unittest.TestCase):
 class TestSaveConfig(unittest.TestCase):
     """測試 save_config 函式。"""
 
-    @patch("web_server.CONFIG_PATH")
-    def test_save_config_writes_json(self, mock_path):
-        """測試正確寫入 JSON 設定檔。"""
+    def test_save_config_writes_json(self):
+        """測試正確寫入 JSON 設定檔。
+
+        save_config 改為「暫存檔 + os.replace」原子寫入後，open 的對象是暫存檔而非
+        CONFIG_PATH，故改為直接斷言最終落地的檔案內容（conftest 已把設定路徑導向
+        測試專用暫存目錄）。
+        """
         import web_server
 
-        m = mock_open()
-        with patch("builtins.open", m):
-            web_server.save_config({"schedule_time": "22:00"})
+        web_server.save_config({"schedule_time": "22:00"})
 
-        m.assert_called_once_with(mock_path, "w", encoding="utf-8")
-        written = "".join(
-            call.args[0] for call in m().write.call_args_list
-        )
+        written = web_server.CONFIG_PATH.read_text(encoding="utf-8")
         self.assertIn("22:00", written)
 
 

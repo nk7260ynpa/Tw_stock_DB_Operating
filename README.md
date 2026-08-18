@@ -478,9 +478,16 @@ CTEE 來源僅保留約 3 天，等不起。
   好處是 host 上可直接 `cat`／備份／比對。
 - `config/` 內容不進版控（`.gitignore`），且以 `.dockerignore` 排除於 build context
   之外，避免把某次 build 當下的設定烤進 image。
+- **設定寫入為原子操作**：`save_config` 先寫同目錄的 `config.json.tmp`，再以
+  `Path.replace()`（即 `os.replace`）換上去。直接覆寫會先截斷舊檔，寫到一半失敗
+  （磁碟滿、容器被 kill）就留下毀損 JSON——而毀損的新檔會讓遷移邏輯認定「新位置
+  已有設定」，把舊位置的備援一併遮蔽掉。寫入失敗時暫存檔會被清掉，既有設定不受影響。
+- **毀損設定檔會被隔離**：`load_config` 讀不動新位置的設定時，把它改名為
+  `config.json.corrupt`（保留現場供人工檢視），記 error，接著再給舊設定一次搬遷機會；
+  都沒有才退回程式碼預設值。服務不會因為一個壞掉的設定檔而卡在重啟迴圈。
 - 守門測試在 `test/test_config_persistence.py`：包含「`CONFIG_PATH` 不得位於
-  `LOG_DIR` 之下」與「`run.sh` 與 CI deploy 掛載同一設定路徑」的結構性檢查，
-  有人改回舊做法就會紅燈。
+  `LOG_DIR` 之下」與「`run.sh` 與 CI deploy 掛載到容器內同一設定路徑」的結構性檢查
+  （後者斷言的是**掛載效果**而非變數名稱），有人改回舊做法就會紅燈。
 
 ### 舊設定的一次性遷移
 
@@ -496,8 +503,12 @@ CTEE 來源僅保留約 3 天，等不起。
 5. 新位置寫不進去（權限／唯讀）→ 記 error 但**保留舊檔不改名**，下次啟動可再試，
    設定不會消失。
 
+新舊並存的 warning **只在第一次記錄**（其後降為 debug）：`load_config` 幾乎每個 API
+端點都會呼叫，而舊檔依設計不會自動刪除，每次都記會把 log 洗掉。
+
 `run.sh` 另於 host 端做同語意的搬遷（`logs/config.json` → `config/config.json`），
-讓 host 上的舊設定也能被具名 volume 部署沿用。
+一樣是「先複製、成功後才把舊檔改名為 `config.json.migrated`」而非 `mv` 直接搬走，
+讓 host 上的舊設定也能被具名 volume 部署沿用，且複製失敗時舊檔仍在、下次啟動可重試。
 
 ## SPECIAL_INFO 帳本語意與缺漏自我修復
 

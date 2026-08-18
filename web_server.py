@@ -249,6 +249,32 @@ def _migrate_crawl_schedule_window(config, default):
     return changed
 
 
+# 「新舊設定並存」的 warning 只在第一次記錄：load_config 幾乎每個 API 端點都會呼叫，
+# 而舊檔依設計不會被自動刪除，若每次都記 warning 會把 log 洗掉。
+_legacy_coexist_warned = False
+
+
+def quarantine_corrupt_config():
+    """把毀損的新設定檔改名隔離，讓後續流程能退回預設值或重新搬遷舊設定。
+
+    設定檔毀損（例如寫入途中被中斷）時若原地留著，migrate_legacy_config 會因為
+    「新位置已存在」而永不搬遷舊設定，且每次 load_config 都會拋例外導致服務起不來。
+    改名為 config.json.corrupt 後保留現場供人工檢視，服務則可正常啟動。
+
+    Returns:
+        bool: 成功改名時回傳 True，否則 False。
+    """
+    corrupt_path = CONFIG_PATH.with_name(CONFIG_PATH.name + ".corrupt")
+    try:
+        CONFIG_PATH.rename(corrupt_path)
+    except OSError as exc:
+        logger.error("毀損設定檔 %s 改名隔離失敗：%s", CONFIG_PATH, exc)
+        return False
+    logger.error("設定檔 %s 無法解析，已改名為 %s 並改用預設值（或改讀舊設定）。",
+                 CONFIG_PATH, corrupt_path)
+    return True
+
+
 def migrate_legacy_config():
     """把寄生在 log 目錄的舊設定檔一次性搬遷到獨立設定目錄。
 
@@ -268,10 +294,15 @@ def migrate_legacy_config():
         if not LEGACY_CONFIG_PATH.exists():
             return False
         if CONFIG_PATH.exists():
-            logger.warning(
-                "設定檔新舊位置同時存在，一律以新位置 %s 為準；舊檔 %s 已失效，"
-                "可自行刪除。", CONFIG_PATH, LEGACY_CONFIG_PATH,
-            )
+            global _legacy_coexist_warned
+            if not _legacy_coexist_warned:
+                logger.warning(
+                    "設定檔新舊位置同時存在，一律以新位置 %s 為準；舊檔 %s 已失效，"
+                    "可自行刪除。", CONFIG_PATH, LEGACY_CONFIG_PATH,
+                )
+                _legacy_coexist_warned = True
+            else:
+                logger.debug("設定檔新舊位置仍同時存在（以 %s 為準）。", CONFIG_PATH)
             return False
         with open(LEGACY_CONFIG_PATH, "r", encoding="utf-8") as f:
             legacy_config = json.load(f)
@@ -336,9 +367,22 @@ def load_config():
         "indices_price_schedule": {"time": "07:44"},
         "special_info_backfill_schedule": {"time": "07:57"},
     }
+    config = None
     if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            config = json.load(f)
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            # 毀損的設定檔既讀不了、又會擋住舊設定搬遷，先隔離再給搬遷一次機會。
+            logger.error("讀取設定檔 %s 失敗：%s", CONFIG_PATH, exc)
+            if quarantine_corrupt_config() and migrate_legacy_config():
+                try:
+                    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                        config = json.load(f)
+                except (OSError, json.JSONDecodeError) as exc2:
+                    logger.error("搬遷後仍無法讀取設定檔 %s：%s", CONFIG_PATH, exc2)
+                    config = None
+    if config is not None:
         # 向後相容：舊 config 可能沒有 tdcc_schedule
         if "tdcc_schedule" not in config:
             config["tdcc_schedule"] = default["tdcc_schedule"]
@@ -409,8 +453,23 @@ def save_config(config):
         config (dict): 設定內容。
     """
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    # 原子寫入：先寫同目錄的暫存檔再 os.replace 換上去。直接 open(..., "w") 會先
+    # 截斷舊檔，寫到一半失敗（磁碟滿、容器被 kill）就留下毀損 JSON——而毀損的新檔
+    # 會讓 migrate_legacy_config 認定「新位置已有設定」而永不再搬遷，等於把使用者
+    # 設定連同備援一起弄丟。os.replace 在同一檔案系統上為原子操作。
+    tmp_path = CONFIG_PATH.with_name(CONFIG_PATH.name + ".tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        # Path.replace 即 os.replace，同檔案系統內為原子操作：換上去的一定是完整檔案。
+        tmp_path.replace(CONFIG_PATH)
+    except OSError:
+        # 失敗時清掉暫存檔，避免殘留半截檔案；既有設定檔維持原樣不受影響。
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def setup_schedule(

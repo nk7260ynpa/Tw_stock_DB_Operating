@@ -10,6 +10,7 @@
 """
 
 import json
+import re
 import os
 import subprocess
 import sys
@@ -145,6 +146,70 @@ class TestConfigReadWrite(ConfigPathTestCase):
                          "沒有既有設定時不應憑空寫出設定檔。")
 
 
+class TestConfigWriteDurability(ConfigPathTestCase):
+    """測試設定寫入的原子性與毀損設定檔的處理。"""
+
+    def test_save_config_is_atomic_on_failure(self):
+        """寫入途中失敗時，既有設定檔必須原封不動且不留殘骸。"""
+        self.write_current({"config_version": web_server.CONFIG_VERSION,
+                            "schedule_time": "07:30"})
+        before = self.config_path.read_text(encoding="utf-8")
+
+        with patch("json.dump", side_effect=OSError("磁碟空間不足")):
+            with self.assertRaises(OSError):
+                web_server.save_config({"schedule_time": "19:30"})
+
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), before,
+                         "寫入失敗不應動到既有設定檔。")
+        leftovers = [item.name for item in self.config_dir.iterdir()
+                     if item.name.endswith(".tmp")]
+        self.assertEqual(leftovers, [], f"不應殘留暫存檔：{leftovers}")
+
+    def test_corrupt_config_is_quarantined_and_defaults_used(self):
+        """毀損的設定檔應被改名隔離，服務改用預設值而非啟動失敗。"""
+        self.config_path.write_text('{"schedule_time": "07:3', encoding="utf-8")
+
+        with self.assertLogs("web_server", level="ERROR"):
+            config = web_server.load_config()
+
+        self.assertEqual(config["schedule_time"], "07:30")
+        self.assertFalse(self.config_path.exists())
+        corrupt = self.config_path.with_name(self.config_path.name + ".corrupt")
+        self.assertTrue(corrupt.exists(), "毀損檔應改名保留供人工檢視。")
+
+    def test_corrupt_config_lets_legacy_migration_run(self):
+        """毀損的新設定被隔離後，舊位置的設定應能補上（不被永久遮蔽）。"""
+        self.config_path.write_text("{ 壞掉了", encoding="utf-8")
+        self.write_legacy({"config_version": web_server.CONFIG_VERSION,
+                           "schedule_time": "07:31"})
+
+        with self.assertLogs("web_server", level="ERROR"):
+            config = web_server.load_config()
+
+        self.assertEqual(config["schedule_time"], "07:31")
+        self.assertTrue(self.config_path.exists())
+
+
+class TestLegacyCoexistWarningOnce(ConfigPathTestCase):
+    """測試「新舊並存」warning 只記一次，避免刷爆 log。"""
+
+    def test_warning_logged_only_once(self):
+        """load_config 被反覆呼叫時不應每次都記 warning。"""
+        self.write_current({"config_version": web_server.CONFIG_VERSION,
+                            "schedule_time": "07:30"})
+        self.write_legacy({"schedule_time": "19:07"})
+
+        with self.assertLogs("web_server", level="WARNING") as first:
+            web_server.load_config()
+        self.assertTrue(any("新舊位置同時存在" in line for line in first.output))
+
+        with self.assertLogs("web_server", level="DEBUG") as second:
+            web_server.load_config()
+        repeated = [line for line in second.output
+                    if line.startswith("WARNING") and "新舊位置同時存在" in line]
+        self.assertEqual(repeated, [], f"warning 不應重複記錄：{repeated}")
+
+
 class TestLegacyConfigMigration(ConfigPathTestCase):
     """測試舊位置（logs/config.json）的一次性遷移。"""
 
@@ -256,10 +321,17 @@ class TestLegacyConfigMigration(ConfigPathTestCase):
 
 
 class TestDeploymentMountsAgreement(unittest.TestCase):
-    """測試 run.sh 與 CI deploy 掛載同一個設定位置（防止兩條路徑再度分岔）。"""
+    """測試 run.sh 與 CI deploy 掛載同一個設定位置（防止兩條路徑再度分岔）。
+
+    斷言的是「掛載效果」（哪個 host 路徑對到容器內哪個路徑），而非某個變數叫什麼
+    名字：日後改寫變數命名但行為正確時不應紅燈，行為真的分岔時才要紅燈。
+    """
 
     CONTAINER_CONFIG_PATH = "/workspace/config"
-    HOST_CONFIG_DIR = "Tw_stock_DB_Operating/config"
+    HOST_CONFIG_SUFFIX = "Tw_stock_DB_Operating/config"
+
+    _VAR_RE = re.compile(r"\$\{?(\w+)\}?")
+    _MOUNT_RE = re.compile(r"(?:-v|--volume)\s+\"?([^\"\s]+)\"?")
 
     def setUp(self):
         """讀入 run.sh 與 .gitlab-ci.yml 內容。"""
@@ -267,23 +339,107 @@ class TestDeploymentMountsAgreement(unittest.TestCase):
         self.run_sh = (base / "run.sh").read_text(encoding="utf-8")
         self.ci_yml = (base / ".gitlab-ci.yml").read_text(encoding="utf-8")
 
-    def test_run_sh_mounts_config_dir(self):
-        """run.sh 需把 host 的 config/ 掛進容器設定路徑。"""
-        self.assertIn(f'-v "${{CONFIG_DIR}}:{self.CONTAINER_CONFIG_PATH}"',
-                      self.run_sh)
-        self.assertIn('CONFIG_DIR="${SCRIPT_DIR}/config"', self.run_sh)
+    @classmethod
+    def _assignments(cls, text):
+        """蒐集檔案內可靜態解析的變數指派（shell 的 A="b" 與 YAML 的 A: "b"）。
+
+        Args:
+            text (str): 檔案內容。
+
+        Returns:
+            dict[str, str]: 變數名對應值；無法靜態解析者（如命令替換）自然不會入列。
+        """
+        assigns = {}
+        assigns.update(re.findall(r'^\s*(\w+)="([^"\n$]*)"\s*$', text, re.M))
+        assigns.update(re.findall(r'^\s*(\w+)="([^"\n]*)"\s*$', text, re.M))
+        assigns.update(re.findall(r'^\s+(\w+):\s+"([^"\n]+)"', text, re.M))
+        return assigns
+
+    @classmethod
+    def _expand(cls, value, assigns):
+        """反覆展開 $VAR / ${VAR}，無法解析者原樣保留。
+
+        Args:
+            value (str): 待展開字串。
+            assigns (dict[str, str]): 變數表。
+
+        Returns:
+            str: 展開後字串。
+        """
+        for _ in range(5):
+            expanded = cls._VAR_RE.sub(
+                lambda m: assigns.get(m.group(1), m.group(0)), value
+            )
+            if expanded == value:
+                break
+            value = expanded
+        return value
+
+    @classmethod
+    def _mounts(cls, text):
+        """取出所有 (host, container) 掛載對並展開變數。
+
+        Args:
+            text (str): run.sh 或 .gitlab-ci.yml 內容。
+
+        Returns:
+            list[tuple[str, str]]: 掛載對清單。
+        """
+        assigns = cls._assignments(text)
+        mounts = []
+        for spec in cls._MOUNT_RE.findall(text):
+            expanded = cls._expand(spec, assigns)
+            if expanded.count(":") >= 1:
+                host, _, container = expanded.rpartition(":")
+                mounts.append((host, container))
+        return mounts
+
+    def _config_mount_of(self, text):
+        """取出唯一一個對到容器設定路徑的掛載，並斷言確實只有一個。
+
+        Args:
+            text (str): 檔案內容。
+
+        Returns:
+            str: 該掛載的 host 側路徑。
+        """
+        hosts = [host for host, container in self._mounts(text)
+                 if container == self.CONTAINER_CONFIG_PATH]
+        self.assertEqual(
+            len(hosts), 1,
+            f"應恰有一個掛載對到 {self.CONTAINER_CONFIG_PATH}，實際：{hosts}",
+        )
+        return hosts[0]
+
+    def test_run_sh_mounts_repo_config_dir(self):
+        """run.sh 需把「腳本所在 repo 的 config/」掛到容器設定路徑。"""
+        host = self._config_mount_of(self.run_sh)
+        self.assertTrue(host.endswith("/config"), f"host 側非 config 目錄：{host}")
+        self.assertIn("SCRIPT_DIR", host,
+                      f"run.sh 的設定掛載應相對於腳本所在目錄：{host}")
 
     def test_ci_deploy_mounts_same_host_config_dir(self):
-        """CI deploy 需掛載與 run.sh 相同的 host 絕對路徑。"""
-        self.assertIn(f'CONFIG_PATH: "{self.CONTAINER_CONFIG_PATH}"',
-                      self.ci_yml)
-        self.assertIn(
-            f'--volume "${{HOST_ROOT}}/{self.HOST_CONFIG_DIR}:$CONFIG_PATH"',
-            self.ci_yml,
+        """CI deploy 需掛載 host 上同一個 repo 的 config/（絕對路徑）。"""
+        host = self._config_mount_of(self.ci_yml)
+        self.assertTrue(host.startswith("/"), f"CI 掛載須為絕對路徑：{host}")
+        self.assertTrue(
+            host.endswith(self.HOST_CONFIG_SUFFIX),
+            f"CI 設定掛載的 host 路徑應為 {self.HOST_CONFIG_SUFFIX}，實際：{host}",
         )
 
-    def test_ci_does_not_put_config_in_logs_volume(self):
-        """設定不得再被塞進 logs 具名 volume。"""
+    def test_two_launch_paths_agree_on_container_config_path(self):
+        """兩條啟動路徑必須指向容器內同一個設定目錄（分岔就是本 issue 的病灶）。"""
+        run_sh_containers = {c for _, c in self._mounts(self.run_sh)}
+        ci_containers = {c for _, c in self._mounts(self.ci_yml)}
+        self.assertIn(self.CONTAINER_CONFIG_PATH, run_sh_containers)
+        self.assertIn(self.CONTAINER_CONFIG_PATH, ci_containers)
+
+    def test_config_is_not_served_by_logs_volume(self):
+        """設定不得再由 logs 具名 volume 提供（原本被靜默丟棄的根因）。"""
+        log_hosts = {host for host, container in self._mounts(self.ci_yml)
+                     if container.endswith("/logs")}
+        config_host = self._config_mount_of(self.ci_yml)
+        self.assertNotIn(config_host, log_hosts)
         self.assertNotIn("$LOGS_VOLUME:/workspace/config", self.ci_yml)
 
 
