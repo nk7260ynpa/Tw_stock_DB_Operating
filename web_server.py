@@ -6,6 +6,7 @@
 
 import os
 import re
+import itertools
 import json
 import uuid
 import time
@@ -53,10 +54,23 @@ from routers import db_conn
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
 LOG_DIR = BASE_DIR / "logs"
-CONFIG_PATH = LOG_DIR / "config.json"
 
-# 確保 logs 資料夾存在
+# 持久化設定目錄：**刻意與 logs/ 分離**。設定檔曾寄生在 log 目錄（logs/config.json），
+# 但部署（CI deploy）把 logs 掛成具名 volume、手動 run.sh 掛 host 的 ./logs，兩條路徑
+# 的 log 目錄內容不同，設定會隨掛載方式在容器間「靜默消失」（Web 介面改完排程，換個
+# 啟動方式就回到程式碼預設值）。故設定改放獨立的 config/ 目錄，run.sh 與 CI deploy
+# 掛載**同一個** host 絕對路徑，兩條路徑不再分岔。
+CONFIG_DIR = Path(os.environ.get("CONFIG_DIR") or (BASE_DIR / "config"))
+CONFIG_PATH = CONFIG_DIR / "config.json"
+
+# 舊設定位置（寄生在 log 目錄），僅供一次性遷移讀取，不再寫入。
+LEGACY_CONFIG_PATH = LOG_DIR / "config.json"
+# 一次性遷移成功後，舊設定檔改名保留為備份（避免每次啟動重複判讀新舊來源）。
+LEGACY_CONFIG_BACKUP_PATH = LOG_DIR / "config.json.migrated"
+
+# 確保 logs 與 config 資料夾存在
 os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(CONFIG_DIR, exist_ok=True)
 
 # Logging 設定
 log_formatter = logging.Formatter(
@@ -183,6 +197,25 @@ _SUPERSEDED_IN_WINDOW_DEFAULTS = {
 }
 
 
+# 排程時間字串的合法格式（HH:MM，24 小時制）。schedule 套件的 .at() 只吃這種格式，
+# 其餘值（None、數字、"sunday 07:33"）會讓排程註冊當場拋例外而使服務起不來。
+# **務必以 fullmatch 使用**：本 pattern 不含 ^$ 錨點，改用 match／search 會讓
+# "07:30:00"、"07:30\n" 被靜默放行。
+_TIME_PATTERN = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
+
+
+def _is_valid_time(value):
+    """判斷值是否為合法的 HH:MM 時間字串。
+
+    Args:
+        value: 待檢查的值（任意型別）。
+
+    Returns:
+        bool: 為合法 HH:MM 字串時回傳 True。
+    """
+    return isinstance(value, str) and bool(_TIME_PATTERN.fullmatch(value))
+
+
 def _in_crawl_window(time_str):
     """判斷 HH:MM 是否落在爬蟲集中時間窗 07:30~08:00（含端點）內。
 
@@ -236,9 +269,254 @@ def _migrate_crawl_schedule_window(config, default):
     return changed
 
 
+# 「新舊設定並存」的 warning 只在第一次記錄：load_config 幾乎每個 API 端點都會呼叫，
+# 而舊檔依設計不會被自動刪除，若每次都記 warning 會把 log 洗掉。
+_legacy_coexist_warned = False
+# 舊設定檔讀取失敗的 warning 同理只記第一次。
+_legacy_read_warned = False
+# 上一次警告過的「格式不符欄位」組合（tuple），用來避免同一組問題重複刷 warning。
+_repaired_fields_warned = ()
+
+
+# 設定檔暫存檔名的遞增序號（同一行程內唯一，配合 pid 即可避免併發互相覆蓋）。
+_config_tmp_counter = itertools.count()
+
+
+def read_config_file(path):
+    """讀取設定檔並驗證其形狀。
+
+    刻意把「讀不到」與「內容壞掉」分成兩種例外，因為兩者的正確處置相反：前者不該
+    動使用者的檔案，後者才需要隔離。
+
+    Args:
+        path (pathlib.Path): 設定檔路徑。
+
+    Returns:
+        dict: 設定內容。
+
+    Raises:
+        OSError: 檔案讀取失敗（權限不足、暫時性 IO 錯誤等），**不代表內容毀損**。
+        ValueError: 內容無法解析或頂層不是 JSON 物件。涵蓋 json.JSONDecodeError 與
+            UnicodeDecodeError（兩者皆為 ValueError 子類），以及 list/int 等非物件
+            內容——後者若直接回傳，會在後續補欄位時炸成 TypeError。
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"設定檔頂層須為 JSON 物件，實際為 {type(config).__name__}"
+        )
+    return config
+
+
+def quarantine_corrupt_config():
+    """把毀損的新設定檔改名隔離，讓後續流程能退回預設值或重新搬遷舊設定。
+
+    設定檔毀損（例如寫入途中被中斷）時若原地留著，migrate_legacy_config 會因為
+    「新位置已存在」而永不搬遷舊設定，且每次 load_config 都會拋例外導致服務起不來。
+    改名為 config.json.corrupt 後保留現場供人工檢視，服務則可正常啟動。
+
+    Returns:
+        bool: 成功改名時回傳 True，否則 False。
+    """
+    corrupt_path = CONFIG_PATH.with_name(CONFIG_PATH.name + ".corrupt")
+    try:
+        CONFIG_PATH.rename(corrupt_path)
+    except OSError as exc:
+        logger.error("毀損設定檔 %s 改名隔離失敗：%s", CONFIG_PATH, exc)
+        return False
+    logger.error("設定檔 %s 無法解析，已改名為 %s 並改用預設值（或改讀舊設定）。",
+                 CONFIG_PATH, corrupt_path)
+    return True
+
+
+def migrate_legacy_config():
+    """把寄生在 log 目錄的舊設定檔一次性搬遷到獨立設定目錄。
+
+    舊版把 config.json 放在 logs/ 內，而部署時 logs/ 是具名 volume、手動 run.sh 是
+    host bind，導致設定隨掛載方式而消失。本函式在服務讀取設定前執行，若新位置尚無
+    設定、舊位置有，就**原樣**（含 config_version）搬過去，讓既有排程自訂不被丟棄，
+    且後續 version-gated 的一次性遷移仍照原語意判讀。
+
+    優先順序：新位置（CONFIG_PATH）永遠優先。兩邊都存在時不覆寫新位置，只記錄
+    warning 提示舊檔已失效；兩邊都不存在時不做任何事（由 load_config 回傳預設值）。
+    搬遷成功後把舊檔改名為 config.json.migrated 保留備份，避免每次啟動重複判讀。
+
+    Returns:
+        bool: 實際發生搬遷時回傳 True，否則 False。
+    """
+    try:
+        if not LEGACY_CONFIG_PATH.exists():
+            return False
+        if CONFIG_PATH.exists():
+            global _legacy_coexist_warned
+            if not _legacy_coexist_warned:
+                logger.warning(
+                    "設定檔新舊位置同時存在，一律以新位置 %s 為準；舊檔 %s 已失效，"
+                    "可自行刪除。", CONFIG_PATH, LEGACY_CONFIG_PATH,
+                )
+                _legacy_coexist_warned = True
+            else:
+                logger.debug("設定檔新舊位置仍同時存在（以 %s 為準）。", CONFIG_PATH)
+            return False
+        legacy_config = read_config_file(LEGACY_CONFIG_PATH)
+    except (OSError, ValueError) as exc:
+        # ValueError 涵蓋 JSON 語法錯、非 UTF-8（UnicodeDecodeError）與頂層非物件；
+        # 舊檔壞掉不該讓服務起不來，也不該把垃圾內容搬進新位置。舊檔一律保留不動，
+        # 由使用者自行處置。warning 只記一次（load_config 幾乎每個端點都會呼叫）。
+        global _legacy_read_warned
+        if not _legacy_read_warned:
+            logger.warning("讀取舊設定檔 %s 失敗，改用預設值：%s",
+                           LEGACY_CONFIG_PATH, exc)
+            _legacy_read_warned = True
+        else:
+            logger.debug("舊設定檔 %s 仍無法讀取（改用預設值）。",
+                         LEGACY_CONFIG_PATH)
+        return False
+
+    try:
+        save_config(legacy_config)
+    except OSError as exc:
+        # 寫不進新位置時**不可**動舊檔：留著它，下次啟動還能再試一次搬遷，
+        # 使用者設定不會被丟掉；本輪則退回預設值啟動而非讓服務起不來。
+        logger.error("舊設定搬遷失敗（無法寫入 %s）：%s；已保留舊檔 %s。",
+                     CONFIG_PATH, exc, LEGACY_CONFIG_PATH)
+        return False
+    logger.info("已將舊設定檔 %s 一次性搬遷至 %s（設定內容原樣保留）。",
+                LEGACY_CONFIG_PATH, CONFIG_PATH)
+    try:
+        LEGACY_CONFIG_PATH.rename(LEGACY_CONFIG_BACKUP_PATH)
+    except OSError as exc:
+        # 改名失敗不影響設定正確性（新位置已寫入且優先），僅下次啟動會再記一次
+        # 「新舊並存」warning。
+        logger.warning("舊設定檔 %s 改名備份失敗：%s", LEGACY_CONFIG_PATH, exc)
+    return True
+
+
+def _save_config_best_effort(config, purpose):
+    """盡力寫回設定，寫不進去也不讓服務起不來。
+
+    load_config 內的兩處自動寫回（TDCC 週排程遷移、時間窗一次性遷移）都發生在
+    lifespan 啟動路徑上；若因唯讀檔案系統／權限問題拋 OSError，整個服務會起不來，
+    而這兩次寫回只是「持久化本來就已算好的結果」，記憶體內的設定仍然可用。
+
+    Args:
+        config (dict): 要寫回的設定內容。
+        purpose (str): 本次寫回的用途（僅供 log 描述）。
+    """
+    try:
+        save_config(config)
+    except OSError as exc:
+        logger.error("%s 無法寫回設定檔 %s：%s；本次以記憶體內的設定繼續執行。",
+                     purpose, CONFIG_PATH, exc)
+
+
+def _normalize_config(config, default):
+    """補齊缺漏欄位、修復型別不符的欄位，並執行 version-gated 的一次性遷移。
+
+    設定檔可能被人工編輯壞（`"tdcc_schedule": null`、`"ctee_schedule": 5`、
+    `"schedule_time": "sunday"`），這些值一路傳到 `setup_schedule` 才爆炸的話，
+    在 `--restart always` 下就是重啟迴圈。故此處做**與版本無關**的形狀正規化：
+    凡型別或格式不符預期者一律換成預設值並記 warning，讓服務照樣起得來，同時
+    保留同一份設定中其餘正常的使用者自訂。
+
+    形狀不符者本身**不觸發寫回**，保留使用者原檔供人工檢視；只有一次性遷移
+    （TDCC 舊格式、爬蟲時間窗）才寫回，且統一在正規化全部完成後寫一次，避免
+    半套結果落地——注意兩者同時發生時，修復後的內容會隨遷移一併寫回，warning
+    文案會據此改口。同一組壞欄位的 warning 只記一次（其後降為 debug）。
+
+    Args:
+        config (dict): 讀入的既有設定（就地修改）。
+        default (dict): 內含新版預設值的設定。
+
+    Returns:
+        dict: 正規化後的設定。
+    """
+    global _repaired_fields_warned
+    write_back_reasons = []
+
+    # 向後相容：舊格式的 tdcc_schedule 含 day 欄位，遷移為新格式（僅保留 time）。
+    # 需先確認確實是 dict，否則 "day" in "sunday" 之類會誤判並在下一行拋
+    # AttributeError（字串／list 沒有 .get）。
+    tdcc = config.get("tdcc_schedule")
+    if isinstance(tdcc, dict) and "day" in tdcc:
+        config["tdcc_schedule"] = {"time": tdcc.get("time", "07:33")}
+        write_back_reasons.append("TDCC 排程設定從週排程遷移為每日排程")
+        logger.info("已將 TDCC 排程設定從週排程遷移為每日排程。")
+
+    # 形狀正規化：缺鍵靜默補上（舊版設定沒有新欄位屬正常），型別／格式錯則
+    # 換成預設值並記 warning（那是壞掉的設定，使用者需要知道）。
+    repaired = []
+    for key, default_value in default.items():
+        if key == "config_version":
+            continue
+        if isinstance(default_value, dict):
+            # {"time": "HH:MM"} 結構的具名排程
+            entry = config.get(key)
+            if key not in config:
+                config[key] = dict(default_value)
+            elif not isinstance(entry, dict) or not _is_valid_time(
+                    entry.get("time")):
+                config[key] = dict(default_value)
+                repaired.append(key)
+        else:
+            # 目前 default 內的頂層純量僅有 schedule_time（HH:MM 字串）
+            if key not in config:
+                config[key] = default_value
+            elif not _is_valid_time(config[key]):
+                config[key] = default_value
+                repaired.append(key)
+
+    # config_version 缺漏（舊版設定本來就沒有）或無法判讀時一律視同最舊版本，
+    # 讓一次性遷移有機會補跑；直接拿字串和 CONFIG_VERSION 比大小會拋 TypeError。
+    version = config.get("config_version", 1)
+    if isinstance(version, bool) or not isinstance(version, int):
+        version = 1
+        repaired.append("config_version")
+    config["config_version"] = version
+
+    # 一次性遷移（version-gated）：把落在 07:30~08:00 窗外的爬蟲排程收斂到
+    # 新預設並寫回，讓部署重啟後持久化的舊時段自動更新；bump 版本後不再重跑，
+    # 保留使用者日後經 Web 介面所做的窗內自訂。
+    if config["config_version"] < CONFIG_VERSION:
+        migrated = _migrate_crawl_schedule_window(config, default)
+        config["config_version"] = CONFIG_VERSION
+        write_back_reasons.append("爬蟲抓取排程一次性遷移至 07:30~08:00 時間窗")
+        if migrated:
+            logger.info(
+                "已將舊時段的爬蟲抓取排程一次性遷移至 07:30~08:00 時間窗。"
+            )
+
+    if repaired:
+        # 同一組壞欄位只警告一次：load_config 幾乎每個 API 端點都會呼叫，每次都記
+        # 會把 log 洗掉；壞欄位換一組（使用者又改壞別的）時仍會再警告。
+        fields = tuple(repaired)
+        if fields != _repaired_fields_warned:
+            logger.warning(
+                "設定檔 %s 中下列欄位格式不符，本輪改用預設值（%s，請人工確認）：%s",
+                CONFIG_PATH,
+                "原檔將因本次一次性遷移一併被改寫" if write_back_reasons
+                else "原檔保留未修改",
+                "、".join(repaired),
+            )
+            _repaired_fields_warned = fields
+        else:
+            logger.debug("設定檔 %s 的欄位格式問題仍在：%s",
+                         CONFIG_PATH, "、".join(repaired))
+    else:
+        # 壞欄位已被修好（例如經 Web 介面重新寫入），旗標歸零；日後又改壞同一組
+        # 欄位時仍會再警告一次，而不是被誤判為「已警告過」。
+        _repaired_fields_warned = ()
+
+    if write_back_reasons:
+        _save_config_best_effort(config, "、".join(write_back_reasons))
+    return config
+
+
 def load_config():
     """讀取設定檔。
 
+    讀取前先呼叫 migrate_legacy_config 處理「舊設定檔仍在 log 目錄」的情形。
     首次讀取既有（舊版）config.json 時，會依 config_version 觸發一次性遷移，
     把落在 07:30~08:00 窗外的爬蟲抓取排程收斂到新預設並寫回，之後保留使用者的
     窗內自訂（見 _migrate_crawl_schedule_window）。
@@ -252,6 +530,9 @@ def load_config():
             indices_price_schedule、special_info_backfill_schedule
             與 config_version 欄位。
     """
+    # 舊版設定寄生在 log 目錄，先一次性搬遷到獨立設定目錄，避免使用者自訂被丟棄。
+    migrate_legacy_config()
+
     # 所有爬取排程集中於 07:30~08:00 之間並彼此錯開，避免同時併發搶爬蟲資源。
     default = {
         "config_version": CONFIG_VERSION,
@@ -269,77 +550,86 @@ def load_config():
         "indices_price_schedule": {"time": "07:44"},
         "special_info_backfill_schedule": {"time": "07:57"},
     }
+    global _legacy_coexist_warned
+    config = None
     if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            config = json.load(f)
-        # 向後相容：舊 config 可能沒有 tdcc_schedule
-        if "tdcc_schedule" not in config:
-            config["tdcc_schedule"] = default["tdcc_schedule"]
-        # 向後相容：舊格式含 day 欄位，遷移為新格式（僅保留 time）
-        elif "day" in config["tdcc_schedule"]:
-            config["tdcc_schedule"] = {
-                "time": config["tdcc_schedule"].get("time", "07:33"),
-            }
-            save_config(config)
-            logger.info("已將 TDCC 排程設定從週排程遷移為每日排程。")
-        # 向後相容：舊 config 可能沒有 ctee_schedule
-        if "ctee_schedule" not in config:
-            config["ctee_schedule"] = default["ctee_schedule"]
-        # 向後相容：舊 config 可能沒有 cnyes_schedule
-        if "cnyes_schedule" not in config:
-            config["cnyes_schedule"] = default["cnyes_schedule"]
-        # 向後相容：舊 config 可能沒有 ptt_schedule
-        if "ptt_schedule" not in config:
-            config["ptt_schedule"] = default["ptt_schedule"]
-        # 向後相容：舊 config 可能沒有 moneyudn_schedule
-        if "moneyudn_schedule" not in config:
-            config["moneyudn_schedule"] = default["moneyudn_schedule"]
-        # 向後相容：舊 config 可能沒有 yt_transcript_schedule
-        if "yt_transcript_schedule" not in config:
-            config["yt_transcript_schedule"] = default["yt_transcript_schedule"]
-        # 向後相容：舊 config 可能沒有 oil_price_schedule
-        if "oil_price_schedule" not in config:
-            config["oil_price_schedule"] = default["oil_price_schedule"]
-        # 向後相容：舊 config 可能沒有 gold_price_schedule
-        if "gold_price_schedule" not in config:
-            config["gold_price_schedule"] = default["gold_price_schedule"]
-        # 向後相容：舊 config 可能沒有 bitcoin_price_schedule
-        if "bitcoin_price_schedule" not in config:
-            config["bitcoin_price_schedule"] = default["bitcoin_price_schedule"]
-        # 向後相容：舊 config 可能沒有 currency_price_schedule
-        if "currency_price_schedule" not in config:
-            config["currency_price_schedule"] = default["currency_price_schedule"]
-        # 向後相容：舊 config 可能沒有 indices_price_schedule
-        if "indices_price_schedule" not in config:
-            config["indices_price_schedule"] = default["indices_price_schedule"]
-        # 向後相容：舊 config 可能沒有 special_info_backfill_schedule
-        if "special_info_backfill_schedule" not in config:
-            config["special_info_backfill_schedule"] = (
-                default["special_info_backfill_schedule"]
-            )
-        # 一次性遷移（version-gated）：把落在 07:30~08:00 窗外的爬蟲排程收斂到
-        # 新預設並寫回，讓部署重啟後持久化的舊時段自動更新；bump 版本後不再重跑，
-        # 保留使用者日後經 Web 介面所做的窗內自訂。
-        if config.get("config_version", 1) < CONFIG_VERSION:
-            migrated = _migrate_crawl_schedule_window(config, default)
-            config["config_version"] = CONFIG_VERSION
-            save_config(config)
-            if migrated:
-                logger.info(
-                    "已將舊時段的爬蟲抓取排程一次性遷移至 07:30~08:00 時間窗。"
-                )
-        return config
+        try:
+            config = read_config_file(CONFIG_PATH)
+        except OSError as exc:
+            # 「讀不到」不等於「內容壞了」（權限、暫時性 IO 錯誤）：**絕不改名隔離**，
+            # 否則等於把內容完好的使用者設定靜默搬走。本輪退回預設值，原檔留著，
+            # 下次啟動仍可讀回。
+            logger.error("讀取設定檔 %s 失敗（保留原檔不動，本輪改用預設值）：%s",
+                         CONFIG_PATH, exc)
+        except ValueError as exc:
+            # 內容真的毀損（JSON 壞掉、非 UTF-8、頂層不是物件）：留著它會讓
+            # migrate_legacy_config 認定「新位置已有設定」而永不搬遷，也會讓每次
+            # load_config 都拋例外使服務卡在重啟迴圈。先隔離，再給舊設定一次機會。
+            logger.error("設定檔 %s 內容毀損：%s", CONFIG_PATH, exc)
+            config = None
+            if quarantine_corrupt_config():
+                # 毀損檔已移走，先前那次「新舊並存」判讀已不成立，重設旗標讓後續
+                # 真的並存時仍會告警一次。
+                _legacy_coexist_warned = False
+                if migrate_legacy_config():
+                    try:
+                        config = read_config_file(CONFIG_PATH)
+                    except (OSError, ValueError) as exc2:
+                        logger.error("搬遷後仍無法讀取設定檔 %s：%s",
+                                     CONFIG_PATH, exc2)
+                        config = None
+    if config is not None:
+        try:
+            return _normalize_config(config, default)
+        except (AttributeError, KeyError, TypeError, ValueError,
+                RecursionError) as exc:
+            # 保險絲：_normalize_config 已把已知的型別／格式錯就地修復，走到這裡
+            # 代表出現預期外的結構問題。不攔的話每次 load_config 都會拋例外，
+            # --restart always 下就是重啟迴圈，故處置與頂層毀損一致（隔離 + 預設值）。
+            logger.error("設定檔 %s 內容不合預期：%s", CONFIG_PATH, exc)
+            quarantine_corrupt_config()
     return default
 
 
 def save_config(config):
-    """儲存設定檔。
+    """儲存設定檔至獨立設定目錄（CONFIG_PATH）。
+
+    寫入前確保設定目錄存在：容器可能以尚未建立的 host 路徑掛載設定目錄，
+    或執行期被外部刪除，缺目錄時寫入會失敗而讓 Web 介面的修改整個丟失。
+
+    寫入為原子操作（暫存檔 + Path.replace），但**未做 fsync**：正常的容器重啟／
+    docker rm -f 不受影響，僅在主機層突然斷電或 VM 崩潰時可能丟失最後一次寫入。
 
     Args:
         config (dict): 設定內容。
+
+    Raises:
+        OSError: 設定目錄無法建立或檔案寫入失敗（呼叫端據此決定是否保留舊檔）。
     """
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # 原子寫入：先寫同目錄的暫存檔再 os.replace 換上去。直接 open(..., "w") 會先
+    # 截斷舊檔，寫到一半失敗（磁碟滿、容器被 kill）就留下毀損 JSON——而毀損的新檔
+    # 會讓 migrate_legacy_config 認定「新位置已有設定」而永不再搬遷，等於把使用者
+    # 設定連同備援一起弄丟。os.replace 在同一檔案系統上為原子操作。
+    # 暫存檔名帶 pid + 遞增序號，確保每次寫入各用各的暫存檔：排程端點是同步 def
+    # （跑在 FastAPI threadpool），前端首屏會併發打十幾個 GET，共用固定暫存檔名時
+    # 兩個執行緒會互相寫壞對方的暫存檔。（不用 thread id：執行緒結束後 id 會被重用。）
+    tmp_path = CONFIG_PATH.with_name(
+        f"{CONFIG_PATH.name}.{os.getpid()}.{next(_config_tmp_counter)}.tmp"
+    )
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        # Path.replace 即 os.replace，同檔案系統內為原子操作：換上去的一定是完整檔案。
+        tmp_path.replace(CONFIG_PATH)
+    except Exception:
+        # 任何失敗都要清掉暫存檔（含 json.dump 遇不可序列化物件的 TypeError），
+        # 避免殘留半截檔案；既有設定檔維持原樣不受影響。
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def setup_schedule(
@@ -2611,13 +2901,9 @@ def update_schedule(req: ScheduleRequest):
     Returns:
         dict: 更新後的排程時間與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -2826,13 +3112,9 @@ def update_tdcc_schedule(req: TDCCScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -2952,13 +3234,9 @@ def update_ctee_news_schedule(req: CTEENewsScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3078,13 +3356,9 @@ def update_cnyes_news_schedule(req: CNYESNewsScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3204,13 +3478,9 @@ def update_ptt_news_schedule(req: PTTNewsScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3330,13 +3600,9 @@ def update_moneyudn_news_schedule(req: MoneyUDNNewsScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3445,13 +3711,9 @@ def update_yt_transcript_schedule(req: YTTranscriptScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3610,13 +3872,9 @@ def update_oil_price_schedule(req: OilPriceScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3735,13 +3993,9 @@ def update_gold_price_schedule(req: GoldPriceScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3860,13 +4114,9 @@ def update_bitcoin_price_schedule(req: BitcoinPriceScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3985,13 +4235,9 @@ def update_currency_price_schedule(req: CurrencyPriceScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -4110,13 +4356,9 @@ def update_indices_price_schedule(req: IndicesPriceScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -4172,13 +4414,9 @@ def update_special_info_backfill_schedule(
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()

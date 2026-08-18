@@ -25,7 +25,10 @@ _CONN_OWNER_FILES = {
 }
 
 # 掃描範圍：正式程式碼（排除測試、前端與虛擬環境）。
-_SKIP_DIRS = {"test", "frontend", "node_modules", ".git", "static", "logs"}
+# `build` 為 Dockerfile 內 `pip install .` 留下的 setuptools 產物（正式碼的複本），
+# 不排除的話在 image 內跑測試會把 build/lib/routers.py 當成違規（假紅燈）。
+_SKIP_DIRS = {"test", "frontend", "node_modules", ".git", "static", "logs",
+              "build"}
 
 
 def _iter_production_files():

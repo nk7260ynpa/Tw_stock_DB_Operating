@@ -33,13 +33,18 @@ workflow:
 # ─────────────────────────────────────────────────────────────────────
 # deploy：打 vX.Y.Z tag 時，build image 並以新 image 重啟服務容器
 #
-#   本 repo 三個特例（與一般範本不同，務必留意）：
+#   本 repo 四個特例（與一般範本不同，務必留意）：
 #     1. 以「版本化 tag」跑容器：docker run 啟動的是 $IMAGE:$VERSION（非 :latest），
 #        與 run.sh 既有慣例一致；build 仍同時打 :$VERSION 與 :latest 兩個 tag。
 #     2. 共享資料夾 NewsContents 綁「絕對 host 路徑」（非具名 volume）：此目錄由
 #        db-operating 寫入、Tw_stock_news 讀取，必須與 host／其他容器看到同一份真實
 #        目錄，故用 bind mount 指向 host 的 Tw_stock_DB/NewsContents。
 #     3. logs 用「具名 volume」（只有 db-operating 自己寫，不需與外部共享）。
+#     4. 持久化設定 config/ 綁「絕對 host 路徑」，**不可**放進 logs 具名 volume：
+#        設定檔曾寄生在 logs/config.json，logs 改為具名 volume 後，host 上使用者
+#        既有的設定就再也不會被讀到（容器靜默回到程式碼預設值，經 Web 介面改排程
+#        也只寫進 volume、與 run.sh 分岔）。改綁與 run.sh **同一個** host 絕對路徑
+#        後，兩條啟動路徑共用同一份設定。
 #
 #   本服務無對外 publish port：Web 管理介面（容器內 8080）由 Dashboard 透過 db_network
 #   反向代理存取（ROOT_PATH=/app/db-operating，已烤入 image），故 deploy 與 run.sh 一致
@@ -57,6 +62,7 @@ deploy:
     CONTAINER: "tw_stock_db_operating"
     LOGS_VOLUME: "tw_stock_db_operating_logs"           # logs 具名 volume（僅本服務寫入）
     LOGS_PATH: "/workspace/logs"
+    CONFIG_PATH: "/workspace/config"                    # 持久化設定（與 logs 分離，見特例 4）
     NEWS_PATH: "/workspace/NewsContents"
     HOST_ROOT: "/Users/chen/AI/Tw_stock"                # 共享資料夾用的絕對 host 路徑根
   before_script:
@@ -72,6 +78,7 @@ deploy:
         --restart=always
         --network db_network
         --volume "$LOGS_VOLUME:$LOGS_PATH"
+        --volume "${HOST_ROOT}/Tw_stock_DB_Operating/config:$CONFIG_PATH"
         --volume "${HOST_ROOT}/Tw_stock_DB/NewsContents:$NEWS_PATH"
         "$IMAGE:$VERSION"
     - docker image prune -f || true

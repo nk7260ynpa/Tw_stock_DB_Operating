@@ -218,4 +218,8 @@ __marimo__/
 # Logs
 logs/*
 !logs/.gitkeep
+
+# 持久化設定（各部署環境自有內容，不進版控；目錄本身需保留以供 bind mount）
+config/*
+!config/.gitkeep
 .DS_Store
