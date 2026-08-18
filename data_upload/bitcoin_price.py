@@ -41,9 +41,12 @@ class BitcoinPriceUploader:
     使用 REPLACE INTO 寫入 SPECIAL_INFO 資料庫。
     資料表結構由 Tw_stock_DB 專案負責建立與管理。
 
-    比特幣為 24/7 連續市場（is_continuous_market=True）：當日 UTC 日 K 未
-    完成時爬蟲會 fallback 回上一交易日，此時「不」標記請求日，留待次日回補，
-    避免帳本謊報造成永久跳過（詳見 special_info_common 帳本語意說明）。
+    比特幣為 24/7 連續市場（is_continuous_market=True）：實際日期早於請求日
+    時「不」標記請求日，留待次日回補，避免帳本謊報造成永久跳過（詳見
+    special_info_common 帳本語意說明）。
+
+    排程一律只請求「昨日」（web_server.settled_end_date）：13:1x UTC 執行時
+    當日的 UTC 日 K 已存在但僅完成約一半，直接請求當日會把半根 K 寫死。
     """
 
     # 24/7 連續市場，供 special_info_common 判斷帳本語意與缺漏偵測行為。
@@ -251,14 +254,18 @@ class BitcoinPriceUploader:
         """
         return special_info_common.find_missing_dates(self, days=days)
 
-    def backfill_missing(self, days=30, deep=False):
+    def backfill_missing(self, days=30, today=None, deep=False):
         """掃描近 N 天缺漏並補抓（冪等、可重跑）。
 
         Args:
             days (int): 掃描天數，預設 30。
+            today (str | datetime.date | None): 掃描基準日（含），預設當日。
+                排程呼叫時固定傳「昨日」，只重驗已定案的日 K。
             deep (bool): 是否先清除孤兒帳本再重驗，預設 False。
 
         Returns:
             dict: 補抓摘要。
         """
-        return special_info_common.backfill_missing(self, days=days, deep=deep)
+        return special_info_common.backfill_missing(
+            self, days=days, today=today, deep=deep
+        )

@@ -17,7 +17,8 @@ class TestLoadConfig(unittest.TestCase):
 
         mock_path.exists.return_value = True
         # 帶 config_version：已完成一次性遷移的設定，既有值原樣保留（不再遷移）。
-        config_data = {"schedule_time": "21:30", "config_version": web_server.CONFIG_VERSION}
+        config_data = {"schedule_time": "21:30",
+                       "config_version": web_server.CONFIG_VERSION}
 
         with patch("builtins.open", mock_open(read_data=json.dumps(config_data))):
             result = web_server.load_config()
@@ -198,17 +199,69 @@ class TestCrawlScheduleMigration(unittest.TestCase):
         import web_server
 
         expected = TestScheduleDefaults.EXPECTED
-        for key, superseded in web_server._SUPERSEDED_IN_WINDOW_DEFAULTS.items():
+        superseded_map = web_server._SUPERSEDED_IN_WINDOW_DEFAULTS
+        for key, superseded in superseded_map.items():
             with self.subTest(key=key):
                 # 前提：這些舊值確實落在窗內，才需要本機制攔截。
                 self.assertTrue(web_server._in_crawl_window(superseded))
                 mock_path.exists.return_value = True
-                old_config = {"schedule_time": "19:07", key: {"time": superseded}}
+                old_config = {"schedule_time": "19:07",
+                              key: {"time": superseded}}
                 with patch("builtins.open",
                            unittest.mock.mock_open(read_data="{}")):
                     with patch("json.load", return_value=old_config.copy()):
                         config = web_server.load_config()
                 self.assertEqual(config[key]["time"], expected[key])
+
+    # 全部歷史預設值（v1 / v2），用來把「盤點」變成可執行的守門：任何一個
+    # 歷史值若未被收斂到新預設，代表 _SUPERSEDED_IN_WINDOW_DEFAULTS 漏列。
+    HISTORICAL_DEFAULTS = {
+        "schedule_time": ("20:07", "07:30"),
+        "tdcc_schedule": ("10:00", "07:33"),
+        "ctee_schedule": ("21:00", "07:46"),
+        "cnyes_schedule": ("21:30", "07:48"),
+        "ptt_schedule": ("22:00", "07:50"),
+        "moneyudn_schedule": ("22:30", "07:52"),
+        "yt_transcript_schedule": ("19:05", "07:54"),
+        "oil_price_schedule": ("07:00", "07:36"),
+        "gold_price_schedule": ("07:05", "07:38"),
+        "bitcoin_price_schedule": ("07:10", "07:40"),
+        "currency_price_schedule": ("07:15", "07:42"),
+        "indices_price_schedule": ("07:20", "07:44"),
+        "special_info_backfill_schedule": ("08:00", "07:57"),
+    }
+
+    @patch("web_server.save_config")
+    @patch("web_server.CONFIG_PATH")
+    def test_every_historical_default_is_migrated(self, mock_path, mock_save):
+        """每個 v1／v2 歷史預設值都必須被收斂到新預設，一個都不能漏。
+
+        _SUPERSEDED_IN_WINDOW_DEFAULTS 的既有測試只能證明「已列出的有效」，
+        無法偵測漏列；本測試改由歷史值本身出發，漏列會直接紅燈。
+        """
+        import web_server
+
+        expected = TestScheduleDefaults.EXPECTED
+        mock_path.exists.return_value = True
+        for key, olds in self.HISTORICAL_DEFAULTS.items():
+            for old_value in olds:
+                with self.subTest(key=key, old=old_value):
+                    if key == "schedule_time":
+                        old_config = {"schedule_time": old_value}
+                    else:
+                        old_config = {"schedule_time": "19:07",
+                                      key: {"time": old_value}}
+                    with patch("builtins.open",
+                               unittest.mock.mock_open(read_data="{}")):
+                        with patch("json.load",
+                                   return_value=old_config.copy()):
+                            config = web_server.load_config()
+                    actual = (config[key] if key == "schedule_time"
+                              else config[key]["time"])
+                    self.assertEqual(
+                        actual, expected[key],
+                        f"{key} 的歷史值 {old_value} 未收斂到新預設"
+                    )
 
     @patch("web_server.save_config")
     @patch("web_server.CONFIG_PATH")

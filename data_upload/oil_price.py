@@ -41,9 +41,11 @@ class OilPriceUploader:
     使用 REPLACE INTO 寫入 SPECIAL_INFO 資料庫。
     資料表結構由 Tw_stock_DB 專案負責建立與管理。
 
-    原油為非 24/7 市場（is_continuous_market=False）：排程時間（07:00）美股
-    已收盤、資料已定案，爬蟲 fallback 即代表請求日為非交易日，故 fallback／
-    空時標記請求日（詳見 special_info_common 帳本語意說明）。
+    原油為非 24/7 市場（is_continuous_market=False）。
+
+    排程一律只請求「昨日」（web_server.settled_end_date），確保請求日的日 K
+    已定案；此前提成立時，爬蟲 fallback 到更早日期即代表請求日為非交易日，
+    故 fallback／空時標記請求日（詳見 special_info_common 帳本語意說明）。
     """
 
     # 非 24/7 市場，供 special_info_common 判斷帳本語意與缺漏偵測行為。
@@ -245,14 +247,18 @@ class OilPriceUploader:
         """
         return special_info_common.find_missing_dates(self, days=days)
 
-    def backfill_missing(self, days=30, deep=False):
+    def backfill_missing(self, days=30, today=None, deep=False):
         """掃描近 N 天缺漏並補抓（冪等、可重跑）。
 
         Args:
             days (int): 掃描天數，預設 30。
+            today (str | datetime.date | None): 掃描基準日（含），預設當日。
+                排程呼叫時固定傳「昨日」，只重驗已定案的日 K。
             deep (bool): 是否先清除孤兒帳本再重驗，預設 False。
 
         Returns:
             dict: 補抓摘要。
         """
-        return special_info_common.backfill_missing(self, days=days, deep=deep)
+        return special_info_common.backfill_missing(
+            self, days=days, today=today, deep=deep
+        )
