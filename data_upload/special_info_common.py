@@ -60,6 +60,7 @@ import logging
 from datetime import datetime, timedelta
 
 import pandas as pd
+from pydantic import ValidationError
 from sqlalchemy import text
 
 from data_upload.base import (
@@ -151,7 +152,8 @@ def parse_price_response(uploader, result, date):
         pd.DataFrame: 欄位已正規化的行情 DataFrame（無資料時為空）。
 
     Raises:
-        SourceError: `partial`／`error`／未知狀態（可重試，不得記帳）。
+        SourceError: `partial`／`error`／未知狀態，或必要欄位含空值
+            （可重試，不得記帳）。
         OutOfRangeError: `out_of_range`（不可重試，由呼叫端記帳）。
         CrawlError: 舊版格式錯誤回應，或回傳資料缺少必要欄位。
     """
@@ -184,7 +186,39 @@ def parse_price_response(uploader, result, date):
     missing = REQUIRED_COLUMNS - set(df.columns)
     if missing:
         raise CrawlError(f"{label}{context} 爬蟲回傳資料缺少欄位：{missing}")
+    _reject_null_rows(uploader, df, date)
     return df
+
+
+def _reject_null_rows(uploader, df, date):
+    """必要欄位含 null 時視為抓取失敗（可重試、不得記帳）。
+
+    來源（yfinance）偶爾回傳「有 volume 但 OHLC 全為 null」的殘缺 K 棒，
+    此時爬蟲仍標記 `status=ok`／`target_date_available=true`，狀態欄位無從
+    察覺。若放行，check_schema 會拋 pydantic ValidationError（未被歸類的
+    例外，會炸掉整批補抓）；若改為容忍寫入，等於把殘缺資料當成完整的一天
+    記進帳本而永久遮蔽。故一律當成來源端暫時性失敗，整批丟棄重抓。
+
+    Args:
+        uploader: 上傳器實例（提供 asset_label）。
+        df (pd.DataFrame): 欄位已正規化的行情 DataFrame。
+        date (str): 請求日期字串（YYYY-MM-DD）。
+
+    Raises:
+        SourceError: 任一必要欄位含 null（可重試，一律不得寫入帳本）。
+    """
+    null_mask = df[sorted(REQUIRED_COLUMNS)].isna()
+    if not null_mask.to_numpy().any():
+        return
+
+    bad_columns = sorted(null_mask.columns[null_mask.any()].tolist())
+    bad_rows = df.loc[null_mask.any(axis=1)]
+    products = sorted({str(p) for p in bad_rows.get("Product", [])})
+    raise SourceError(
+        f"{uploader.asset_label}（{date}）爬蟲回傳資料含空值欄位"
+        f"{bad_columns}（商品：{', '.join(products) or '未知'}），"
+        "視為來源端殘缺資料，整批丟棄重抓以免記入不完整的一天。"
+    )
 
 
 def record_uploaded_dates(uploader, dates):
@@ -237,8 +271,9 @@ def fetch_and_store(uploader, date):
 
     Raises:
         NetworkError: 網路連線失敗（供重試機制使用）。
-        SourceError: 來源端抓取失敗或狀態自相矛盾（可重試、未記帳）。
-        CrawlError: 爬蟲回傳格式異常。
+        SourceError: 來源端抓取失敗、資料殘缺或狀態自相矛盾（可重試、
+            未記帳）。
+        CrawlError: 爬蟲回傳格式或型別異常（未記帳）。
     """
     reset_crawl_state(uploader)
     try:
@@ -268,7 +303,13 @@ def fetch_and_store(uploader, date):
             )
         return _handle_no_data(uploader, date, settled, status)
 
-    df = uploader.check_schema(df)
+    try:
+        df = uploader.check_schema(df)
+    except ValidationError as e:
+        # 欄位型別不符（如來源改格式）：歸類為格式異常，逐日隔離而非炸整批。
+        raise CrawlError(
+            f"{uploader.asset_label}（{date}）爬蟲回傳資料型別不符：{e}"
+        ) from e
     record_count = len(df)
     uploader._replace_into(df)
 
@@ -485,7 +526,10 @@ def backfill_missing(uploader, days=30, today=None, deep=False,
         - 尚未定案（含 24/7 商品當日）→ 計入 still_pending（留待次日）。
 
     NetworkError 逐日捕捉、記入 network_errors 供呼叫端交由 retry_queue，
-    不中斷整體掃描；`SourceError` 為其子類，同樣逐日隔離。
+    不中斷整體掃描；`SourceError`（含來源殘缺資料）為其子類，同樣逐日隔離。
+    `CrawlError`（格式／型別異常）另記入 crawl_errors：這類錯誤重試多半無用，
+    但仍不得中斷掃描——否則清單上第一個「毒日期」會讓其後所有日期（乃至
+    後續商品）全部沒機會處理。
 
     孤兒帳本清理（帳本有列但價格表 0 列）：
 
@@ -529,6 +573,7 @@ def backfill_missing(uploader, days=30, today=None, deep=False,
         "records": 0,
         "orphans_cleared": orphans_cleared,
         "network_errors": [],
+        "crawl_errors": [],
     }
     for date_str in missing:
         try:
@@ -539,6 +584,13 @@ def backfill_missing(uploader, days=30, today=None, deep=False,
                 uploader.asset_label, date_str, e,
             )
             summary["network_errors"].append(date_str)
+            continue
+        except CrawlError as e:
+            logger.error(
+                "%s 缺漏補抓 %s 格式異常：%s（略過該日，繼續掃描）。",
+                uploader.asset_label, date_str, e,
+            )
+            summary["crawl_errors"].append(date_str)
             continue
         outcome = result.get("outcome")
         if result["filled"]:
@@ -552,10 +604,10 @@ def backfill_missing(uploader, days=30, today=None, deep=False,
             summary["non_trading"] += 1
     logger.info(
         "%s 缺漏補抓完成：清孤兒 %d、掃描 %d、補回 %d、非交易日 %d、"
-        "待次日 %d、抓取失敗 %d。",
+        "待次日 %d、抓取失敗 %d、格式異常 %d。",
         uploader.asset_label, summary["orphans_cleared"], summary["scanned"],
         summary["filled"], summary["non_trading"], summary["still_pending"],
-        len(summary["network_errors"]),
+        len(summary["network_errors"]), len(summary["crawl_errors"]),
     )
     return summary
 

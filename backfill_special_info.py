@@ -82,16 +82,35 @@ def run_backfill(days, host, user, password, crawlerhost):
         password (str): MySQL 密碼。
         crawlerhost (str): 爬蟲服務主機位址。
 
+    單一商品若拋出未預期例外（如資料庫連線中斷），僅記錄該商品失敗並繼續
+    處理其餘商品：本作業冪等可重跑，讓四個健康商品的補抓成果落地，遠優於
+    因一個商品中斷而整批作廢。
+
     Returns:
-        list[dict]: 各商品的補抓摘要。
+        list[dict]: 各商品的補抓摘要（失敗者含 fatal 鍵）。
     """
     summaries = []
     for uploader_cls in UPLOADER_CLASSES:
-        with db_conn(host, user, password, "SPECIAL_INFO") as conn:
-            uploader = uploader_cls(conn, crawlerhost)
-            # deep=True：先清孤兒帳本再交由爬蟲重驗，救回被誤標的真實交易日。
-            summary = uploader.backfill_missing(days=days, deep=True)
-            summaries.append(summary)
+        try:
+            with db_conn(host, user, password, "SPECIAL_INFO") as conn:
+                uploader = uploader_cls(conn, crawlerhost)
+                # deep=True：先清孤兒帳本再交由爬蟲重驗，救回被誤標的真實
+                # 交易日。
+                summaries.append(uploader.backfill_missing(
+                    days=days, deep=True,
+                ))
+        except Exception as e:  # noqa: BLE001 - 批次作業需逐商品隔離
+            logger.exception(
+                "%s 補抓中止（未預期例外），略過該商品繼續其餘商品。",
+                uploader_cls.asset_label,
+            )
+            summaries.append({
+                "asset": uploader_cls.asset_label,
+                "scanned": 0, "filled": 0, "filled_dates": [],
+                "non_trading": 0, "still_pending": 0, "records": 0,
+                "orphans_cleared": 0, "network_errors": [],
+                "crawl_errors": [], "fatal": str(e),
+            })
     return summaries
 
 
@@ -102,7 +121,7 @@ def main(argv=None):
         argv (list[str] | None): 參數清單，預設取 sys.argv。
 
     Returns:
-        int: 結束碼（0 成功、1 有網路失敗待重試）。
+        int: 結束碼（0 全數成功、1 有日期或商品失敗需再跑一次）。
     """
     args = parse_args(argv)
     logger.info("開始 SPECIAL_INFO 缺漏回補（近 %d 天）。", args.days)
@@ -112,25 +131,30 @@ def main(argv=None):
     )
 
     total_filled = 0
-    total_network_errors = 0
+    total_failures = 0
     for summary in summaries:
         total_filled += summary["filled"]
-        total_network_errors += len(summary["network_errors"])
+        total_failures += len(summary["network_errors"])
+        total_failures += len(summary.get("crawl_errors", []))
+        if summary.get("fatal"):
+            total_failures += 1
         logger.info(
             "%s：掃描 %d、補回 %d（%s）、非交易日 %d、待次日 %d、"
-            "清除孤兒 %d、網路失敗 %d。",
+            "清除孤兒 %d、抓取失敗 %d、格式異常 %d%s。",
             summary["asset"], summary["scanned"], summary["filled"],
             ", ".join(summary["filled_dates"]) or "無",
             summary["non_trading"], summary["still_pending"],
             summary.get("orphans_cleared", 0),
             len(summary["network_errors"]),
+            len(summary.get("crawl_errors", [])),
+            f"、商品中止（{summary['fatal']}）" if summary.get("fatal") else "",
         )
 
     logger.info(
-        "SPECIAL_INFO 缺漏回補完成：共補回 %d 筆日期，網路失敗 %d 筆。",
-        total_filled, total_network_errors,
+        "SPECIAL_INFO 缺漏回補完成：共補回 %d 筆日期，失敗 %d 筆。",
+        total_filled, total_failures,
     )
-    return 1 if total_network_errors else 0
+    return 1 if total_failures else 0
 
 
 if __name__ == "__main__":

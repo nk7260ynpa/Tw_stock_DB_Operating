@@ -246,6 +246,30 @@ class TestCrawlData(unittest.TestCase):
             self.uploader.crawl_data("2026-03-19")
 
     @patch("data_upload.currency_price.requests.get")
+    def test_null_ohlc_raises_source_error(self, mock_get):
+        """status=ok 但 OHLC 全為 null：殘缺資料視為抓取失敗、不得記帳。"""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "date": "2026-03-19",
+            "status": "ok",
+            "data": [{
+                "date": "2026-03-19",
+                "product": "X",
+                "open": None,
+                "high": None,
+                "low": None,
+                "close": None,
+                "volume": 436708050,
+            }],
+            "meta": {"target_date_available": True},
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        with self.assertRaises(SourceError):
+            self.uploader.crawl_data("2026-03-19")
+
+    @patch("data_upload.currency_price.requests.get")
     def test_status_out_of_range_raises(self, mock_get):
         """status=out_of_range 拋 OutOfRangeError（不重試，由呼叫端記帳）。"""
         mock_resp = MagicMock()

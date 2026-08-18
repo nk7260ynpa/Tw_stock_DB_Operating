@@ -9,9 +9,15 @@ from datetime import date as date_cls
 from datetime import timedelta
 
 import pandas as pd
+from pydantic import BaseModel, ValidationError
 
 from data_upload import special_info_common
-from data_upload.base import NetworkError, OutOfRangeError, SourceError
+from data_upload.base import (
+    CrawlError,
+    NetworkError,
+    OutOfRangeError,
+    SourceError,
+)
 
 
 class FakeResult:
@@ -521,6 +527,114 @@ class TestScheduledReverify(unittest.TestCase):
         )
         self.assertEqual(summary["orphans_cleared"], 0)
         self.assertNotIn("2026-07-28", up.conn.price_dates)
+
+
+class _StrictRow(BaseModel):
+    """供測試產生真實 pydantic ValidationError 的最小 schema。"""
+
+    Close: int
+
+
+class TestNullValueGuard(unittest.TestCase):
+    """測試必要欄位含空值時一律視為抓取失敗、絕不記帳。
+
+    真實案例：2026-08-17 yfinance 回傳道瓊／納斯達克「有 volume 但 OHLC
+    全為 null」的殘缺 K 棒，爬蟲仍標記 status=ok 且 target_date_available
+    為真，狀態欄位無從察覺，只能在資料層攔。
+    """
+
+    def _payload(self, date, open_value):
+        return {
+            "date": date,
+            "status": "ok",
+            "data": [{
+                "date": date, "product": "X", "open": open_value,
+                "high": 1.0, "low": 1.0, "close": 1.0, "volume": 100,
+            }],
+            "meta": {"target_date_available": True},
+        }
+
+    def test_null_ohlc_raises_source_error(self):
+        """OHLC 含 null：拋 SourceError（可重試）而非放行寫入。"""
+        up = FakeUploader(False, {})
+        with self.assertRaises(SourceError):
+            special_info_common.parse_price_response(
+                up, self._payload("2026-08-17", None), "2026-08-17"
+            )
+
+    def test_zero_value_is_not_null(self):
+        """數值 0（如匯率 volume=0）不得被誤判為空值。"""
+        up = FakeUploader(False, {})
+        payload = self._payload("2026-08-17", 0)
+        payload["data"][0]["volume"] = 0
+        df = special_info_common.parse_price_response(
+            up, payload, "2026-08-17"
+        )
+        self.assertEqual(len(df), 1)
+
+    def test_null_row_never_records_ledger(self):
+        """殘缺資料日一律不得寫入帳本（否則永久遮蔽該日）。"""
+        up = FakeUploader(
+            False, {}, errors={"2026-08-17": SourceError("殘缺資料")},
+        )
+        with self.assertRaises(SourceError):
+            special_info_common.fetch_and_store(up, "2026-08-17")
+        self.assertNotIn("2026-08-17", up.conn.ledger_dates)
+
+
+class TestBackfillFailureIsolation(unittest.TestCase):
+    """測試補抓逐日隔離：單一毒日期不得中斷整批掃描。"""
+
+    def test_crawl_error_isolated_and_scan_continues(self):
+        """CrawlError 記入 crawl_errors 並繼續掃描其後日期。"""
+        up = FakeUploader(
+            False,
+            {"2026-07-01": "2026-07-01", "2026-07-03": "2026-07-03"},
+            errors={"2026-07-02": CrawlError("型別不符")},
+            statuses={
+                "2026-07-01": "ok", "2026-07-03": "ok",
+            },
+        )
+        summary = special_info_common.backfill_missing(
+            up, days=3, today="2026-07-03"
+        )
+        self.assertEqual(summary["crawl_errors"], ["2026-07-02"])
+        self.assertEqual(summary["filled"], 2)
+        self.assertNotIn("2026-07-02", up.conn.ledger_dates)
+
+    def test_source_error_isolated_as_network_error(self):
+        """SourceError（含殘缺資料）記入 network_errors 並繼續掃描。"""
+        up = FakeUploader(
+            False,
+            {"2026-07-01": "2026-07-01", "2026-07-03": "2026-07-03"},
+            errors={"2026-07-02": SourceError("殘缺資料")},
+            statuses={"2026-07-01": "ok", "2026-07-03": "ok"},
+        )
+        summary = special_info_common.backfill_missing(
+            up, days=3, today="2026-07-03"
+        )
+        self.assertEqual(summary["network_errors"], ["2026-07-02"])
+        self.assertEqual(summary["filled"], 2)
+        self.assertNotIn("2026-07-02", up.conn.ledger_dates)
+
+    def test_schema_validation_error_becomes_crawl_error(self):
+        """check_schema 的 pydantic ValidationError 轉為 CrawlError、不記帳。"""
+        up = FakeUploader(
+            False, {"2026-07-01": "2026-07-01"}, statuses={"2026-07-01": "ok"},
+        )
+
+        def _raise_validation_error(df):
+            _StrictRow(Close=None)
+
+        up.check_schema = _raise_validation_error
+        with self.assertRaises(CrawlError):
+            special_info_common.fetch_and_store(up, "2026-07-01")
+        self.assertNotIn("2026-07-01", up.conn.ledger_dates)
+
+    def test_validation_error_class_is_available(self):
+        """確認測試用 schema 的確會拋 pydantic ValidationError。"""
+        with self.assertRaises(ValidationError):
+            _StrictRow(Close=None)
 
 
 if __name__ == "__main__":
