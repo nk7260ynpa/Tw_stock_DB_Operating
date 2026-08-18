@@ -133,7 +133,7 @@ class TestConfigReadWrite(ConfigPathTestCase):
         self.config_dir.rmdir()
 
         web_server.save_config({"config_version": web_server.CONFIG_VERSION,
-                                "schedule_time": "07:30"})
+                                "schedule_time": "21:00"})
 
         self.assertTrue(self.config_path.exists())
 
@@ -142,7 +142,7 @@ class TestConfigReadWrite(ConfigPathTestCase):
         config = web_server.load_config()
 
         self.assertEqual(config["config_version"], web_server.CONFIG_VERSION)
-        self.assertEqual(config["schedule_time"], "07:30")
+        self.assertEqual(config["schedule_time"], "21:00")
         self.assertFalse(self.config_path.exists(),
                          "沒有既有設定時不應憑空寫出設定檔。")
 
@@ -153,7 +153,7 @@ class TestConfigWriteDurability(ConfigPathTestCase):
     def test_save_config_is_atomic_on_failure(self):
         """寫入途中失敗時，既有設定檔必須原封不動且不留殘骸。"""
         self.write_current({"config_version": web_server.CONFIG_VERSION,
-                            "schedule_time": "07:30"})
+                            "schedule_time": "21:00"})
         before = self.config_path.read_text(encoding="utf-8")
 
         with patch("json.dump", side_effect=OSError("磁碟空間不足")):
@@ -173,7 +173,7 @@ class TestConfigWriteDurability(ConfigPathTestCase):
         with self.assertLogs("web_server", level="ERROR"):
             config = web_server.load_config()
 
-        self.assertEqual(config["schedule_time"], "07:30")
+        self.assertEqual(config["schedule_time"], "21:00")
         self.assertFalse(self.config_path.exists())
         corrupt = self.config_path.with_name(self.config_path.name + ".corrupt")
         self.assertTrue(corrupt.exists(), "毀損檔應改名保留供人工檢視。")
@@ -185,14 +185,14 @@ class TestConfigWriteDurability(ConfigPathTestCase):
         with self.assertLogs("web_server", level="ERROR"):
             config = web_server.load_config()
 
-        self.assertEqual(config["schedule_time"], "07:30")
+        self.assertEqual(config["schedule_time"], "21:00")
         self.assertTrue(
             self.config_path.with_name("config.json.corrupt").exists()
         )
 
     def test_non_object_config_is_quarantined(self):
         """頂層不是 JSON 物件（如 list／int）也算毀損，不可讓它往下炸成 TypeError。"""
-        for payload in ("[]", "123", '"07:30"'):
+        for payload in ("[]", "123", '"21:00"'):
             with self.subTest(payload=payload):
                 corrupt = self.config_path.with_name("config.json.corrupt")
                 if corrupt.exists():
@@ -202,7 +202,7 @@ class TestConfigWriteDurability(ConfigPathTestCase):
                 with self.assertLogs("web_server", level="ERROR"):
                     config = web_server.load_config()
 
-                self.assertEqual(config["schedule_time"], "07:30")
+                self.assertEqual(config["schedule_time"], "21:00")
                 self.assertTrue(corrupt.exists(), "非物件內容應被隔離。")
 
     def test_unreadable_config_is_not_quarantined(self):
@@ -222,7 +222,7 @@ class TestConfigWriteDurability(ConfigPathTestCase):
             with self.assertLogs("web_server", level="ERROR") as captured:
                 config = web_server.load_config()
 
-        self.assertEqual(config["schedule_time"], "07:30",
+        self.assertEqual(config["schedule_time"], "21:00",
                          "讀不到時本輪退回預設值。")
         self.assertTrue(self.config_path.exists(), "原設定檔不可被改名或刪除。")
         self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
@@ -235,7 +235,7 @@ class TestConfigWriteDurability(ConfigPathTestCase):
     def test_unserializable_config_leaves_no_temp_file(self):
         """json.dump 遇不可序列化物件（TypeError）時也要清掉暫存檔。"""
         self.write_current({"config_version": web_server.CONFIG_VERSION,
-                            "schedule_time": "07:30"})
+                            "schedule_time": "21:00"})
 
         with self.assertRaises(TypeError):
             web_server.save_config({"schedule_time": object()})
@@ -259,7 +259,7 @@ class TestConfigWriteDurability(ConfigPathTestCase):
             return real_dump(obj, fp, **kwargs)
 
         with patch("json.dump", side_effect=record_dump):
-            web_server.save_config({"schedule_time": "07:30"})
+            web_server.save_config({"schedule_time": "21:00"})
             web_server.save_config({"schedule_time": "07:31"})
 
         self.assertEqual(len(names), 2)
@@ -277,7 +277,7 @@ class TestConfigWriteDurability(ConfigPathTestCase):
         cases = (
             ({"tdcc_schedule": None}, "tdcc_schedule"),
             ({"tdcc_schedule": 5}, "tdcc_schedule"),
-            ({"tdcc_schedule": "sunday 07:33"}, "tdcc_schedule"),
+            ({"tdcc_schedule": "sunday 21:03"}, "tdcc_schedule"),
             ({"tdcc_schedule": ["day"]}, "tdcc_schedule"),
             ({"tdcc_schedule": {"time": 5}}, "tdcc_schedule"),
             ({"ctee_schedule": {"time": "26:99"}}, "ctee_schedule"),
@@ -295,8 +295,8 @@ class TestConfigWriteDurability(ConfigPathTestCase):
                 with self.assertLogs("web_server", level="WARNING") as captured:
                     config = web_server.load_config()
 
-                self.assertEqual(config["schedule_time"], "07:30")
-                self.assertEqual(config["tdcc_schedule"], {"time": "07:33"})
+                self.assertEqual(config["schedule_time"], "21:00")
+                self.assertEqual(config["tdcc_schedule"], {"time": "21:03"})
                 self.assertEqual(config["config_version"],
                                  web_server.CONFIG_VERSION)
                 self.assertIn(broken_key, "\n".join(captured.output))
@@ -317,7 +317,7 @@ class TestConfigWriteDurability(ConfigPathTestCase):
 
         self.assertEqual(config["schedule_time"], "07:31")
         self.assertEqual(config["ctee_schedule"], {"time": "07:47"})
-        self.assertEqual(config["tdcc_schedule"], {"time": "07:33"})
+        self.assertEqual(config["tdcc_schedule"], {"time": "21:03"})
 
     def test_version_2_config_with_missing_keys_starts(self):
         """已是新版本號但欄位殘缺時仍須補齊（形狀正規化不受 version gate 拘束）。"""
@@ -325,7 +325,7 @@ class TestConfigWriteDurability(ConfigPathTestCase):
 
         config = web_server.load_config()
 
-        self.assertEqual(config["schedule_time"], "07:30")
+        self.assertEqual(config["schedule_time"], "21:00")
         for key in web_server.CRAWL_SCHEDULE_KEYS:
             self.assertIsInstance(config[key], dict)
             self.assertRegex(config[key]["time"], r"^\d{2}:\d{2}$")
@@ -360,7 +360,7 @@ class TestConfigWriteDurability(ConfigPathTestCase):
             with self.assertLogs("web_server", level="ERROR"):
                 config = web_server.load_config()
 
-        self.assertEqual(config["schedule_time"], "07:30")
+        self.assertEqual(config["schedule_time"], "21:00")
         self.assertTrue(
             self.config_path.with_name("config.json.corrupt").exists(),
             "預期外例外應隔離設定檔，避免卡在重啟迴圈。",
@@ -375,8 +375,8 @@ class TestConfigWriteDurability(ConfigPathTestCase):
             with self.assertLogs("web_server", level="ERROR") as captured:
                 config = web_server.load_config()
 
-        # 遷移結果仍在記憶體內生效（窗外的 23:00 收斂回 07:30）
-        self.assertEqual(config["schedule_time"], "07:30")
+        # 遷移結果仍在記憶體內生效（窗外的 23:00 收斂回 21:00）
+        self.assertEqual(config["schedule_time"], "21:00")
         self.assertEqual(config["config_version"], web_server.CONFIG_VERSION)
         self.assertIn("以記憶體內的設定繼續執行", "\n".join(captured.output))
 
@@ -399,7 +399,7 @@ class TestLegacyCoexistWarningOnce(ConfigPathTestCase):
     def test_warning_logged_only_once(self):
         """load_config 被反覆呼叫時不應每次都記 warning。"""
         self.write_current({"config_version": web_server.CONFIG_VERSION,
-                            "schedule_time": "07:30"})
+                            "schedule_time": "21:00"})
         self.write_legacy({"schedule_time": "19:07"})
 
         with self.assertLogs("web_server", level="WARNING") as first:
@@ -471,7 +471,7 @@ class TestLegacyConfigMigration(ConfigPathTestCase):
 
         config = web_server.load_config()
 
-        # 版本遞補到最新，且落在窗外的舊時段被收斂進 07:30~08:00。
+        # 版本遞補到最新，且落在窗外的舊時段被收斂進 21:00~21:30。
         self.assertEqual(config["config_version"], web_server.CONFIG_VERSION)
         self.assertTrue(web_server._in_crawl_window(config["schedule_time"]))
         self.assertTrue(
@@ -519,7 +519,7 @@ class TestLegacyConfigMigration(ConfigPathTestCase):
         with self.assertLogs("web_server", level="WARNING"):
             config = web_server.load_config()
 
-        self.assertEqual(config["schedule_time"], "07:30")
+        self.assertEqual(config["schedule_time"], "21:00")
         self.assertFalse(self.config_path.exists())
 
 
@@ -563,7 +563,7 @@ class TestScheduleEndpointTimeValidation(unittest.TestCase):
     def test_loosely_formatted_times_are_rejected(self):
         """`_is_valid_time` 判為不合法者，端點必須回 400 而非存進設定檔。"""
         for endpoint in self.ENDPOINTS:
-            for value in ("07:30:00", "7:30", "07:5", "24:00", " 07:30"):
+            for value in ("07:30:00", "7:30", "07:5", "24:00", " 21:00"):
                 with self.subTest(endpoint=endpoint, time=value):
                     self.assertFalse(web_server._is_valid_time(value))
                     res = self.client.put(endpoint, json={"time": value})

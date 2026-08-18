@@ -179,10 +179,11 @@ class TestDailyCraw(unittest.TestCase):
     def test_daily_craw_excludes_today(
         self, mock_get_missing, mock_sleep, mock_day_upload, mock_clear
     ):
-        """測試早上排程執行時排除今日，只補抓昨日（含）以前的缺漏。
+        """測試排程執行時排除今日，只補抓昨日（含）以前的缺漏。
 
-        排程改於早上（07:30）執行，此時當日台股尚未收盤、行情尚未發布，
-        若爬取今日會取得空資料並被誤標為非交易日而永久跳過，故應排除今日。
+        排除今日為刻意保留的保守設定（使用者明確要求維持現狀）：排程移到 21:00
+        後台股其實已收盤、當日資料可抓，但仍維持排除今日，今日資料留待隔日排程
+        以「昨日」身分補回，換取「絕不因空資料被誤標非交易日而永久跳過」的保證。
         """
         import DailyUpload
 

@@ -180,7 +180,7 @@ class TestRetryQueueScheduleRegistration(unittest.TestCase):
         import web_server
 
         try:
-            web_server.setup_schedule("07:30")
+            web_server.setup_schedule("21:00")
             registered = [j.job_func.func for j in schedule_lib.jobs]
             self.assertEqual(
                 registered.count(web_server.run_retry_queue_scheduled), 1

@@ -14,7 +14,7 @@ function CNYESNewsUpload() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  const [scheduleTime, setScheduleTime] = useState('07:48')
+  const [scheduleTime, setScheduleTime] = useState('21:18')
   const [saving, setSaving] = useState(false)
   const [scheduleMsg, setScheduleMsg] = useState('')
 
@@ -54,7 +54,7 @@ function CNYESNewsUpload() {
       const res = await apiFetch('/api/cnyes-news/schedule')
       if (res.ok) {
         const data = await res.json()
-        setScheduleTime(data.time || '07:48')
+        setScheduleTime(data.time || '21:18')
       }
     } catch {
       /* ignore */

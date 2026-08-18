@@ -14,7 +14,7 @@ function PTTNewsUpload() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  const [scheduleTime, setScheduleTime] = useState('07:50')
+  const [scheduleTime, setScheduleTime] = useState('21:20')
   const [saving, setSaving] = useState(false)
   const [scheduleMsg, setScheduleMsg] = useState('')
 
@@ -54,7 +54,7 @@ function PTTNewsUpload() {
       const res = await apiFetch('/api/ptt-news/schedule')
       if (res.ok) {
         const data = await res.json()
-        setScheduleTime(data.time || '07:50')
+        setScheduleTime(data.time || '21:20')
       }
     } catch {
       /* ignore */

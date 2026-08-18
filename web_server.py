@@ -111,7 +111,7 @@ daily_craw_running = False
 # process_retry_queue 會**同步**重跑佇列內每一筆任務，新聞類任務是整個 48 小時窗
 # 重抓（CTEE 實測 210~230 秒），一輪累積下來可達數分鐘至數十分鐘。與 daily_craw
 # 同理，直接由 scheduler_thread 呼叫會在 run_pending() 期間持有 schedule_lock，
-# 把當日 07:30~08:00 的爬取排程整批往後推。爬蟲 v2.14.0 起 PTT／MoneyUDN 的零星
+# 把當日 21:00~21:30 的爬取排程整批往後推。爬蟲 v2.14.0 起 PTT／MoneyUDN 的零星
 # 抓漏由 ok 改回報 partial，排入重試的頻率大幅提高，此風險已從理論變成常態。
 # 故一律改以背景執行緒執行，並以此旗標確保同時只有一輪重試在跑
 # （手動觸發的 /api/retry-queue/retry-all 亦共用，避免與排程輪重複執行同一任務）。
@@ -122,18 +122,20 @@ retry_queue_running = False
 retry_queue: RetryQueue | None = None
 
 # 隔日重排時間：每日將未達上限的 exhausted 任務重設為 pending 再試一輪。
-# 設於當日各爬取排程（07:30~07:57）之前，使前一日因「資料尚未發布」而放棄的
-# 任務於資料已可取得後，能在當日重新被重試佇列處理。
+# 屬維護型排程，不受爬蟲集中時間窗政策約束，故 v3 搬窗時維持 06:30 不變：
+# 仍落在「當日各爬取排程（21:00~21:27）之前」，前一晚因「資料尚未發布」而放棄的
+# 任務會在隔天一早重設為 pending，再由每小時的重試佇列於白天陸續補回。
 REQUEUE_EXHAUSTED_TIME = "06:30"
 
 # SPECIAL_INFO 缺漏自我修復掃描窗（天數）：遠大於各商品排程的「過去 7 天」
 # 回補窗，足以自癒管線停擺數週造成的缺漏。
 SPECIAL_INFO_BACKFILL_DAYS = 30
 
-# 新聞排程回溯時數：四來源新聞排程改於早上（07:46~07:52）抓取，回溯窗須涵蓋
-# 「昨日整天到現在」。設為 48 小時（爬蟲支援 1~72），足以吸收晚間→早晨排程搬遷
-# 的一次性缺口，並可補回偶發漏抓一日；重複抓取的記錄由各上傳器以 URL 去重（同日
-# 已存在的 URL 會被跳過），不會重複寫入資料庫或全文檔。
+# 新聞排程回溯時數：四來源新聞排程於 21:16~21:22 抓取，回溯窗須涵蓋「昨日整天到
+# 現在」。設為 48 小時（爬蟲支援 1~72），可補回偶發漏抓一日；重複抓取的記錄由各
+# 上傳器以 URL 去重（同日已存在的 URL 會被跳過），不會重複寫入資料庫或全文檔。
+# **搬窗後涵蓋範圍只增不減**：48 小時是「往回推」的相對窗，21:16 執行時涵蓋前日
+# 21:16 至今，昨日整天必定完整包含在內（早上 07:46 執行時亦然），故不需調整時數。
 NEWS_SCHEDULE_HOURS = 48
 
 # SPECIAL_INFO 五個商品的 (task_type, Uploader 類別) 對照，供缺漏自我修復
@@ -164,14 +166,19 @@ def _validate_date_format(date_str):
 
 
 # 設定檔結構版本：每次需要對「已持久化」的 config.json 做一次性批次調整時遞增。
-# v2：把所有爬蟲抓取排程集中至 07:30~08:00 時間窗（見 _migrate_crawl_schedule_window）。
-CONFIG_VERSION = 2
+# v2：把所有爬蟲抓取排程集中至單一時間窗（見 _migrate_crawl_schedule_window）。
+# v3：時間窗自 07:30~08:00 整體平移至 21:00~21:30。宿主 Mac 長期處於睡眠循環，
+#     Docker VM 隨之凍結；以 Prometheus 逐分鐘樣本統計 7 天，容器「實際醒著」
+#     的比率 07:00 僅 36.9%、08:00 為 50.5%（且逐日 4%~100% 極不穩定），而
+#     21:00 為 93.8%（全日最高）、20:00/22:00 亦逾 91%。相對間隔完全不變，
+#     整批往後移 13.5 小時。
+CONFIG_VERSION = 3
 
 # 爬蟲抓取排程統一集中的目標時間窗（HH:MM，含端點）。
-CRAWL_WINDOW_START = "07:30"
-CRAWL_WINDOW_END = "08:00"
+CRAWL_WINDOW_START = "21:00"
+CRAWL_WINDOW_END = "21:30"
 
-# 屬於「爬蟲抓取類」的具名排程鍵（其時間受 07:30~08:00 集中政策約束）；
+# 屬於「爬蟲抓取類」的具名排程鍵（其時間受 21:00~21:30 集中政策約束）；
 # daily_craw 主排程為頂層 schedule_time，另行處理。retry queue／隔日重排等
 # 維護型排程不在此列、不受遷移影響。
 CRAWL_SCHEDULE_KEYS = (
@@ -189,18 +196,22 @@ CRAWL_SCHEDULE_KEYS = (
     "special_info_backfill_schedule",
 )
 
-# 舊版（v1）曾用、但恰好落在新窗邊界內、不會被 _in_crawl_window 判為窗外的預設值。
-# 一次性遷移時需一併收斂到新預設，否則既有部署會停在舊值。唯一案例：
-# special_info_backfill 舊預設 08:00（== 窗尾）。
+# 舊版曾用、但恰好落在新窗邊界內、不會被 _in_crawl_window 判為窗外的預設值。
+# 一次性遷移時需一併收斂到新預設，否則既有部署會停在舊值。v3 的兩個案例都來自
+# v1 的晚間預設：CTEE 舊預設 21:00（== 新窗起點，且與 daily_craw 撞在同一分鐘）、
+# CNYES 舊預設 21:30（== 新窗終點）。v1 其餘晚間預設（PTT 22:00、MoneyUDN 22:30、
+# YT 19:05、TDCC 10:00）與 v2 的 07:xx 全部落在新窗外，由 _in_crawl_window 處理。
+# **日後再搬窗時務必重新盤點**：漏列的鍵會靜默停在舊值。
 _SUPERSEDED_IN_WINDOW_DEFAULTS = {
-    "special_info_backfill_schedule": "08:00",
+    "ctee_schedule": "21:00",
+    "cnyes_schedule": "21:30",
 }
 
 
 # 排程時間字串的合法格式（HH:MM，24 小時制）。schedule 套件的 .at() 只吃這種格式，
-# 其餘值（None、數字、"sunday 07:33"）會讓排程註冊當場拋例外而使服務起不來。
+# 其餘值（None、數字、"sunday 21:03"）會讓排程註冊當場拋例外而使服務起不來。
 # **務必以 fullmatch 使用**：本 pattern 不含 ^$ 錨點，改用 match／search 會讓
-# "07:30:00"、"07:30\n" 被靜默放行。
+# "21:00:00"、"21:00\n" 被靜默放行。
 _TIME_PATTERN = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 
 
@@ -217,7 +228,7 @@ def _is_valid_time(value):
 
 
 def _in_crawl_window(time_str):
-    """判斷 HH:MM 是否落在爬蟲集中時間窗 07:30~08:00（含端點）內。
+    """判斷 HH:MM 是否落在爬蟲集中時間窗 21:00~21:30（含端點）內。
 
     因 HH:MM 為零填補的等長字串，字典序比較等同時間先後比較。
 
@@ -233,7 +244,7 @@ def _in_crawl_window(time_str):
 
 
 def _migrate_crawl_schedule_window(config, default):
-    """一次性遷移：把仍落在舊時段的爬蟲抓取排程收斂到 07:30~08:00 新預設。
+    """一次性遷移：把仍落在舊時段的爬蟲抓取排程收斂到 21:00~21:30 新預設。
 
     僅在既有設定的 config_version 低於 CONFIG_VERSION 時由 load_config 觸發一次
     （version-gated），避免日後每次重啟都覆蓋使用者經 Web 介面所做的自訂。遷移時
@@ -248,7 +259,9 @@ def _migrate_crawl_schedule_window(config, default):
     """
     changed = False
 
-    # daily_craw 主排程（頂層字串）
+    # daily_craw 主排程（頂層字串）。注意：這裡刻意沒有 superseded-default
+    # 防線，因為 v1/v2 的歷史值（20:07、07:30）都落在新窗外；日後若某次搬窗
+    # 讓歷史值落進新窗內，此處也要比照 _SUPERSEDED_IN_WINDOW_DEFAULTS 處理。
     if not _in_crawl_window(config.get("schedule_time")):
         if config.get("schedule_time") != default["schedule_time"]:
             config["schedule_time"] = default["schedule_time"]
@@ -440,7 +453,7 @@ def _normalize_config(config, default):
     # AttributeError（字串／list 沒有 .get）。
     tdcc = config.get("tdcc_schedule")
     if isinstance(tdcc, dict) and "day" in tdcc:
-        config["tdcc_schedule"] = {"time": tdcc.get("time", "07:33")}
+        config["tdcc_schedule"] = {"time": tdcc.get("time", "21:03")}
         write_back_reasons.append("TDCC 排程設定從週排程遷移為每日排程")
         logger.info("已將 TDCC 排程設定從週排程遷移為每日排程。")
 
@@ -475,16 +488,16 @@ def _normalize_config(config, default):
         repaired.append("config_version")
     config["config_version"] = version
 
-    # 一次性遷移（version-gated）：把落在 07:30~08:00 窗外的爬蟲排程收斂到
+    # 一次性遷移（version-gated）：把落在 21:00~21:30 窗外的爬蟲排程收斂到
     # 新預設並寫回，讓部署重啟後持久化的舊時段自動更新；bump 版本後不再重跑，
     # 保留使用者日後經 Web 介面所做的窗內自訂。
     if config["config_version"] < CONFIG_VERSION:
         migrated = _migrate_crawl_schedule_window(config, default)
         config["config_version"] = CONFIG_VERSION
-        write_back_reasons.append("爬蟲抓取排程一次性遷移至 07:30~08:00 時間窗")
+        write_back_reasons.append("爬蟲抓取排程一次性遷移至 21:00~21:30 時間窗")
         if migrated:
             logger.info(
-                "已將舊時段的爬蟲抓取排程一次性遷移至 07:30~08:00 時間窗。"
+                "已將舊時段的爬蟲抓取排程一次性遷移至 21:00~21:30 時間窗。"
             )
 
     if repaired:
@@ -518,7 +531,7 @@ def load_config():
 
     讀取前先呼叫 migrate_legacy_config 處理「舊設定檔仍在 log 目錄」的情形。
     首次讀取既有（舊版）config.json 時，會依 config_version 觸發一次性遷移，
-    把落在 07:30~08:00 窗外的爬蟲抓取排程收斂到新預設並寫回，之後保留使用者的
+    把落在 21:00~21:30 窗外的爬蟲抓取排程收斂到新預設並寫回，之後保留使用者的
     窗內自訂（見 _migrate_crawl_schedule_window）。
 
     Returns:
@@ -533,22 +546,22 @@ def load_config():
     # 舊版設定寄生在 log 目錄，先一次性搬遷到獨立設定目錄，避免使用者自訂被丟棄。
     migrate_legacy_config()
 
-    # 所有爬取排程集中於 07:30~08:00 之間並彼此錯開，避免同時併發搶爬蟲資源。
+    # 所有爬取排程集中於 21:00~21:30 之間並彼此錯開，避免同時併發搶爬蟲資源。
     default = {
         "config_version": CONFIG_VERSION,
-        "schedule_time": "07:30",
-        "tdcc_schedule": {"time": "07:33"},
-        "ctee_schedule": {"time": "07:46"},
-        "cnyes_schedule": {"time": "07:48"},
-        "ptt_schedule": {"time": "07:50"},
-        "moneyudn_schedule": {"time": "07:52"},
-        "yt_transcript_schedule": {"time": "07:54"},
-        "oil_price_schedule": {"time": "07:36"},
-        "gold_price_schedule": {"time": "07:38"},
-        "bitcoin_price_schedule": {"time": "07:40"},
-        "currency_price_schedule": {"time": "07:42"},
-        "indices_price_schedule": {"time": "07:44"},
-        "special_info_backfill_schedule": {"time": "07:57"},
+        "schedule_time": "21:00",
+        "tdcc_schedule": {"time": "21:03"},
+        "ctee_schedule": {"time": "21:16"},
+        "cnyes_schedule": {"time": "21:18"},
+        "ptt_schedule": {"time": "21:20"},
+        "moneyudn_schedule": {"time": "21:22"},
+        "yt_transcript_schedule": {"time": "21:24"},
+        "oil_price_schedule": {"time": "21:06"},
+        "gold_price_schedule": {"time": "21:08"},
+        "bitcoin_price_schedule": {"time": "21:10"},
+        "currency_price_schedule": {"time": "21:12"},
+        "indices_price_schedule": {"time": "21:14"},
+        "special_info_backfill_schedule": {"time": "21:27"},
     }
     global _legacy_coexist_warned
     config = None
@@ -676,7 +689,7 @@ def setup_schedule(
         logger.info("每日排程已設定為 %s", schedule_time)
 
         if tdcc_schedule:
-            tdcc_time = tdcc_schedule.get("time", "07:33")
+            tdcc_time = tdcc_schedule.get("time", "21:03")
             schedule_lib.every().day.at(tdcc_time).do(
                 run_tdcc_scheduled
             )
@@ -685,7 +698,7 @@ def setup_schedule(
             )
 
         if ctee_schedule:
-            ctee_time = ctee_schedule.get("time", "07:46")
+            ctee_time = ctee_schedule.get("time", "21:16")
             schedule_lib.every().day.at(ctee_time).do(
                 run_ctee_news_scheduled
             )
@@ -694,7 +707,7 @@ def setup_schedule(
             )
 
         if cnyes_schedule:
-            cnyes_time = cnyes_schedule.get("time", "07:48")
+            cnyes_time = cnyes_schedule.get("time", "21:18")
             schedule_lib.every().day.at(cnyes_time).do(
                 run_cnyes_news_scheduled
             )
@@ -703,7 +716,7 @@ def setup_schedule(
             )
 
         if ptt_schedule:
-            ptt_time = ptt_schedule.get("time", "07:50")
+            ptt_time = ptt_schedule.get("time", "21:20")
             schedule_lib.every().day.at(ptt_time).do(
                 run_ptt_news_scheduled
             )
@@ -712,7 +725,7 @@ def setup_schedule(
             )
 
         if moneyudn_schedule:
-            moneyudn_time = moneyudn_schedule.get("time", "07:52")
+            moneyudn_time = moneyudn_schedule.get("time", "21:22")
             schedule_lib.every().day.at(moneyudn_time).do(
                 run_moneyudn_news_scheduled
             )
@@ -721,49 +734,49 @@ def setup_schedule(
             )
 
         if yt_transcript_schedule:
-            yt_time = yt_transcript_schedule.get("time", "07:54")
+            yt_time = yt_transcript_schedule.get("time", "21:24")
             schedule_lib.every().day.at(yt_time).do(
                 run_yt_transcript_scheduled
             )
             logger.info("YT 逐字稿每日排程已設定為 %s", yt_time)
 
         if oil_price_schedule:
-            oil_time = oil_price_schedule.get("time", "07:36")
+            oil_time = oil_price_schedule.get("time", "21:06")
             schedule_lib.every().day.at(oil_time).do(
                 run_oil_price_scheduled
             )
             logger.info("原油價格每日排程已設定為 %s", oil_time)
 
         if gold_price_schedule:
-            gold_time = gold_price_schedule.get("time", "07:38")
+            gold_time = gold_price_schedule.get("time", "21:08")
             schedule_lib.every().day.at(gold_time).do(
                 run_gold_price_scheduled
             )
             logger.info("黃金價格每日排程已設定為 %s", gold_time)
 
         if bitcoin_price_schedule:
-            bitcoin_time = bitcoin_price_schedule.get("time", "07:40")
+            bitcoin_time = bitcoin_price_schedule.get("time", "21:10")
             schedule_lib.every().day.at(bitcoin_time).do(
                 run_bitcoin_price_scheduled
             )
             logger.info("比特幣價格每日排程已設定為 %s", bitcoin_time)
 
         if currency_price_schedule:
-            currency_time = currency_price_schedule.get("time", "07:42")
+            currency_time = currency_price_schedule.get("time", "21:12")
             schedule_lib.every().day.at(currency_time).do(
                 run_currency_price_scheduled
             )
             logger.info("匯率每日排程已設定為 %s", currency_time)
 
         if indices_price_schedule:
-            indices_time = indices_price_schedule.get("time", "07:44")
+            indices_time = indices_price_schedule.get("time", "21:14")
             schedule_lib.every().day.at(indices_time).do(
                 run_indices_price_scheduled
             )
             logger.info("股市指數價格每日排程已設定為 %s", indices_time)
 
         if special_info_backfill_schedule:
-            backfill_time = special_info_backfill_schedule.get("time", "07:57")
+            backfill_time = special_info_backfill_schedule.get("time", "21:27")
             schedule_lib.every().day.at(backfill_time).do(
                 run_special_info_backfill_scheduled
             )
@@ -1983,13 +1996,51 @@ def run_company_info_upload_job(job_id):
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
 
 
-def run_yt_transcript_scheduled():
-    """排程觸發的 YT 逐字稿上傳（抓昨日影片）。
+def yt_transcript_target_date(schedule_time=None, now=None):
+    """計算 YT 逐字稿排程本次應抓的日期（＝排程日的前一日）。
 
-    排程於早上（07:54）執行，此時「當日」直播多半尚未結束或自動字幕尚未
-    產生，故改抓「昨日」已完成的直播影片，確保逐字稿已可取得。
+    v3 把排程搬到 21:24，距午夜只剩 2 小時 36 分（舊制 07:54 距午夜 16 小時）。
+    宿主休眠時 schedule 套件會在下一次 run_pending() 補跑過期任務；補跑若落到
+    隔日凌晨，直接用 `now - 1 天` 會算成「排程日當天」而非「排程日的前一日」，
+    使原本該抓的那天被靜默跳過——YT 排程只吃單一日期、**沒有多日回補路徑**，
+    漏掉就永久漏掉（行情有 30 天補抓窗、新聞有 48 小時窗可自癒，故不受影響）。
+
+    因此改由「現在的時刻是否已過排定時刻」還原排程日：時刻尚未到，代表這是
+    前一晚延遲補跑的任務，排程日往前推一天。與 Tw_stock_crawer 的「YT 抓昨天」
+    契約維持一致（準時執行時結果與 `now - 1 天` 完全相同）。
+
+    界線：本函式只還原「單次過期任務」的排程日。宿主連睡超過 24 小時時
+    `schedule` 套件本身也只補跑一次，中間那天仍會漏——那是套件限制，需人工
+    以 Web 介面補抓。
+
+    Args:
+        schedule_time (str | None): 排定時刻（HH:MM），預設讀設定檔。
+        now (datetime.datetime | None): 基準時間，預設為當下（供測試注入）。
+
+    Returns:
+        str: 應抓取的日期字串（YYYY-MM-DD）。
     """
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    base = now or datetime.now()
+    if schedule_time is None:
+        entry = load_config().get("yt_transcript_schedule", {})
+        schedule_time = entry.get("time") if isinstance(entry, dict) else None
+
+    run_date = base.date()
+    now_hm = base.strftime("%H:%M")
+    if _is_valid_time(schedule_time) and now_hm < schedule_time:
+        # 尚未到排定時刻 → 本次是前一晚過期任務的補跑，排程日往前推一天。
+        run_date -= timedelta(days=1)
+    return (run_date - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def run_yt_transcript_scheduled():
+    """排程觸發的 YT 逐字稿上傳（抓排程日的前一日影片）。
+
+    排程於晚間（21:24）執行，此時「當日」直播多半尚未結束或自動字幕尚未
+    產生，故抓已完成的前一日直播影片，確保逐字稿已可取得。日期由
+    yt_transcript_target_date 計算，可正確處理跨午夜的延遲補跑。
+    """
+    yesterday = yt_transcript_target_date()
     job_id = str(uuid.uuid4())[:8]
 
     with jobs_lock:
@@ -2045,10 +2096,37 @@ def run_yt_transcript_upload_job(job_id, date):
             upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
 
 
+def settled_end_date(now=None):
+    """回傳排程行情抓取的區間上界：昨日（YYYY-MM-DD）。
+
+    SPECIAL_INFO 五商品的日 K 由 yfinance 供應，「當日」那一根在該市場收盤前
+    一直是**進行中的半根 K**。舊排程 07:3x（= 前一日 23:3x UTC / 19:3x ET）時
+    UTC 尚未跨日、美股現貨也尚未開盤，靠「爬蟲 fallback 回上一交易日」恰好
+    只會取到已定案的日 K；v3 搬到 21:0x（= 13:0x UTC / 09:0x ET）後，比特幣與
+    匯率當日的 UTC 日 K 已存在且僅完成約一半，會被 REPLACE INTO 寫進價格表並
+    記帳，而**帳本與價格表雙重跳過**使該日永遠不會被重驗，等於把半根 K 永久
+    凍結。原油／黃金為 CME Globex 期貨（前一日 18:00 ET 開盤），此問題在舊排
+    程就已存在，本次一併修掉。
+
+    因此排程一律只抓到昨日為止：當日資料於次日排程自然補上。**資料新鮮度與舊
+    制相同**——舊制在 D 日請求 D、實際寫入的也是 D-1 那一根。
+
+    Args:
+        now (datetime.datetime | None): 基準時間，預設為當下（供測試注入）。
+
+    Returns:
+        str: 昨日日期字串（YYYY-MM-DD）。
+    """
+    base = now or datetime.now()
+    return (base - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 def run_oil_price_scheduled():
-    """排程觸發的原油價格上傳（過去 7 天補抓）。"""
+    """排程觸發的原油價格上傳（過去 7 天補抓，上界為昨日）。"""
     job_id = str(uuid.uuid4())[:8]
-    today = datetime.now().strftime("%Y-%m-%d")
+    # 只抓到昨日為止：當日日 K 尚未定案，寫入後會被永久凍結
+    # （見 settled_end_date）。
+    end_date = settled_end_date()
 
     # 補抓過去 7 天（美國市場可能有延遲）
     start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -2059,8 +2137,8 @@ def run_oil_price_scheduled():
             "type": "oil_price",
             "status": "queued",
             "start_date": start_date,
-            "end_date": today,
-            "date": today,
+            "end_date": end_date,
+            "date": end_date,
             "record_count": 0,
             "errors": [],
             "created_at": datetime.now().isoformat(),
@@ -2070,9 +2148,12 @@ def run_oil_price_scheduled():
 
     job_queue.enqueue(
         job_id, run_oil_price_upload_job,
-        (job_id, start_date, today),
+        (job_id, start_date, end_date),
     )
-    logger.info("原油價格排程任務已建立 %s（%s ~ %s）", job_id, start_date, today)
+    logger.info(
+        "原油價格排程任務已建立 %s（%s ~ %s）",
+        job_id, start_date, end_date,
+    )
 
 
 def run_oil_price_upload_job(job_id, start_date, end_date):
@@ -2139,9 +2220,11 @@ def run_oil_price_upload_job(job_id, start_date, end_date):
 
 
 def run_gold_price_scheduled():
-    """排程觸發的黃金價格上傳（過去 7 天補抓）。"""
+    """排程觸發的黃金價格上傳（過去 7 天補抓，上界為昨日）。"""
     job_id = str(uuid.uuid4())[:8]
-    today = datetime.now().strftime("%Y-%m-%d")
+    # 只抓到昨日為止：當日日 K 尚未定案，寫入後會被永久凍結
+    # （見 settled_end_date）。
+    end_date = settled_end_date()
 
     # 補抓過去 7 天（美國市場可能有延遲）
     start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -2152,8 +2235,8 @@ def run_gold_price_scheduled():
             "type": "gold_price",
             "status": "queued",
             "start_date": start_date,
-            "end_date": today,
-            "date": today,
+            "end_date": end_date,
+            "date": end_date,
             "record_count": 0,
             "errors": [],
             "created_at": datetime.now().isoformat(),
@@ -2163,9 +2246,12 @@ def run_gold_price_scheduled():
 
     job_queue.enqueue(
         job_id, run_gold_price_upload_job,
-        (job_id, start_date, today),
+        (job_id, start_date, end_date),
     )
-    logger.info("黃金價格排程任務已建立 %s（%s ~ %s）", job_id, start_date, today)
+    logger.info(
+        "黃金價格排程任務已建立 %s（%s ~ %s）",
+        job_id, start_date, end_date,
+    )
 
 
 def run_gold_price_upload_job(job_id, start_date, end_date):
@@ -2232,9 +2318,11 @@ def run_gold_price_upload_job(job_id, start_date, end_date):
 
 
 def run_bitcoin_price_scheduled():
-    """排程觸發的比特幣價格上傳（過去 7 天補抓）。"""
+    """排程觸發的比特幣價格上傳（過去 7 天補抓，上界為昨日）。"""
     job_id = str(uuid.uuid4())[:8]
-    today = datetime.now().strftime("%Y-%m-%d")
+    # 只抓到昨日為止：當日日 K 尚未定案，寫入後會被永久凍結
+    # （見 settled_end_date）。
+    end_date = settled_end_date()
 
     # 補抓過去 7 天
     start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -2245,8 +2333,8 @@ def run_bitcoin_price_scheduled():
             "type": "bitcoin_price",
             "status": "queued",
             "start_date": start_date,
-            "end_date": today,
-            "date": today,
+            "end_date": end_date,
+            "date": end_date,
             "record_count": 0,
             "errors": [],
             "created_at": datetime.now().isoformat(),
@@ -2256,11 +2344,11 @@ def run_bitcoin_price_scheduled():
 
     job_queue.enqueue(
         job_id, run_bitcoin_price_upload_job,
-        (job_id, start_date, today),
+        (job_id, start_date, end_date),
     )
     logger.info(
         "比特幣價格排程任務已建立 %s（%s ~ %s）",
-        job_id, start_date, today,
+        job_id, start_date, end_date,
     )
 
 
@@ -2328,9 +2416,11 @@ def run_bitcoin_price_upload_job(job_id, start_date, end_date):
 
 
 def run_currency_price_scheduled():
-    """排程觸發的匯率上傳（過去 7 天補抓）。"""
+    """排程觸發的匯率上傳（過去 7 天補抓，上界為昨日）。"""
     job_id = str(uuid.uuid4())[:8]
-    today = datetime.now().strftime("%Y-%m-%d")
+    # 只抓到昨日為止：當日日 K 尚未定案，寫入後會被永久凍結
+    # （見 settled_end_date）。
+    end_date = settled_end_date()
 
     # 補抓過去 7 天
     start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -2341,8 +2431,8 @@ def run_currency_price_scheduled():
             "type": "currency_price",
             "status": "queued",
             "start_date": start_date,
-            "end_date": today,
-            "date": today,
+            "end_date": end_date,
+            "date": end_date,
             "record_count": 0,
             "errors": [],
             "created_at": datetime.now().isoformat(),
@@ -2352,11 +2442,11 @@ def run_currency_price_scheduled():
 
     job_queue.enqueue(
         job_id, run_currency_price_upload_job,
-        (job_id, start_date, today),
+        (job_id, start_date, end_date),
     )
     logger.info(
         "匯率排程任務已建立 %s（%s ~ %s）",
-        job_id, start_date, today,
+        job_id, start_date, end_date,
     )
 
 
@@ -2424,9 +2514,11 @@ def run_currency_price_upload_job(job_id, start_date, end_date):
 
 
 def run_indices_price_scheduled():
-    """排程觸發的股市指數價格上傳（過去 7 天補抓）。"""
+    """排程觸發的股市指數價格上傳（過去 7 天補抓，上界為昨日）。"""
     job_id = str(uuid.uuid4())[:8]
-    today = datetime.now().strftime("%Y-%m-%d")
+    # 只抓到昨日為止：當日日 K 尚未定案，寫入後會被永久凍結
+    # （見 settled_end_date）。
+    end_date = settled_end_date()
 
     # 補抓過去 7 天（美國市場可能有延遲）
     start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -2437,8 +2529,8 @@ def run_indices_price_scheduled():
             "type": "indices_price",
             "status": "queued",
             "start_date": start_date,
-            "end_date": today,
-            "date": today,
+            "end_date": end_date,
+            "date": end_date,
             "record_count": 0,
             "errors": [],
             "created_at": datetime.now().isoformat(),
@@ -2448,11 +2540,11 @@ def run_indices_price_scheduled():
 
     job_queue.enqueue(
         job_id, run_indices_price_upload_job,
-        (job_id, start_date, today),
+        (job_id, start_date, end_date),
     )
     logger.info(
         "股市指數價格排程任務已建立 %s（%s ~ %s）",
-        job_id, start_date, today,
+        job_id, start_date, end_date,
     )
 
 
@@ -2520,9 +2612,14 @@ def run_indices_price_upload_job(job_id, start_date, end_date):
 
 
 def run_special_info_backfill_scheduled():
-    """排程觸發的 SPECIAL_INFO 缺漏自我修復偵測補抓（近 30 天）。"""
+    """排程觸發的 SPECIAL_INFO 缺漏自我修復偵測補抓（近 30 天，上界為昨日）。
+
+    掃描基準日固定為昨日：21:27 執行時當日日 K 尚未定案，若讓補抓把「今日」
+    也當成候選，會把半根 K 寫進價格表並記帳而永久凍結（見 settled_end_date）。
+    """
     job_id = str(uuid.uuid4())[:8]
     now = datetime.now().isoformat()
+    end_date = settled_end_date()
 
     with jobs_lock:
         upload_jobs[job_id] = {
@@ -2530,6 +2627,7 @@ def run_special_info_backfill_scheduled():
             "type": "special_info_backfill",
             "status": "queued",
             "days": SPECIAL_INFO_BACKFILL_DAYS,
+            "end_date": end_date,
             "record_count": 0,
             "summary": [],
             "errors": [],
@@ -2540,16 +2638,16 @@ def run_special_info_backfill_scheduled():
 
     job_queue.enqueue(
         job_id, run_special_info_backfill_job,
-        (job_id, SPECIAL_INFO_BACKFILL_DAYS),
+        (job_id, SPECIAL_INFO_BACKFILL_DAYS, False, end_date),
     )
     logger.info(
-        "SPECIAL_INFO 缺漏自我修復任務已建立 %s（近 %d 天）",
-        job_id, SPECIAL_INFO_BACKFILL_DAYS,
+        "SPECIAL_INFO 缺漏自我修復任務已建立 %s（近 %d 天，至 %s）",
+        job_id, SPECIAL_INFO_BACKFILL_DAYS, end_date,
     )
 
 
 def run_special_info_backfill_job(
-    job_id, days=SPECIAL_INFO_BACKFILL_DAYS, deep=False,
+    job_id, days=SPECIAL_INFO_BACKFILL_DAYS, deep=False, today=None,
 ):
     """執行 SPECIAL_INFO 缺漏自我修復偵測補抓任務（背景執行緒）。
 
@@ -2562,6 +2660,8 @@ def run_special_info_backfill_job(
         days (int): 掃描天數，預設 SPECIAL_INFO_BACKFILL_DAYS。
         deep (bool): 是否深度重驗（先清孤兒帳本再重驗），預設 False；
             日常排程用 False，人工修復歷史缺漏用 True。
+        today (str | None): 掃描基準日（含），預設當日；排程固定傳昨日，
+            避免把尚未定案的當日日 K 寫死（見 settled_end_date）。
     """
     with jobs_lock:
         upload_jobs[job_id]["status"] = "running"
@@ -2574,7 +2674,9 @@ def run_special_info_backfill_job(
         try:
             with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
                 uploader = uploader_cls(conn, CRAWLERHOST)
-                summary = uploader.backfill_missing(days=days, deep=deep)
+                summary = uploader.backfill_missing(
+                    days=days, today=today, deep=deep,
+                )
                 total_records += summary["records"]
                 summaries.append(summary)
 
@@ -3098,7 +3200,7 @@ def get_tdcc_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    tdcc = config.get("tdcc_schedule", {"time": "07:33"})
+    tdcc = config.get("tdcc_schedule", {"time": "21:03"})
     return {"time": tdcc["time"]}
 
 
@@ -3220,7 +3322,7 @@ def get_ctee_news_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    ctee = config.get("ctee_schedule", {"time": "07:46"})
+    ctee = config.get("ctee_schedule", {"time": "21:16"})
     return {"time": ctee["time"]}
 
 
@@ -3342,7 +3444,7 @@ def get_cnyes_news_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    cnyes = config.get("cnyes_schedule", {"time": "07:48"})
+    cnyes = config.get("cnyes_schedule", {"time": "21:18"})
     return {"time": cnyes["time"]}
 
 
@@ -3464,7 +3566,7 @@ def get_ptt_news_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    ptt = config.get("ptt_schedule", {"time": "07:50"})
+    ptt = config.get("ptt_schedule", {"time": "21:20"})
     return {"time": ptt["time"]}
 
 
@@ -3586,7 +3688,7 @@ def get_moneyudn_news_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    moneyudn = config.get("moneyudn_schedule", {"time": "07:52"})
+    moneyudn = config.get("moneyudn_schedule", {"time": "21:22"})
     return {"time": moneyudn["time"]}
 
 
@@ -3697,7 +3799,7 @@ def get_yt_transcript_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    yt = config.get("yt_transcript_schedule", {"time": "07:54"})
+    yt = config.get("yt_transcript_schedule", {"time": "21:24"})
     return {"time": yt["time"]}
 
 
@@ -3858,7 +3960,7 @@ def get_oil_price_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    oil = config.get("oil_price_schedule", {"time": "07:36"})
+    oil = config.get("oil_price_schedule", {"time": "21:06"})
     return {"time": oil["time"]}
 
 
@@ -3979,7 +4081,7 @@ def get_gold_price_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    gold = config.get("gold_price_schedule", {"time": "07:38"})
+    gold = config.get("gold_price_schedule", {"time": "21:08"})
     return {"time": gold["time"]}
 
 
@@ -4100,7 +4202,7 @@ def get_bitcoin_price_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    bitcoin = config.get("bitcoin_price_schedule", {"time": "07:40"})
+    bitcoin = config.get("bitcoin_price_schedule", {"time": "21:10"})
     return {"time": bitcoin["time"]}
 
 
@@ -4221,7 +4323,7 @@ def get_currency_price_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    currency = config.get("currency_price_schedule", {"time": "07:42"})
+    currency = config.get("currency_price_schedule", {"time": "21:12"})
     return {"time": currency["time"]}
 
 
@@ -4342,7 +4444,7 @@ def get_indices_price_schedule():
         dict: 包含 time 欄位的排程資訊。
     """
     config = load_config()
-    indices = config.get("indices_price_schedule", {"time": "07:44"})
+    indices = config.get("indices_price_schedule", {"time": "21:14"})
     return {"time": indices["time"]}
 
 
@@ -4397,7 +4499,7 @@ def get_special_info_backfill_schedule():
     """
     config = load_config()
     backfill = config.get(
-        "special_info_backfill_schedule", {"time": "07:57"}
+        "special_info_backfill_schedule", {"time": "21:27"}
     )
     return {"time": backfill["time"], "days": SPECIAL_INFO_BACKFILL_DAYS}
 

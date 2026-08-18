@@ -127,12 +127,12 @@ class TestOilPriceAPI(unittest.TestCase):
 
         res = self.client.put(
             "/api/oil-price/schedule",
-            json={"time": "08:00"},
+            json={"time": "21:30"},
         )
 
         self.assertEqual(res.status_code, 200)
         data = res.json()
-        self.assertEqual(data["time"], "08:00")
+        self.assertEqual(data["time"], "21:30")
         self.assertIn("message", data)
 
     def test_update_oil_price_schedule_invalid_time(self):
@@ -173,7 +173,7 @@ class TestLoadConfigOilPrice(unittest.TestCase):
                 config = web_server.load_config()
 
         self.assertEqual(
-            config["oil_price_schedule"], {"time": "07:36"}
+            config["oil_price_schedule"], {"time": "21:06"}
         )
 
 

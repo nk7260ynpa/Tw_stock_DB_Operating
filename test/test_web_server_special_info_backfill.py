@@ -38,7 +38,7 @@ class TestSpecialInfoBackfillAPI(unittest.TestCase):
         """測試成功更新缺漏自我修復每日排程。"""
         mock_load.return_value = {
             "schedule_time": "20:07",
-            "special_info_backfill_schedule": {"time": "08:00"},
+            "special_info_backfill_schedule": {"time": "21:30"},
         }
 
         res = self.client.put(
@@ -129,19 +129,19 @@ class TestSpecialInfoBackfillJob(unittest.TestCase):
         mock_retry = MagicMock()
         with patch.object(
             web_server.OilPriceUploader, "backfill_missing",
-            return_value=fake_summary,
+            autospec=True, return_value=fake_summary,
         ), patch.object(
             web_server.GoldPriceUploader, "backfill_missing",
-            return_value=fake_summary,
+            autospec=True, return_value=fake_summary,
         ), patch.object(
             web_server.BitcoinPriceUploader, "backfill_missing",
-            return_value=fake_summary,
+            autospec=True, return_value=fake_summary,
         ), patch.object(
             web_server.CurrencyPriceUploader, "backfill_missing",
-            return_value=fake_summary,
+            autospec=True, return_value=fake_summary,
         ), patch.object(
             web_server.IndicesPriceUploader, "backfill_missing",
-            return_value=fake_summary,
+            autospec=True, return_value=fake_summary,
         ), patch.object(web_server, "retry_queue", mock_retry):
             web_server.run_special_info_backfill_job(job_id, days=30)
 
@@ -172,7 +172,7 @@ class TestLoadConfigBackfill(unittest.TestCase):
                 config = web_server.load_config()
 
         self.assertEqual(
-            config["special_info_backfill_schedule"], {"time": "07:57"}
+            config["special_info_backfill_schedule"], {"time": "21:27"}
         )
 
 

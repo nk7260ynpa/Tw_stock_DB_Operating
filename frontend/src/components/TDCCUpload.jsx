@@ -8,7 +8,7 @@ function TDCCUpload() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  const [scheduleTime, setScheduleTime] = useState('07:33')
+  const [scheduleTime, setScheduleTime] = useState('21:03')
   const [saving, setSaving] = useState(false)
   const [scheduleMsg, setScheduleMsg] = useState('')
 
@@ -48,7 +48,7 @@ function TDCCUpload() {
       const res = await apiFetch('/api/tdcc/schedule')
       if (res.ok) {
         const data = await res.json()
-        setScheduleTime(data.time || '07:33')
+        setScheduleTime(data.time || '21:03')
       }
     } catch {
       /* ignore */

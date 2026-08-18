@@ -194,7 +194,7 @@ class TestDetailFailedThreshold(unittest.TestCase):
 
         這是本次最主要的回歸風險：舊契約下 PTT／MoneyUDN 抓漏也回 `ok`，
         新契約改回 `partial`，若沿用「1 篇失敗就重抓」，等於天天排一次
-        同步重跑整個 48 小時窗，會把早上的排程窗整批往後推。
+        同步重跑整個 48 小時窗，會把當晚的排程窗整批往後推。
         """
         self.assertIsNone(partial_retry_reason(_partial(
             self._detail_meta(0.04, failed=2)
