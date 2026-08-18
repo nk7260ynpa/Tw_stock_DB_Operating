@@ -5,11 +5,13 @@
 """
 
 import unittest
+from datetime import date as date_cls
+from datetime import timedelta
 
 import pandas as pd
 
 from data_upload import special_info_common
-from data_upload.base import NetworkError
+from data_upload.base import NetworkError, OutOfRangeError, SourceError
 
 
 class FakeResult:
@@ -65,7 +67,7 @@ class FakeUploader:
     """記憶體版上傳器：crawl_data 依 responses 映射回傳資料或空。"""
 
     def __init__(self, is_continuous, responses, price_dates=None,
-                 ledger_dates=None):
+                 ledger_dates=None, statuses=None, metas=None, errors=None):
         """初始化。
 
         Args:
@@ -73,8 +75,15 @@ class FakeUploader:
             responses (dict): {請求日: 實際日 | None}；None 表示回空 df。
             price_dates (set | None): 初始價格表日期。
             ledger_dates (set | None): 初始帳本日期。
+            statuses (dict | None): {請求日: 爬蟲 status}；未列出者為 None
+                （模擬舊版無 status 的回應）。
+            metas (dict | None): {請求日: 爬蟲 meta 物件}。
+            errors (dict | None): {請求日: 要拋出的例外實例}。
         """
         self.is_continuous_market = is_continuous
+        self.statuses = statuses or {}
+        self.metas = metas or {}
+        self.errors = errors or {}
         self.price_table = "FakePrice"
         self.uploaded_table = "FakeUploaded"
         self.asset_label = "測試商品"
@@ -86,8 +95,13 @@ class FakeUploader:
         self.network_error_dates = set()
 
     def crawl_data(self, date):
+        if date in self.errors:
+            raise self.errors[date]
         if date in self.network_error_dates:
             raise NetworkError(f"模擬網路失敗（{date}）")
+        special_info_common.record_crawl_state(
+            self, self.statuses.get(date), self.metas.get(date)
+        )
         actual = self.responses.get(date, "__MISSING__")
         if actual == "__MISSING__" or actual is None:
             return pd.DataFrame()
@@ -109,6 +123,13 @@ class FakeUploader:
     def _record_uploaded_date(self, date):
         self.conn.ledger_dates.add(date)
         self.conn.commit()
+
+    def upload(self, date):
+        """模擬實際上傳器的 upload：先看帳本，再取得資料並記帳。"""
+        if date in self.conn.ledger_dates:
+            return {"date": date, "record_count": 0}
+        result = special_info_common.fetch_and_store(self, date)
+        return {"date": date, "record_count": result["record_count"]}
 
 
 class TestFetchAndStoreLedgerSemantics(unittest.TestCase):
@@ -320,6 +341,186 @@ class TestDeepBackfill(unittest.TestCase):
         # 07-03 在帳本 → 非 deep 不重驗 → 不補回
         self.assertEqual(summary["scanned"], 0)
         self.assertNotIn("2026-07-03", up.conn.price_dates)
+
+
+class TestSettledGuard(unittest.TestCase):
+    """測試「未定案日期不得標記為非交易日」守衛。
+
+    2026-08-17／08-18 四商品的孤兒帳本即出自此漏洞：盤前（或美股開盤前）
+    去問「今天」，來源只給得出昨天的日 K，舊碼就把今天記成非交易日而永久
+    遮蔽。
+    """
+
+    def setUp(self):
+        self.today = date_cls.today().strftime("%Y-%m-%d")
+        self.yesterday = (
+            date_cls.today() - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+
+    def test_unsettled_empty_not_recorded(self):
+        """請求日為今日且回空：不記帳，留待次日重驗。"""
+        up = FakeUploader(
+            False, {self.today: None}, statuses={self.today: "empty"}
+        )
+        result = special_info_common.fetch_and_store(up, self.today)
+        self.assertNotIn(self.today, up.conn.ledger_dates)
+        self.assertEqual(
+            result["outcome"], special_info_common.OUTCOME_PENDING
+        )
+
+    def test_unsettled_fallback_not_recorded(self):
+        """請求日為今日且爬蟲 fallback 至昨日：只記昨日，不得標記今日。"""
+        up = FakeUploader(
+            False, {self.today: self.yesterday},
+            statuses={self.today: "ok"},
+            metas={self.today: {"target_date_available": False}},
+        )
+        result = special_info_common.fetch_and_store(up, self.today)
+        self.assertIn(self.yesterday, up.conn.ledger_dates)
+        self.assertNotIn(self.today, up.conn.ledger_dates)
+        self.assertEqual(
+            result["outcome"], special_info_common.OUTCOME_PENDING
+        )
+
+    def test_settled_fallback_records(self):
+        """對照組：已定案的過去日期 fallback 時仍標記為非交易日。"""
+        up = FakeUploader(
+            False, {"2026-07-05": "2026-07-03"},
+            statuses={"2026-07-05": "ok"},
+            metas={"2026-07-05": {"target_date_available": False}},
+        )
+        result = special_info_common.fetch_and_store(up, "2026-07-05")
+        self.assertIn("2026-07-05", up.conn.ledger_dates)
+        self.assertEqual(
+            result["outcome"], special_info_common.OUTCOME_NON_TRADING
+        )
+
+
+class TestStatusDrivenLedger(unittest.TestCase):
+    """測試以爬蟲 status／meta 決定記帳的行為。"""
+
+    def test_ok_with_zero_rows_raises(self):
+        """status=ok 卻 0 筆屬自相矛盾：視為失敗，不得記帳。"""
+        up = FakeUploader(
+            False, {"2026-07-05": None}, statuses={"2026-07-05": "ok"}
+        )
+        with self.assertRaises(SourceError):
+            special_info_common.fetch_and_store(up, "2026-07-05")
+        self.assertNotIn("2026-07-05", up.conn.ledger_dates)
+
+    def test_empty_status_records_ledger(self):
+        """status=empty（探測確認無報價）：記帳為非交易日。"""
+        up = FakeUploader(
+            False, {"2026-07-05": None}, statuses={"2026-07-05": "empty"}
+        )
+        result = special_info_common.fetch_and_store(up, "2026-07-05")
+        self.assertIn("2026-07-05", up.conn.ledger_dates)
+        self.assertEqual(
+            result["outcome"], special_info_common.OUTCOME_NON_TRADING
+        )
+
+    def test_out_of_range_records_ledger(self):
+        """out_of_range：重試無用，記帳避免每日重複詢問。"""
+        up = FakeUploader(
+            False, {},
+            errors={"1990-01-02": OutOfRangeError("超出範圍")},
+        )
+        result = special_info_common.fetch_and_store(up, "1990-01-02")
+        self.assertIn("1990-01-02", up.conn.ledger_dates)
+        self.assertEqual(
+            result["outcome"], special_info_common.OUTCOME_OUT_OF_RANGE
+        )
+
+    def test_source_error_never_records_ledger(self):
+        """來源端失敗一律往外拋且不記帳（否則失敗會被永久遮蔽）。"""
+        up = FakeUploader(
+            False, {},
+            errors={"2026-07-05": SourceError("爬取失敗，0 筆不代表無資料")},
+        )
+        with self.assertRaises(SourceError):
+            special_info_common.fetch_and_store(up, "2026-07-05")
+        self.assertNotIn("2026-07-05", up.conn.ledger_dates)
+
+    def test_target_date_available_conflict_not_recorded(self):
+        """meta 說請求日有報價、回傳卻不含它：矛盾，不記帳。"""
+        up = FakeUploader(
+            False, {"2026-07-05": "2026-07-03"},
+            statuses={"2026-07-05": "ok"},
+            metas={"2026-07-05": {"target_date_available": True}},
+        )
+        result = special_info_common.fetch_and_store(up, "2026-07-05")
+        self.assertIn("2026-07-03", up.conn.ledger_dates)
+        self.assertNotIn("2026-07-05", up.conn.ledger_dates)
+        self.assertEqual(
+            result["outcome"], special_info_common.OUTCOME_PENDING
+        )
+
+
+class TestUploadDateRange(unittest.TestCase):
+    """測試日期區間上傳的失敗隔離。"""
+
+    def test_source_error_isolated_and_collected(self):
+        """單日來源端失敗只跳過該日，其後日期照常處理。"""
+        up = FakeUploader(
+            False,
+            {
+                "2026-07-01": "2026-07-01",
+                "2026-07-03": "2026-07-03",
+            },
+            errors={"2026-07-02": SourceError("這天抓不到")},
+        )
+        seen = []
+        result = special_info_common.upload_date_range(
+            up, "2026-07-01", "2026-07-03", on_date=seen.append
+        )
+        self.assertEqual(seen, ["2026-07-01", "2026-07-02", "2026-07-03"])
+        self.assertEqual(result["record_count"], 2)
+        self.assertEqual(len(result["failures"]), 1)
+        self.assertEqual(result["failures"][0]["date"], "2026-07-02")
+        self.assertIn("2026-07-03", up.conn.price_dates)
+
+    def test_network_error_aborts_batch(self):
+        """連不上爬蟲時整批中止，交由呼叫端排入重試。"""
+        up = FakeUploader(False, {"2026-07-01": "2026-07-01"})
+        up.network_error_dates.add("2026-07-02")
+        with self.assertRaises(NetworkError):
+            special_info_common.upload_date_range(
+                up, "2026-07-01", "2026-07-03"
+            )
+        self.assertNotIn("2026-07-03", up.conn.price_dates)
+
+
+class TestScheduledReverify(unittest.TestCase):
+    """測試日常排程（deep=False）以 reverify_days 清除近期孤兒帳本。"""
+
+    def test_reverify_clears_recent_orphans_only(self):
+        """只清最近 N 天的孤兒，較舊的誤標留給人工 deep 重驗。"""
+        up = FakeUploader(
+            False,
+            {"2026-07-28": "2026-07-28"},
+            price_dates=set(),
+            ledger_dates={"2026-07-10", "2026-07-28"},
+        )
+        summary = special_info_common.backfill_missing(
+            up, days=30, today="2026-07-30", deep=False, reverify_days=7
+        )
+        # 07-28 在重驗窗內 → 清孤兒後重驗補回；07-10 在窗外 → 保留
+        self.assertEqual(summary["orphans_cleared"], 1)
+        self.assertIn("2026-07-28", up.conn.price_dates)
+        self.assertIn("2026-07-10", up.conn.ledger_dates)
+
+    def test_reverify_zero_keeps_legacy_behaviour(self):
+        """reverify_days=0（預設）維持舊行為：不清孤兒。"""
+        up = FakeUploader(
+            False,
+            {"2026-07-28": "2026-07-28"},
+            ledger_dates={"2026-07-28"},
+        )
+        summary = special_info_common.backfill_missing(
+            up, days=30, today="2026-07-30", deep=False
+        )
+        self.assertEqual(summary["orphans_cleared"], 0)
+        self.assertNotIn("2026-07-28", up.conn.price_dates)
 
 
 if __name__ == "__main__":
