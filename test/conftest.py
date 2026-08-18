@@ -37,4 +37,5 @@ def isolate_config_paths(monkeypatch, tmp_path):
     # 「新舊並存」warning 只記一次的旗標是模組層狀態，逐測試重設避免互相污染。
     monkeypatch.setattr(web_server, "_legacy_coexist_warned", False)
     monkeypatch.setattr(web_server, "_legacy_read_warned", False)
+    monkeypatch.setattr(web_server, "_repaired_fields_warned", ())
     yield tmp_path

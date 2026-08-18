@@ -199,7 +199,7 @@ _SUPERSEDED_IN_WINDOW_DEFAULTS = {
 
 # 排程時間字串的合法格式（HH:MM，24 小時制）。schedule 套件的 .at() 只吃這種格式，
 # 其餘值（None、數字、"sunday 07:33"）會讓排程註冊當場拋例外而使服務起不來。
-_TIME_PATTERN = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+_TIME_PATTERN = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 
 
 def _is_valid_time(value):
@@ -211,7 +211,7 @@ def _is_valid_time(value):
     Returns:
         bool: 為合法 HH:MM 字串時回傳 True。
     """
-    return isinstance(value, str) and bool(_TIME_PATTERN.match(value))
+    return isinstance(value, str) and bool(_TIME_PATTERN.fullmatch(value))
 
 
 def _in_crawl_window(time_str):
@@ -272,6 +272,8 @@ def _migrate_crawl_schedule_window(config, default):
 _legacy_coexist_warned = False
 # 舊設定檔讀取失敗的 warning 同理只記第一次。
 _legacy_read_warned = False
+# 上一次警告過的「格式不符欄位」組合（tuple），用來避免同一組問題重複刷 warning。
+_repaired_fields_warned = ()
 
 
 # 設定檔暫存檔名的遞增序號（同一行程內唯一，配合 pid 即可避免併發互相覆蓋）。
@@ -416,9 +418,10 @@ def _normalize_config(config, default):
     凡型別或格式不符預期者一律換成預設值並記 warning，讓服務照樣起得來，同時
     保留同一份設定中其餘正常的使用者自訂。
 
-    形狀不符者**不寫回**設定檔，保留使用者原檔供人工檢視（每次啟動會再記一次
-    warning 提醒）；只有一次性遷移（TDCC 舊格式、爬蟲時間窗）才寫回，且統一在
-    正規化全部完成後寫一次，避免半套結果落地。
+    形狀不符者本身**不觸發寫回**，保留使用者原檔供人工檢視；只有一次性遷移
+    （TDCC 舊格式、爬蟲時間窗）才寫回，且統一在正規化全部完成後寫一次，避免
+    半套結果落地——注意兩者同時發生時，修復後的內容會隨遷移一併寫回，warning
+    文案會據此改口。同一組壞欄位的 warning 只記一次（其後降為 debug）。
 
     Args:
         config (dict): 讀入的既有設定（就地修改）。
@@ -469,12 +472,6 @@ def _normalize_config(config, default):
         repaired.append("config_version")
     config["config_version"] = version
 
-    if repaired:
-        logger.warning(
-            "設定檔 %s 中下列欄位格式不符，本輪改用預設值（原檔保留未修改，"
-            "請人工確認）：%s", CONFIG_PATH, "、".join(repaired),
-        )
-
     # 一次性遷移（version-gated）：把落在 07:30~08:00 窗外的爬蟲排程收斂到
     # 新預設並寫回，讓部署重啟後持久化的舊時段自動更新；bump 版本後不再重跑，
     # 保留使用者日後經 Web 介面所做的窗內自訂。
@@ -486,6 +483,24 @@ def _normalize_config(config, default):
             logger.info(
                 "已將舊時段的爬蟲抓取排程一次性遷移至 07:30~08:00 時間窗。"
             )
+
+    if repaired:
+        # 同一組壞欄位只警告一次：load_config 幾乎每個 API 端點都會呼叫，每次都記
+        # 會把 log 洗掉；壞欄位換一組（使用者又改壞別的）時仍會再警告。
+        global _repaired_fields_warned
+        fields = tuple(repaired)
+        if fields != _repaired_fields_warned:
+            logger.warning(
+                "設定檔 %s 中下列欄位格式不符，本輪改用預設值（%s，請人工確認）：%s",
+                CONFIG_PATH,
+                "原檔將因本次一次性遷移一併被改寫" if write_back_reasons
+                else "原檔保留未修改",
+                "、".join(repaired),
+            )
+            _repaired_fields_warned = fields
+        else:
+            logger.debug("設定檔 %s 的欄位格式問題仍在：%s",
+                         CONFIG_PATH, "、".join(repaired))
 
     if write_back_reasons:
         _save_config_best_effort(config, "、".join(write_back_reasons))
@@ -2880,13 +2895,9 @@ def update_schedule(req: ScheduleRequest):
     Returns:
         dict: 更新後的排程時間與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3095,13 +3106,9 @@ def update_tdcc_schedule(req: TDCCScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3221,13 +3228,9 @@ def update_ctee_news_schedule(req: CTEENewsScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3347,13 +3350,9 @@ def update_cnyes_news_schedule(req: CNYESNewsScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3473,13 +3472,9 @@ def update_ptt_news_schedule(req: PTTNewsScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3599,13 +3594,9 @@ def update_moneyudn_news_schedule(req: MoneyUDNNewsScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3714,13 +3705,9 @@ def update_yt_transcript_schedule(req: YTTranscriptScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -3879,13 +3866,9 @@ def update_oil_price_schedule(req: OilPriceScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -4004,13 +3987,9 @@ def update_gold_price_schedule(req: GoldPriceScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -4129,13 +4108,9 @@ def update_bitcoin_price_schedule(req: BitcoinPriceScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -4254,13 +4229,9 @@ def update_currency_price_schedule(req: CurrencyPriceScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -4379,13 +4350,9 @@ def update_indices_price_schedule(req: IndicesPriceScheduleRequest):
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()
@@ -4441,13 +4408,9 @@ def update_special_info_backfill_schedule(
     Returns:
         dict: 更新後的排程設定與訊息。
     """
-    try:
-        time_parts = req.time.split(":")
-        hour = int(time_parts[0])
-        minute = int(time_parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+    # 與 load_config 的形狀正規化共用同一判準：端點放行、重啟卻被判為格式不符而
+    # 換回預設值的話，使用者的設定等於被靜默丟棄（例如 "07:30:00"、"7:30"）。
+    if not _is_valid_time(req.time):
         raise HTTPException(400, "時間格式錯誤，請使用 HH:MM")
 
     config = load_config()

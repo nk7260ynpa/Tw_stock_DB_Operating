@@ -28,6 +28,9 @@ DEFAULT_CONFIG_DIR = web_server.CONFIG_DIR
 DEFAULT_CONFIG_PATH = web_server.CONFIG_PATH
 DEFAULT_LOG_DIR = web_server.LOG_DIR
 
+# repo 根目錄（本檔位於 <repo>/test/）。
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 
 class ConfigPathTestCase(unittest.TestCase):
     """提供「以暫存目錄取代真實設定路徑」的共用 setUp。"""
@@ -288,6 +291,8 @@ class TestConfigWriteDurability(ConfigPathTestCase):
         corrupt = self.config_path.with_name("config.json.corrupt")
         for payload, broken_key in cases:
             with self.subTest(payload=payload):
+                # 同一組壞欄位的 warning 會去重，逐個 payload 重設旗標。
+                web_server._repaired_fields_warned = ()
                 self.write_current(payload)
 
                 with self.assertLogs("web_server", level="WARNING") as captured:
@@ -327,6 +332,27 @@ class TestConfigWriteDurability(ConfigPathTestCase):
         for key in web_server.CRAWL_SCHEDULE_KEYS:
             self.assertIsInstance(config[key], dict)
             self.assertRegex(config[key]["time"], r"^\d{2}:\d{2}$")
+
+    def test_repair_warning_logged_once_per_field_set(self):
+        """同一組壞欄位不該每次 load_config 都刷 warning，換一組時仍要再警告。"""
+        self.write_current({"config_version": web_server.CONFIG_VERSION,
+                            "tdcc_schedule": None})
+
+        with self.assertLogs("web_server", level="WARNING"):
+            web_server.load_config()
+
+        with self.assertLogs("web_server", level="DEBUG") as second:
+            web_server.load_config()
+        repeated = [line for line in second.output
+                    if line.startswith("WARNING") and "格式不符" in line]
+        self.assertEqual(repeated, [], f"warning 不應重複記錄：{repeated}")
+
+        # 換一組壞欄位（使用者又改壞別的）→ 仍須警告
+        self.write_current({"config_version": web_server.CONFIG_VERSION,
+                            "ctee_schedule": 5})
+        with self.assertLogs("web_server", level="WARNING") as third:
+            web_server.load_config()
+        self.assertIn("ctee_schedule", "\n".join(third.output))
 
     def test_unexpected_normalize_failure_is_quarantined(self):
         """保險絲：正規化仍拋出預期外例外時，隔離毀損檔並退回預設值。"""
@@ -516,6 +542,43 @@ class TestLegacyReadFailureWarnOnce(ConfigPathTestCase):
         repeated = [line for line in second.output
                     if line.startswith("WARNING") and "讀取舊設定檔" in line]
         self.assertEqual(repeated, [], f"warning 不應重複記錄：{repeated}")
+
+
+class TestScheduleEndpointTimeValidation(unittest.TestCase):
+    """端點驗證須與 load_config 的形狀正規化使用同一判準。
+
+    端點放行、重啟卻被判為格式不符而換回預設值的話，使用者的設定等於被靜默
+    丟棄——正是本 repo 要杜絕的失敗模式。
+    """
+
+    ENDPOINTS = (
+        "/api/schedule",
+        "/api/ctee-news/schedule",
+        "/api/tdcc/schedule",
+    )
+
+    def setUp(self):
+        """建立測試用 HTTP client。"""
+        from fastapi.testclient import TestClient
+
+        self.client = TestClient(web_server.app)
+
+    def test_loosely_formatted_times_are_rejected(self):
+        """`_is_valid_time` 判為不合法者，端點必須回 400 而非存進設定檔。"""
+        for endpoint in self.ENDPOINTS:
+            for value in ("07:30:00", "7:30", "07:5", "24:00", " 07:30"):
+                with self.subTest(endpoint=endpoint, time=value):
+                    self.assertFalse(web_server._is_valid_time(value))
+                    res = self.client.put(endpoint, json={"time": value})
+                    self.assertEqual(res.status_code, 400)
+
+    def test_no_endpoint_uses_loose_time_parsing(self):
+        """守門：任何排程端點都不得改回寬鬆的 split(":") 自行解析。"""
+        source = REPO_ROOT.joinpath("web_server.py").read_text(encoding="utf-8")
+        self.assertNotIn(
+            'time_parts = req.time.split(":")', source,
+            "排程時間驗證請統一改用 _is_valid_time。",
+        )
 
 
 class TestDeploymentMountsAgreement(unittest.TestCase):
