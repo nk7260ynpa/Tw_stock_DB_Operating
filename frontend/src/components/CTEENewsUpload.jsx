@@ -14,7 +14,7 @@ function CTEENewsUpload() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  const [scheduleTime, setScheduleTime] = useState('07:46')
+  const [scheduleTime, setScheduleTime] = useState('21:16')
   const [saving, setSaving] = useState(false)
   const [scheduleMsg, setScheduleMsg] = useState('')
 
@@ -54,7 +54,7 @@ function CTEENewsUpload() {
       const res = await apiFetch('/api/ctee-news/schedule')
       if (res.ok) {
         const data = await res.json()
-        setScheduleTime(data.time || '07:46')
+        setScheduleTime(data.time || '21:16')
       }
     } catch {
       /* ignore */

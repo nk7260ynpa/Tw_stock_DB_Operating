@@ -14,7 +14,7 @@ function MoneyUDNNewsUpload() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  const [scheduleTime, setScheduleTime] = useState('07:52')
+  const [scheduleTime, setScheduleTime] = useState('21:22')
   const [saving, setSaving] = useState(false)
   const [scheduleMsg, setScheduleMsg] = useState('')
 
@@ -54,7 +54,7 @@ function MoneyUDNNewsUpload() {
       const res = await apiFetch('/api/moneyudn-news/schedule')
       if (res.ok) {
         const data = await res.json()
-        setScheduleTime(data.time || '07:52')
+        setScheduleTime(data.time || '21:22')
       }
     } catch {
       /* ignore */
