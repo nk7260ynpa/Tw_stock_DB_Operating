@@ -1,0 +1,29 @@
+# Docker build context 排除清單
+#
+# 目的有二：
+#   1. 避免把「環境專屬的執行期狀態」烤進 image。特別是 config/ 內的持久化設定——
+#      設定應只來自掛載進來的目錄，若被 COPY 進 image，未掛載時會讀到 build 當下的
+#      舊設定，形成與 logs/config.json 同類的「設定從哪來說不清」問題。
+#   2. 縮小 build context（.git 與 frontend/node_modules 動輒數十 MB），並避免 host
+#      的 node_modules（macOS 原生二進位）覆蓋 builder 內 npm install 的成果。
+
+.git/
+.gitignore
+.gitlab-ci.yml
+.github/
+
+# 執行期狀態：log 與持久化設定（目錄本身保留，內容不進 image）
+logs/*
+!logs/.gitkeep
+config/*
+!config/.gitkeep
+*.log
+
+# 前端：依賴與建構產出皆於 builder stage 內重新產生
+frontend/node_modules/
+frontend/dist/
+
+# Python 快取
+**/__pycache__/
+*.py[cod]
+.pytest_cache/

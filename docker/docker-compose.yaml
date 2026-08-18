@@ -18,6 +18,8 @@ services:
       - "8080:8080"
     volumes:
       - ../logs:/workspace/logs
+      # 持久化設定與 logs 分離（見 README「設定持久化」），並與 run.sh／CI deploy 同一份
+      - ../config:/workspace/config
     restart: "always"
     networks:
       - db_network
