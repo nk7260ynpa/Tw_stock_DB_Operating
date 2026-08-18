@@ -9,8 +9,12 @@
 
 .git/
 .gitignore
-.gitlab-ci.yml
 .github/
+
+# 注意：`.gitlab-ci.yml` **刻意保留**在 build context 內。
+# test/test_config_persistence.py 會比對 run.sh 與 deploy job 是否掛載同一個設定
+# 目錄，而測試也會在 image 內執行（見 README「執行測試」），排除它會讓那組守門
+# 測試在 image 內直接失敗。
 
 # 執行期狀態：log 與持久化設定（目錄本身保留，內容不進 image）
 logs/*
