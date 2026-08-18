@@ -164,7 +164,7 @@ class TestScheduleRegistration(unittest.TestCase):
         import web_server
 
         try:
-            web_server.setup_schedule("07:30")
+            web_server.setup_schedule("21:00")
             jobs = [j for j in schedule_lib.jobs
                     if j.job_func.func is web_server.run_daily_craw_scheduled]
             self.assertEqual(len(jobs), 1)

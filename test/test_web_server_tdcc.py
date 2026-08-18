@@ -158,7 +158,7 @@ class TestLoadConfigMigration(unittest.TestCase):
 
         # 帶 config_version：隔離舊 day 格式遷移，不觸發窗內時間遷移。
         old_config = {
-            "config_version": 2,
+            "config_version": web_server.CONFIG_VERSION,
             "schedule_time": "20:07",
             "tdcc_schedule": {"day": "saturday", "time": "10:00"},
         }
@@ -183,7 +183,7 @@ class TestLoadConfigMigration(unittest.TestCase):
 
         # 帶 config_version：新格式且已遷移，不應觸發任何遷移或寫回。
         new_config = {
-            "config_version": 2,
+            "config_version": web_server.CONFIG_VERSION,
             "schedule_time": "20:07",
             "tdcc_schedule": {"time": "10:00"},
         }
@@ -214,7 +214,7 @@ class TestLoadConfigMigration(unittest.TestCase):
             with patch("json.load", return_value=old_config.copy()):
                 config = web_server.load_config()
 
-        self.assertEqual(config["tdcc_schedule"], {"time": "07:33"})
+        self.assertEqual(config["tdcc_schedule"], {"time": "21:03"})
 
 
 if __name__ == "__main__":

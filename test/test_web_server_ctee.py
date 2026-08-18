@@ -205,7 +205,7 @@ class TestLoadConfigWithCTEE(unittest.TestCase):
                 config = web_server.load_config()
 
         self.assertIn("ctee_schedule", config)
-        self.assertEqual(config["ctee_schedule"]["time"], "07:46")
+        self.assertEqual(config["ctee_schedule"]["time"], "21:16")
 
     @patch("web_server.CONFIG_PATH")
     def test_existing_ctee_schedule_preserved(self, mock_path):
@@ -216,7 +216,7 @@ class TestLoadConfigWithCTEE(unittest.TestCase):
 
         # 帶 config_version：已完成遷移的設定，既有值原樣保留（含窗外自訂）。
         config_data = {
-            "config_version": 2,
+            "config_version": web_server.CONFIG_VERSION,
             "schedule_time": "20:07",
             "tdcc_schedule": {"time": "10:00"},
             "ctee_schedule": {"time": "22:30"},
@@ -241,7 +241,7 @@ class TestCTEENewsScheduled(unittest.TestCase):
 
     @patch("web_server.job_queue")
     def test_scheduled_uses_48_hours(self, mock_queue):
-        """排程改於早上抓取，回溯時數應為 48 小時以涵蓋昨日整天。"""
+        """排程於 21:16 抓取，回溯時數應為 48 小時以涵蓋昨日整天。"""
         import web_server
 
         self.assertEqual(web_server.NEWS_SCHEDULE_HOURS, 48)

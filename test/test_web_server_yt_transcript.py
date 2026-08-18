@@ -197,7 +197,7 @@ class TestYTTranscriptScheduled(unittest.TestCase):
 
     @patch("web_server.job_queue")
     def test_scheduled_uses_yesterday(self, mock_queue):
-        """排程於早上執行，應抓「昨日」而非今日的影片。"""
+        """排程於晚間 21:24 執行，應抓「昨日」而非今日的影片。"""
         import web_server
         from datetime import datetime, timedelta
 

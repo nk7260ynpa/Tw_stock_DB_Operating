@@ -17,7 +17,7 @@ class TestLoadConfig(unittest.TestCase):
 
         mock_path.exists.return_value = True
         # 帶 config_version：已完成一次性遷移的設定，既有值原樣保留（不再遷移）。
-        config_data = {"schedule_time": "21:30", "config_version": 2}
+        config_data = {"schedule_time": "21:30", "config_version": web_server.CONFIG_VERSION}
 
         with patch("builtins.open", mock_open(read_data=json.dumps(config_data))):
             result = web_server.load_config()
@@ -37,51 +37,178 @@ class TestLoadConfig(unittest.TestCase):
 
         result = web_server.load_config()
 
-        self.assertEqual(result["schedule_time"], "07:30")
+        self.assertEqual(result["schedule_time"], "21:00")
         self.assertIn("tdcc_schedule", result)
         self.assertIn("ctee_schedule", result)
         self.assertIn("cnyes_schedule", result)
 
 
+class TestScheduleDefaults(unittest.TestCase):
+    """守門測試：程式碼預設排程時間必須完全等於商定的 21:00 時間表。
+
+    時間值散落在 load_config 的 default、setup_schedule 的 .get() 後備值與
+    13 支 GET/PUT 端點三處，任一處漏改都會在特定路徑上退回舊時間，故以單一
+    真值表逐鍵比對。
+    """
+
+    # 商定時間表（相對間隔與舊 07:30 窗完全一致，整體後移 13.5 小時）。
+    EXPECTED = {
+        "schedule_time": "21:00",
+        "tdcc_schedule": "21:03",
+        "oil_price_schedule": "21:06",
+        "gold_price_schedule": "21:08",
+        "bitcoin_price_schedule": "21:10",
+        "currency_price_schedule": "21:12",
+        "indices_price_schedule": "21:14",
+        "ctee_schedule": "21:16",
+        "cnyes_schedule": "21:18",
+        "ptt_schedule": "21:20",
+        "moneyudn_schedule": "21:22",
+        "yt_transcript_schedule": "21:24",
+        "special_info_backfill_schedule": "21:27",
+    }
+
+    @patch("web_server.CONFIG_PATH")
+    def test_defaults_match_agreed_table(self, mock_path):
+        """無設定檔時取得的預設值應逐鍵等於商定時間表。"""
+        import web_server
+
+        mock_path.exists.return_value = False
+        config = web_server.load_config()
+
+        for key, expected in self.EXPECTED.items():
+            actual = (config[key]["time"] if isinstance(config[key], dict)
+                      else config[key])
+            self.assertEqual(actual, expected, f"{key} 預設時間不符")
+
+    def test_all_defaults_inside_crawl_window(self):
+        """所有爬蟲抓取排程預設值都必須落在集中時間窗內。"""
+        import web_server
+
+        for key, expected in self.EXPECTED.items():
+            self.assertTrue(
+                web_server._in_crawl_window(expected),
+                f"{key} 預設 {expected} 落在窗外",
+            )
+
+    def test_crawl_window_bounds(self):
+        """時間窗常數本身應為 21:00~21:30。"""
+        import web_server
+
+        self.assertEqual(web_server.CRAWL_WINDOW_START, "21:00")
+        self.assertEqual(web_server.CRAWL_WINDOW_END, "21:30")
+
+    def test_schedule_times_are_distinct(self):
+        """各排程時間必須彼此錯開，避免同時併發搶爬蟲資源。"""
+        times = list(self.EXPECTED.values())
+        self.assertEqual(len(times), len(set(times)), f"排程時間重複：{times}")
+
+
 class TestCrawlScheduleMigration(unittest.TestCase):
-    """測試爬蟲排程一次性遷移（07:30~08:00 時間窗）。"""
+    """測試爬蟲排程一次性遷移（21:00~21:30 時間窗）。"""
 
     @patch("web_server.save_config")
     @patch("web_server.CONFIG_PATH")
-    def test_old_out_of_window_config_is_migrated(self, mock_path, mock_save):
-        """舊時段設定（無 config_version）應被收斂到 07:30~08:00 窗內並寫回。"""
+    def test_v2_morning_config_is_migrated(self, mock_path, mock_save):
+        """v2（07:30 窗）設定應整批收斂到 21:00 窗的新預設並寫回。
+
+        這是實機既有部署的狀態，也是本次搬窗最重要的路徑：若 CONFIG_VERSION
+        沒遞增，持久化的 07:xx 會壓過新的程式碼預設，改了等於沒改。
+        """
         import web_server
 
         mock_path.exists.return_value = True
         old_config = {
-            "schedule_time": "19:07",
-            "tdcc_schedule": {"time": "20:15"},
-            "ctee_schedule": {"time": "21:00"},
-            "cnyes_schedule": {"time": "21:10"},
-            "ptt_schedule": {"time": "21:20"},
-            "moneyudn_schedule": {"time": "21:30"},
-            "yt_transcript_schedule": {"time": "19:05"},
-            "oil_price_schedule": {"time": "07:00"},
-            "gold_price_schedule": {"time": "07:05"},
-            "bitcoin_price_schedule": {"time": "07:10"},
-            "currency_price_schedule": {"time": "07:15"},
-            "indices_price_schedule": {"time": "07:20"},
+            "config_version": 2,
+            "schedule_time": "07:30",
+            "tdcc_schedule": {"time": "07:33"},
+            "oil_price_schedule": {"time": "07:36"},
+            "gold_price_schedule": {"time": "07:38"},
+            "bitcoin_price_schedule": {"time": "07:40"},
+            "currency_price_schedule": {"time": "07:42"},
+            "indices_price_schedule": {"time": "07:44"},
+            "ctee_schedule": {"time": "07:46"},
+            "cnyes_schedule": {"time": "07:48"},
+            "ptt_schedule": {"time": "07:50"},
+            "moneyudn_schedule": {"time": "07:52"},
+            "yt_transcript_schedule": {"time": "07:54"},
+            "special_info_backfill_schedule": {"time": "07:57"},
         }
 
         with patch("builtins.open", unittest.mock.mock_open(read_data="{}")):
             with patch("json.load", return_value=old_config.copy()):
                 config = web_server.load_config()
 
-        # 所有爬蟲抓取排程都應落在 07:30~08:00 窗內
-        self.assertEqual(config["schedule_time"], "07:30")
+        expected = TestScheduleDefaults.EXPECTED
+        self.assertEqual(config["schedule_time"], expected["schedule_time"])
         for key in web_server.CRAWL_SCHEDULE_KEYS:
-            self.assertTrue(
-                web_server._in_crawl_window(config[key]["time"]),
-                f"{key} 未落在時間窗內：{config[key]}",
+            self.assertEqual(
+                config[key]["time"], expected[key], f"{key} 未收斂到新預設"
             )
-        # 遷移後應標記為新版並寫回持久化
         self.assertEqual(config["config_version"], web_server.CONFIG_VERSION)
         mock_save.assert_called_once()
+
+    @patch("web_server.save_config")
+    @patch("web_server.CONFIG_PATH")
+    def test_v1_evening_config_is_migrated(self, mock_path, mock_save):
+        """v1（無 config_version）的晚間舊預設應全部收斂到新預設。
+
+        v1 的 CTEE 21:00 與 CNYES 21:30 恰好落在新窗的兩個端點內，單靠
+        _in_crawl_window 判不出來，必須由 _SUPERSEDED_IN_WINDOW_DEFAULTS 攔下；
+        否則 CTEE 會停在 21:00、與 daily_craw 撞在同一分鐘。
+        """
+        import web_server
+
+        mock_path.exists.return_value = True
+        old_config = {
+            "schedule_time": "19:07",
+            "tdcc_schedule": {"time": "10:00"},
+            "ctee_schedule": {"time": "21:00"},
+            "cnyes_schedule": {"time": "21:30"},
+            "ptt_schedule": {"time": "22:00"},
+            "moneyudn_schedule": {"time": "22:30"},
+            "yt_transcript_schedule": {"time": "19:05"},
+            "oil_price_schedule": {"time": "07:00"},
+            "gold_price_schedule": {"time": "07:05"},
+            "bitcoin_price_schedule": {"time": "07:10"},
+            "currency_price_schedule": {"time": "07:15"},
+            "indices_price_schedule": {"time": "07:20"},
+            "special_info_backfill_schedule": {"time": "08:00"},
+        }
+
+        with patch("builtins.open", unittest.mock.mock_open(read_data="{}")):
+            with patch("json.load", return_value=old_config.copy()):
+                config = web_server.load_config()
+
+        expected = TestScheduleDefaults.EXPECTED
+        self.assertEqual(config["schedule_time"], expected["schedule_time"])
+        for key in web_server.CRAWL_SCHEDULE_KEYS:
+            self.assertEqual(
+                config[key]["time"], expected[key], f"{key} 未收斂到新預設"
+            )
+        self.assertEqual(config["config_version"], web_server.CONFIG_VERSION)
+        mock_save.assert_called_once()
+
+    @patch("web_server.save_config")
+    @patch("web_server.CONFIG_PATH")
+    def test_superseded_in_window_defaults_are_all_covered(
+        self, mock_path, mock_save
+    ):
+        """_SUPERSEDED_IN_WINDOW_DEFAULTS 的每個舊值都必須被收斂掉。"""
+        import web_server
+
+        expected = TestScheduleDefaults.EXPECTED
+        for key, superseded in web_server._SUPERSEDED_IN_WINDOW_DEFAULTS.items():
+            with self.subTest(key=key):
+                # 前提：這些舊值確實落在窗內，才需要本機制攔截。
+                self.assertTrue(web_server._in_crawl_window(superseded))
+                mock_path.exists.return_value = True
+                old_config = {"schedule_time": "19:07", key: {"time": superseded}}
+                with patch("builtins.open",
+                           unittest.mock.mock_open(read_data="{}")):
+                    with patch("json.load", return_value=old_config.copy()):
+                        config = web_server.load_config()
+                self.assertEqual(config[key]["time"], expected[key])
 
     @patch("web_server.save_config")
     @patch("web_server.CONFIG_PATH")
@@ -92,7 +219,7 @@ class TestCrawlScheduleMigration(unittest.TestCase):
         mock_path.exists.return_value = True
         user_config = {
             "config_version": web_server.CONFIG_VERSION,
-            "schedule_time": "07:35",
+            "schedule_time": "21:05",
             "ctee_schedule": {"time": "23:00"},
         }
 
@@ -101,51 +228,29 @@ class TestCrawlScheduleMigration(unittest.TestCase):
                 config = web_server.load_config()
 
         # 版本相符 → 不觸發遷移，使用者自訂（含窗外）原樣保留、不寫回
-        self.assertEqual(config["schedule_time"], "07:35")
+        self.assertEqual(config["schedule_time"], "21:05")
         self.assertEqual(config["ctee_schedule"]["time"], "23:00")
         mock_save.assert_not_called()
 
     @patch("web_server.save_config")
     @patch("web_server.CONFIG_PATH")
     def test_migration_keeps_in_window_values(self, mock_path, mock_save):
-        """遷移時已落在窗內的自訂值應被保留，不覆寫為預設。"""
+        """遷移時已落在新窗內的自訂值應被保留，不覆寫為預設。"""
         import web_server
 
         mock_path.exists.return_value = True
         old_config = {
             "schedule_time": "19:07",
-            "ctee_schedule": {"time": "07:47"},
+            "ctee_schedule": {"time": "21:17"},
         }
 
         with patch("builtins.open", unittest.mock.mock_open(read_data="{}")):
             with patch("json.load", return_value=old_config.copy()):
                 config = web_server.load_config()
 
-        self.assertEqual(config["schedule_time"], "07:30")
-        # 窗內自訂 07:47 應保留（非重置為預設 07:46）
-        self.assertEqual(config["ctee_schedule"]["time"], "07:47")
-
-    @patch("web_server.save_config")
-    @patch("web_server.CONFIG_PATH")
-    def test_superseded_in_window_default_is_migrated(
-        self, mock_path, mock_save
-    ):
-        """舊版 special_info_backfill 預設 08:00（落窗尾）應收斂到新預設 07:57。"""
-        import web_server
-
-        mock_path.exists.return_value = True
-        old_config = {
-            "schedule_time": "19:07",
-            "special_info_backfill_schedule": {"time": "08:00"},
-        }
-
-        with patch("builtins.open", unittest.mock.mock_open(read_data="{}")):
-            with patch("json.load", return_value=old_config.copy()):
-                config = web_server.load_config()
-
-        self.assertEqual(
-            config["special_info_backfill_schedule"]["time"], "07:57"
-        )
+        self.assertEqual(config["schedule_time"], "21:00")
+        # 窗內自訂 21:17 應保留（非重置為預設 21:16）
+        self.assertEqual(config["ctee_schedule"]["time"], "21:17")
 
 
 class TestSaveConfig(unittest.TestCase):
