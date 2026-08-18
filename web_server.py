@@ -2720,8 +2720,9 @@ def run_special_info_backfill_job(
         upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
 
     logger.info(
-        "SPECIAL_INFO 缺漏自我修復任務完成 %s（補回 %d 筆，錯誤 %d 個）",
-        job_id, total_records, len(errors),
+        "SPECIAL_INFO 缺漏自我修復任務完成 %s（補回 %d 筆，狀態 %s，"
+        "商品失敗 %d 個、日期異常 %d 個）",
+        job_id, total_records, status, len(errors), len(date_errors),
     )
 
 
@@ -4570,7 +4571,8 @@ def create_special_info_backfill_run(req: SpecialInfoBackfillRunRequest = None):
 
     Args:
         req: 可選，包含 days（掃描天數）與 deep（是否深度重驗）。未提供時
-            使用預設 30 天、deep=False。
+            使用預設 30 天、deep=False；deep=False 仍會重驗最近
+            SPECIAL_INFO_REVERIFY_DAYS 天的孤兒帳本。
 
     Returns:
         dict: 任務 ID 與初始狀態。
@@ -4595,12 +4597,16 @@ def create_special_info_backfill_run(req: SpecialInfoBackfillRunRequest = None):
             "finished_at": None,
         }
 
+    # deep=False 時仍帶入重驗天數（與 21:27 排程一致）：否則手動觸發非深度
+    # 補抓等於完全不清孤兒帳本，操作者照文件來救誤標會一無所獲。
     position = job_queue.enqueue(
-        job_id, run_special_info_backfill_job, (job_id, days, deep),
+        job_id, run_special_info_backfill_job,
+        (job_id, days, deep, None, SPECIAL_INFO_REVERIFY_DAYS),
     )
     logger.info(
-        "SPECIAL_INFO 缺漏自我修復手動任務已建立 %s（近 %d 天，deep=%s）",
-        job_id, days, deep,
+        "SPECIAL_INFO 缺漏自我修復手動任務已建立 %s（近 %d 天，deep=%s，"
+        "重驗近 %d 天）",
+        job_id, days, deep, SPECIAL_INFO_REVERIFY_DAYS,
     )
     return {"job_id": job_id, "status": "queued", "queue_position": position}
 

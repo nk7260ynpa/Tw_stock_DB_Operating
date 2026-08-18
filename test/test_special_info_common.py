@@ -101,15 +101,29 @@ class FakeUploader:
         self.network_error_dates = set()
 
     def crawl_data(self, date):
+        """模擬爬蟲回應。
+
+        未指定 statuses／metas 時採「健康爬蟲」的預設契約：回空即
+        `status=empty`（探測確認無報價），fallback 即
+        `meta.target_date_available=False`（確認請求日無報價）。要測退化
+        契約（status 缺席、meta 缺欄位）請顯式傳入 statuses／metas。
+        """
         if date in self.errors:
             raise self.errors[date]
         if date in self.network_error_dates:
             raise NetworkError(f"模擬網路失敗（{date}）")
-        special_info_common.record_crawl_state(
-            self, self.statuses.get(date), self.metas.get(date)
-        )
         actual = self.responses.get(date, "__MISSING__")
-        if actual == "__MISSING__" or actual is None:
+        is_empty = actual == "__MISSING__" or actual is None
+        default_status = "empty" if is_empty else "ok"
+        default_meta = {} if is_empty else {
+            "target_date_available": actual == date
+        }
+        special_info_common.record_crawl_state(
+            self,
+            self.statuses.get(date, default_status),
+            self.metas.get(date, default_meta),
+        )
+        if is_empty:
             return pd.DataFrame()
         return pd.DataFrame([{
             "Date": actual, "Product": "X",
@@ -635,6 +649,67 @@ class TestBackfillFailureIsolation(unittest.TestCase):
         """確認測試用 schema 的確會拋 pydantic ValidationError。"""
         with self.assertRaises(ValidationError):
             _StrictRow(Close=None)
+
+
+class TestDegradedContractNeverRecords(unittest.TestCase):
+    """測試「契約退化」的回應一律不得寫帳本（不知道 != 沒有）。
+
+    帳本是永久標記，寫下去該日就再也不會被列為補抓候選。因此只有正面證據
+    （`status=empty`／`target_date_available=False`）才可記帳；狀態或 meta
+    缺席時一律留白待重驗——多問幾次的成本遠低於永久遮蔽一天的行情。
+    """
+
+    def test_non_dict_response_raises_source_error(self):
+        """回應不是物件（如代理層回字串）視為抓取失敗，不得當成無資料。"""
+        up = FakeUploader(False, {})
+        with self.assertRaises(SourceError):
+            special_info_common.parse_price_response(
+                up, "unexpected", "2026-07-05"
+            )
+
+    def test_empty_without_status_not_recorded(self):
+        """回空但 status 缺席（舊版爬蟲）：不記帳，留待重驗。"""
+        up = FakeUploader(False, {"2026-07-05": None},
+                          statuses={"2026-07-05": None})
+        result = special_info_common.fetch_and_store(up, "2026-07-05")
+        self.assertEqual(
+            result["outcome"], special_info_common.OUTCOME_PENDING
+        )
+        self.assertNotIn("2026-07-05", up.conn.ledger_dates)
+
+    def test_empty_with_error_status_not_recorded(self):
+        """回空且 status 非 empty：不記帳（0 筆不代表當日沒有）。"""
+        up = FakeUploader(False, {"2026-07-05": None},
+                          statuses={"2026-07-05": "unknown_status"})
+        result = special_info_common.fetch_and_store(up, "2026-07-05")
+        self.assertEqual(
+            result["outcome"], special_info_common.OUTCOME_PENDING
+        )
+        self.assertNotIn("2026-07-05", up.conn.ledger_dates)
+
+    def test_fallback_without_meta_field_not_recorded(self):
+        """fallback 但 meta 沒有 target_date_available：不記帳請求日。"""
+        up = FakeUploader(False, {"2026-07-05": "2026-07-03"},
+                          metas={"2026-07-05": {}})
+        result = special_info_common.fetch_and_store(up, "2026-07-05")
+        self.assertEqual(
+            result["outcome"], special_info_common.OUTCOME_PENDING
+        )
+        # 實際交易日仍照記，只是不把請求日標成非交易日。
+        self.assertIn("2026-07-03", up.conn.ledger_dates)
+        self.assertNotIn("2026-07-05", up.conn.ledger_dates)
+
+    def test_fallback_with_explicit_false_is_recorded(self):
+        """meta 明確為 False（爬蟲確認該日無報價）才標記非交易日。"""
+        up = FakeUploader(
+            False, {"2026-07-05": "2026-07-03"},
+            metas={"2026-07-05": {"target_date_available": False}},
+        )
+        result = special_info_common.fetch_and_store(up, "2026-07-05")
+        self.assertEqual(
+            result["outcome"], special_info_common.OUTCOME_NON_TRADING
+        )
+        self.assertIn("2026-07-05", up.conn.ledger_dates)
 
 
 if __name__ == "__main__":

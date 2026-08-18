@@ -64,6 +64,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 
 from data_upload.base import (
+    STATUS_EMPTY,
     STATUS_OK,
     CrawlError,
     NetworkError,
@@ -152,21 +153,28 @@ def parse_price_response(uploader, result, date):
         pd.DataFrame: 欄位已正規化的行情 DataFrame（無資料時為空）。
 
     Raises:
-        SourceError: `partial`／`error`／未知狀態，或必要欄位含空值
-            （可重試，不得記帳）。
+        SourceError: `partial`／`error`／未知狀態、回應非物件，或必要欄位
+            含空值（可重試，不得記帳）。
         OutOfRangeError: `out_of_range`（不可重試，由呼叫端記帳）。
         CrawlError: 舊版格式錯誤回應，或回傳資料缺少必要欄位。
     """
     label = uploader.asset_label
     context = f"（{date}）"
-    raw_status = result.get("status") if isinstance(result, dict) else None
+    if not isinstance(result, dict):
+        # 回應根本不是物件（如代理層回了字串／陣列）：這是抓取失敗，不是
+        # 「當日無資料」。若放行會一路走到「回空 DataFrame → 記帳非交易日」
+        # 而永久遮蔽該日，正是本模組要消滅的失敗誤記模式。
+        raise SourceError(
+            f"{label}{context} 爬蟲回應格式非預期（{type(result).__name__}），"
+            "視為抓取失敗以免誤記為當日無資料。"
+        )
+    raw_status = result.get("status")
 
     # 行情類不接受 partial：缺商品即為不完整的一天，整批重抓語意較單純。
     status = check_crawl_status(result, label, context, allow_partial=False)
-    meta = result.get("meta") if isinstance(result, dict) else None
-    record_crawl_state(uploader, raw_status, meta)
+    record_crawl_state(uploader, raw_status, result.get("meta"))
 
-    if raw_status is None and isinstance(result, dict) and "error" in result:
+    if raw_status is None and "error" in result:
         # 舊版爬蟲（無 status）僅以 error 表示失敗：一律視為失敗而非無資料。
         # 舊碼在此靠「無法取得任何」字串判非交易日，新契約下該字串已不存在，
         # 且字串判斷本身就是把失敗誤記成空的來源，故不再保留。
@@ -175,7 +183,7 @@ def parse_price_response(uploader, result, date):
             f"{result['error']}"
         )
 
-    data = result.get("data") if isinstance(result, dict) else None
+    data = result.get("data")
     if not data:
         logger.info(
             "%s%s 爬蟲回報無資料（status=%s）。", label, context, raw_status
@@ -333,7 +341,11 @@ def fetch_and_store(uploader, date):
 
 
 def _handle_no_data(uploader, date, settled, status):
-    """處理「爬蟲確認無資料」（status=empty 或舊版無 status）的記帳決策。
+    """處理「爬蟲回空」的記帳決策。
+
+    **只有 `status == "empty"`（探測確認該期間確實無報價）才可能記帳**；
+    `status` 缺席（舊版爬蟲／回應退化）時一律留白待重驗——「不知道」不等於
+    「沒有」，把不確定寫進永久帳本即為本模組要消滅的失敗誤記模式。
 
     Args:
         uploader: 上傳器實例。
@@ -358,6 +370,15 @@ def _handle_no_data(uploader, date, settled, status):
             uploader.asset_label, date,
         )
         return {**result, "outcome": OUTCOME_PENDING}
+    if status != STATUS_EMPTY:
+        # 只有 empty 是「探測確認無報價」，其餘（含 status 缺席）都只是
+        # 「這次沒拿到」，不足以永久斷定該日無報價。
+        logger.warning(
+            "%s %s 回空但 status=%s（非 empty），不記帳以免誤標非交易日，"
+            "留待重驗。",
+            uploader.asset_label, date, status,
+        )
+        return {**result, "outcome": OUTCOME_PENDING}
     uploader._record_uploaded_date(date)
     logger.info(
         "%s %s 來源確認該期間無報價（非交易日，status=%s），已記帳。",
@@ -368,6 +389,9 @@ def _handle_no_data(uploader, date, settled, status):
 
 def _mark_fallback(uploader, date, settled, meta):
     """處理「取得資料但未含請求日」（爬蟲 fallback 到更早交易日）的記帳決策。
+
+    只有在 `meta.target_date_available` **明確為 false**（爬蟲確認請求日無
+    報價）時才標記非交易日；欄位缺席或為真都留白待重驗。
 
     Args:
         uploader: 上傳器實例。
@@ -386,7 +410,16 @@ def _mark_fallback(uploader, date, settled, meta):
             uploader.asset_label, date,
         )
         return OUTCOME_PENDING
-    if meta.get("target_date_available"):
+    if "target_date_available" not in meta:
+        # 沒有這個欄位就沒有「請求日確實無報價」的正面證據（舊版爬蟲／回應
+        # 退化）。留白待重驗只是多問幾次，誤記卻是永久遮蔽，兩害相權取輕。
+        logger.warning(
+            "%s %s 爬蟲 fallback 但 meta 未提供 target_date_available，"
+            "無從確認該日是否真的無報價，不記帳以免誤標非交易日。",
+            uploader.asset_label, date,
+        )
+        return OUTCOME_PENDING
+    if meta["target_date_available"]:
         # 爬蟲說請求日有報價、回傳列卻不含它：自相矛盾，寧可留白待重驗。
         logger.warning(
             "%s %s meta.target_date_available 為真但回傳未含請求日，"
@@ -401,10 +434,14 @@ def _mark_fallback(uploader, date, settled, meta):
 def upload_date_range(uploader, start_date, end_date, on_date=None):
     """依序上傳日期區間，來源端失敗逐日隔離、不中斷整批。
 
-    `SourceError`（爬蟲活著、只是這天抓不到）僅該日失敗，收集後繼續處理
-    後續日期；若不隔離，昇冪清單上的第一個「毒日期」會讓其後日期每天都
-    沒機會被嘗試。`NetworkError`（連不上爬蟲）與其他 `CrawlError` 則往外
-    拋，由呼叫端中止整批並排入重試。
+    `SourceError`（爬蟲活著、只是這天抓不到）與 `CrawlError`（該日資料格式／
+    型別異常）僅該日失敗，收集後繼續處理後續日期；若不隔離，昇冪清單上的
+    第一個「毒日期」會讓其後日期每天都沒機會被嘗試。只有 `NetworkError`
+    （連不上爬蟲，後續日期必然同樣失敗）才往外拋、由呼叫端中止整批。
+
+    攔截順序關鍵：`SourceError ⊂ NetworkError ⊂ CrawlError`，故必須
+    「先 SourceError → 再 NetworkError（重拋）→ 最後 CrawlError」，
+    否則父類別會把子類別整個吃掉。
 
     Args:
         uploader: 上傳器實例。
@@ -418,7 +455,6 @@ def upload_date_range(uploader, start_date, end_date, on_date=None):
 
     Raises:
         NetworkError: 無法連線爬蟲（整批中止）。
-        CrawlError: 爬蟲回傳格式異常（整批中止）。
     """
     current = datetime.strptime(start_date, "%Y-%m-%d")
     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
@@ -434,6 +470,15 @@ def upload_date_range(uploader, start_date, end_date, on_date=None):
         except SourceError as e:
             logger.warning(
                 "%s %s 來源端抓取失敗，跳過該日並排入重試：%s",
+                uploader.asset_label, date_str, e,
+            )
+            failures.append({"date": date_str, "error": str(e)})
+        except NetworkError:
+            # 連不上爬蟲：後續日期必然同樣失敗，整批中止交由呼叫端重試。
+            raise
+        except CrawlError as e:
+            logger.error(
+                "%s %s 資料格式異常，跳過該日：%s",
                 uploader.asset_label, date_str, e,
             )
             failures.append({"date": date_str, "error": str(e)})
@@ -522,7 +567,8 @@ def backfill_missing(uploader, days=30, today=None, deep=False,
 
         - 取得請求日自身資料 → filled，計入 filled。
         - 已定案且來源確認無報價／只回更早日期 → 非交易日（已記帳），
-          計入 non_trading。
+          計入 non_trading（`out_of_range` 因同樣「已記帳、不必再問」而
+          併入此欄）。
         - 尚未定案（含 24/7 商品當日）→ 計入 still_pending（留待次日）。
 
     NetworkError 逐日捕捉、記入 network_errors 供呼叫端交由 retry_queue，

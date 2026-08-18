@@ -106,6 +106,9 @@ class CurrencyPriceUploader:
         try:
             resp = requests.get(url, params={"date": date}, timeout=30)
             resp.raise_for_status()
+            # json() 必須留在 try 內：非 JSON body（如代理層錯誤頁）會拋
+            # JSONDecodeError，逃出去就成了未分類例外。
+            payload = resp.json()
         except (requests.ConnectionError, requests.Timeout) as e:
             raise NetworkError(
                 f"匯率爬蟲網路連線失敗（{date}）：{e}"
@@ -115,9 +118,7 @@ class CurrencyPriceUploader:
                 f"匯率爬蟲呼叫失敗（{date}）：{e}"
             ) from e
 
-        return special_info_common.parse_price_response(
-            self, resp.json(), date
-        )
+        return special_info_common.parse_price_response(self, payload, date)
 
     def check_schema(self, df):
         """使用 Pydantic 驗證 DataFrame schema。

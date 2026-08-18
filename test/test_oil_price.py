@@ -292,6 +292,20 @@ class TestCrawlData(unittest.TestCase):
             self.uploader.crawl_data("2026-03-18")
 
     @patch("data_upload.oil_price.requests.get")
+    def test_non_json_body_raises_crawl_error(self, mock_get):
+        """非 JSON 回應（如代理層錯誤頁）須歸類為 CrawlError，不得逸出。"""
+        import requests as req_lib
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.side_effect = req_lib.exceptions.JSONDecodeError(
+            "Expecting value", "<html>", 0
+        )
+        mock_get.return_value = mock_resp
+
+        with self.assertRaises(CrawlError):
+            self.uploader.crawl_data("2026-03-18")
+
+    @patch("data_upload.oil_price.requests.get")
     def test_status_out_of_range_raises(self, mock_get):
         """status=out_of_range 拋 OutOfRangeError（不重試，由呼叫端記帳）。"""
         mock_resp = MagicMock()
@@ -413,12 +427,13 @@ class TestUpload(unittest.TestCase):
 
     @patch("data_upload.oil_price.requests.get")
     def test_empty_data_records_date(self, mock_get):
-        """測試無資料時仍記錄已處理日期。"""
+        """測試 status=empty（探測確認無報價）時記錄已處理日期。"""
         self.uploader.check_uploaded = MagicMock(return_value=False)
 
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "date": "2026-03-18",
+            "status": "empty",
             "data": [],
         }
         mock_resp.raise_for_status = MagicMock()
@@ -514,6 +529,8 @@ class TestUpload(unittest.TestCase):
                     "close": 68.85, "volume": 250000,
                 },
             ],
+            "status": "ok",
+            "meta": {"target_date_available": False},
         }
         mock_resp.raise_for_status = MagicMock()
         mock_get.return_value = mock_resp

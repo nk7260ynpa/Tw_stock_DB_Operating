@@ -286,6 +286,20 @@ class TestCrawlData(unittest.TestCase):
             self.uploader.crawl_data("2026-03-19")
 
     @patch("data_upload.bitcoin_price.requests.get")
+    def test_non_json_body_raises_crawl_error(self, mock_get):
+        """非 JSON 回應（如代理層錯誤頁）須歸類為 CrawlError，不得逸出。"""
+        import requests as req_lib
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.side_effect = req_lib.exceptions.JSONDecodeError(
+            "Expecting value", "<html>", 0
+        )
+        mock_get.return_value = mock_resp
+
+        with self.assertRaises(CrawlError):
+            self.uploader.crawl_data("2026-03-19")
+
+    @patch("data_upload.bitcoin_price.requests.get")
     def test_status_out_of_range_raises(self, mock_get):
         """status=out_of_range 拋 OutOfRangeError（不重試，由呼叫端記帳）。"""
         mock_resp = MagicMock()

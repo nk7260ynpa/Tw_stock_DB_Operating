@@ -119,6 +119,14 @@ class TestScheduledBackfillReverify(unittest.TestCase):
         self.assertEqual(params[4], web_server.SPECIAL_INFO_REVERIFY_DAYS)
         self.assertGreater(web_server.SPECIAL_INFO_REVERIFY_DAYS, 0)
 
+    def test_manual_run_also_passes_reverify_days(self):
+        """手動觸發（deep=False）也須帶重驗天數，否則等於完全不清孤兒。"""
+        with patch.object(web_server, "job_queue") as mock_queue:
+            web_server.create_special_info_backfill_run(None)
+
+        params = mock_queue.enqueue.call_args.args[2]
+        self.assertEqual(params[4], web_server.SPECIAL_INFO_REVERIFY_DAYS)
+
     def test_job_forwards_reverify_days(self):
         """作業層須把重驗天數轉交給各上傳器的 backfill_missing。"""
         fake_summary = {

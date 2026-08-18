@@ -279,8 +279,8 @@ body {
 }
 
 .badge-completed_with_errors {
-  background: #fffbeb;
-  color: #d97706;
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
 }
 
 .badge-failed {

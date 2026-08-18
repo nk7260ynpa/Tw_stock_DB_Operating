@@ -75,16 +75,16 @@ def parse_args(argv=None):
 def run_backfill(days, host, user, password, crawlerhost):
     """對五個商品執行孤兒帳本清理與缺漏回補。
 
+    單一商品若拋出未預期例外（如資料庫連線中斷），僅記錄該商品失敗並繼續
+    處理其餘商品：本作業冪等可重跑，讓其餘健康商品的補抓成果落地，遠優於
+    因一個商品中斷而整批作廢。
+
     Args:
         days (int): 掃描天數。
         host (str): MySQL 主機位址。
         user (str): MySQL 使用者名稱。
         password (str): MySQL 密碼。
         crawlerhost (str): 爬蟲服務主機位址。
-
-    單一商品若拋出未預期例外（如資料庫連線中斷），僅記錄該商品失敗並繼續
-    處理其餘商品：本作業冪等可重跑，讓四個健康商品的補抓成果落地，遠優於
-    因一個商品中斷而整批作廢。
 
     Returns:
         list[dict]: 各商品的補抓摘要（失敗者含 fatal 鍵）。

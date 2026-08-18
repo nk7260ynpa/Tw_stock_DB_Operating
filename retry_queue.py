@@ -104,9 +104,17 @@ class RetryQueue:
         except Exception as e:
             logger.error("持久化重試佇列失敗：%s", e)
 
+    # 佇列中仍會被自動重試的狀態；同一任務在這些狀態下不重複排入。
+    _ACTIVE_STATUSES = ("pending", "retrying")
+
     def add(self, task_type, params, error_message,
             created_by_job_id=None):
-        """新增重試任務。
+        """新增重試任務（同任務已在佇列中待重試時不重複排入）。
+
+        去重是必要的：補抓作業改為「逐日隔離」後，一次來源端整體失敗會讓
+        每個失敗日期各排一筆（30 天 × 5 商品 ≈ 150 筆），而其中大多數在下
+        一輪掃描仍會失敗、再排一次。相同 (task_type, params) 已在
+        pending／retrying 時再排一筆並不會加速任何事，只會灌爆佇列。
 
         Args:
             task_type (str): 任務類型。
@@ -115,8 +123,19 @@ class RetryQueue:
             created_by_job_id (str | None): 原始排程 job ID。
 
         Returns:
-            str: 新增任務的 task_id。
+            str: 新增任務的 task_id；已存在待重試的相同任務時回傳既有 ID。
         """
+        with self._lock:
+            for existing in self._tasks.values():
+                if (existing.task_type == task_type
+                        and existing.params == params
+                        and existing.status in self._ACTIVE_STATUSES):
+                    logger.info(
+                        "重試佇列已有待重試的相同任務，不重複排入：%s（%s，%s）",
+                        existing.task_id, task_type, params,
+                    )
+                    return existing.task_id
+
         task_id = str(uuid.uuid4())[:8]
         task = RetryTask(
             task_id=task_id,

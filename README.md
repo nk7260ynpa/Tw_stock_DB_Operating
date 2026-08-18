@@ -23,7 +23,7 @@
 - **比特幣價格**：從爬蟲取得比特幣價格，metadata 存入 SPECIAL_INFO 資料庫的 BitcoinPrice 表（`data_upload/bitcoin_price.py`）
 - **匯率**：從爬蟲取得匯率資料（USDTWD/JPYTWD），metadata 存入 SPECIAL_INFO 資料庫的 CurrencyPrice 表（`data_upload/currency_price.py`）
 - **股市指數**：從爬蟲取得國際股市指數價格（道瓊工業指數/納斯達克指數），資料存入 SPECIAL_INFO 資料庫的 IndicesPrice 表（`data_upload/indices_price.py`）
-- **失敗重試佇列**：排程任務失敗時自動加入重試佇列。網路中斷每小時檢查網路並重試，最多 5 次；非網路錯誤（如「資料尚未發布」）標為 exhausted 後，每日（預設 06:30）「隔日重排」重設為 pending 再試一輪，最多 3 次，避免永久放棄隔日才會出現的資料（`retry_queue.py`）。整輪重試於**背景執行緒**執行（`run_retry_queue_scheduled`），不阻塞排程執行緒
+- **失敗重試佇列**：排程任務失敗時自動加入重試佇列（相同 `(task_type, params)` 已在 pending／retrying 時**不重複排入**，避免逐日隔離後一次整體失敗排進上百筆等效任務）。網路中斷每小時檢查網路並重試，最多 5 次；非網路錯誤（如「資料尚未發布」）標為 exhausted 後，每日（預設 06:30）「隔日重排」重設為 pending 再試一輪，最多 3 次，避免永久放棄隔日才會出現的資料（`retry_queue.py`）。整輪重試於**背景執行緒**執行（`run_retry_queue_scheduled`），不阻塞排程執行緒
 - **重抓決策依爬蟲 `meta.retryable`**：新聞抓取不完整時，以爬蟲 v2.14.0 的
   `meta.retryable` 為單一判準決定「重抓有沒有機會補回來」，並以
   `detail_failed_ratio ≥ 0.2` 決定「值不值得付出整批重跑的成本」；舊版爬蟲回應
@@ -606,9 +606,17 @@ CTEE 來源僅保留約 3 天，等不起。
 - 行情類 `partial` **整批丟棄重抓**（`allow_partial=False`）：缺商品即為不完整
   的一天，與新聞類（可累積補齊）不同。
 - `ok` 卻 0 筆屬自相矛盾，一律當失敗處理——寧可多重試，也不可誤記成無資料。
-- 單日的來源端失敗（`SourceError`）只跳過該日並各自排入重試佇列，**不中斷**
-  整個日期區間；連不上爬蟲（`NetworkError`）才整批中止。任務有失敗日時狀態
-  記為 `completed_with_errors`，避免部分成功被讀成全數成功。
+- 單日的來源端失敗（`SourceError`）與該日的資料格式異常（`CrawlError`）都只跳過
+  該日並各自排入重試佇列，**不中斷**整個日期區間；只有連不上爬蟲
+  （`NetworkError`，後續日期必然同樣失敗）才整批中止。攔截順序必須是
+  「`SourceError` → `NetworkError`（重拋）→ `CrawlError`」，因為
+  `SourceError ⊂ NetworkError ⊂ CrawlError`，父類別寫在前面會把子類別吃掉。
+  任務有失敗日時狀態記為 `completed_with_errors`，避免部分成功被讀成全數成功。
+- **寫帳本需要正面證據，「不知道」不等於「沒有」**：回空只有在
+  `status == "empty"`（探測確認該期間無報價）時才記帳；fallback 只有在
+  `meta.target_date_available` **明確為 `false`** 時才把請求日標為非交易日。
+  `status` 缺席、`meta` 沒有該欄位、或回應根本不是 JSON 物件（拋 `SourceError`），
+  一律留白待重驗——多問幾次的成本，遠低於永久遮蔽一天的行情。
 
 > **狀態欄位攔不住的殘缺資料**：來源（yfinance）偶爾回傳「有 `volume` 但
 > OHLC 全為 `null`」的殘缺 K 棒，爬蟲仍標記 `status=ok`、
