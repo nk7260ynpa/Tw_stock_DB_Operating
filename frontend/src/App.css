@@ -278,6 +278,11 @@ body {
   color: var(--color-success);
 }
 
+.badge-completed_with_errors {
+  background: #fffbeb;
+  color: #d97706;
+}
+
 .badge-failed {
   background: var(--color-error-bg);
   color: var(--color-error);

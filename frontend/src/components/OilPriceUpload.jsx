@@ -127,6 +127,7 @@ function OilPriceUpload() {
     queued: '排隊中',
     running: '上傳中',
     completed: '已完成',
+    completed_with_errors: '完成（部分日期失敗）',
     failed: '失敗',
   }
 
@@ -233,13 +234,20 @@ function OilPriceUpload() {
                     ` (第 ${job.queue_position} 位)`}
                 </span>
               </div>
-              {job.status === 'completed' && (
+              {job.status?.startsWith('completed') && (
                 <div className="job-info" style={{ marginTop: '4px' }}>
                   共 {(job.record_count || 0).toLocaleString()} 筆資料
                 </div>
               )}
               {job.error && (
                 <div className="job-errors">{job.error}</div>
+              )}
+              {job.errors?.length > 0 && (
+                <div className="job-errors">
+                  {job.errors.map((err) => (
+                    <div key={err}>{err}</div>
+                  ))}
+                </div>
               )}
             </div>
           ))}

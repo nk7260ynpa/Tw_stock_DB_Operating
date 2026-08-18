@@ -151,7 +151,7 @@ class TestBackfillScheduleUsesSettledEndDate(unittest.TestCase):
             )
 
         uploader.backfill_missing.assert_called_once_with(
-            days=30, today="2026-08-17", deep=False
+            days=30, today="2026-08-17", deep=False, reverify_days=0
         )
 
 

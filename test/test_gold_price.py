@@ -11,7 +11,12 @@ from data_upload.gold_price import (
     GoldPriceType,
     GoldPriceUploader,
 )
-from data_upload.base import CrawlError, NetworkError
+from data_upload.base import (
+    CrawlError,
+    NetworkError,
+    OutOfRangeError,
+    SourceError,
+)
 
 
 class TestGoldPriceType(unittest.TestCase):
@@ -181,26 +186,93 @@ class TestCrawlData(unittest.TestCase):
             self.uploader.crawl_data("2026-03-19")
 
     @patch("data_upload.gold_price.requests.get")
-    def test_crawler_no_data_treated_as_non_trading_day(self, mock_get):
-        """爬蟲回傳「無法取得任何...資料」視為非交易日，回空 DataFrame。"""
+    def test_status_empty_returns_empty_dataframe(self, mock_get):
+        """status=empty（探測確認無報價）回空 DataFrame，交由記帳判定。"""
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "date": "2026-03-19",
-            "error": "無法取得任何黃金價格資料（查詢日期：2026-03-19）",
+            "status": "empty",
+            "data": [],
+            "meta": {"retryable": False},
         }
         mock_resp.raise_for_status = MagicMock()
         mock_get.return_value = mock_resp
 
         df = self.uploader.crawl_data("2026-03-19")
         self.assertTrue(df.empty)
+        self.assertEqual(self.uploader.last_crawl_status, "empty")
 
     @patch("data_upload.gold_price.requests.get")
-    def test_crawler_other_error_raises(self, mock_get):
-        """其他 error 訊息（非「無法取得任何」）仍拋出 CrawlError。"""
+    def test_status_error_raises_source_error(self, mock_get):
+        """status=error 一律視為可重試失敗，絕不可當成當日無資料。"""
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "date": "2026-03-19",
-            "error": "Yahoo Finance API 連線逾時",
+            "status": "error",
+            "data": [],
+            "error": "來源探測失敗",
+            "meta": {"retryable": True},
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        with self.assertRaises(SourceError):
+            self.uploader.crawl_data("2026-03-19")
+
+    @patch("data_upload.gold_price.requests.get")
+    def test_status_partial_raises_source_error(self, mock_get):
+        """行情類 partial 整批丟棄重抓（不接受只存一半的一天）。"""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "date": "2026-03-19",
+            "status": "partial",
+            "data": [{"date": "2026-03-19", "product": "X"}],
+            "meta": {"retryable": True, "retryable_reasons": ["fetch_failed"]},
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        with self.assertRaises(SourceError):
+            self.uploader.crawl_data("2026-03-19")
+
+    @patch("data_upload.gold_price.requests.get")
+    def test_status_out_of_range_raises(self, mock_get):
+        """status=out_of_range 拋 OutOfRangeError（不重試，由呼叫端記帳）。"""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "date": "1990-01-02",
+            "status": "out_of_range",
+            "data": [],
+            "meta": {"retryable": False, "oldest_available": "2000-01-03"},
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        with self.assertRaises(OutOfRangeError):
+            self.uploader.crawl_data("1990-01-02")
+
+    @patch("data_upload.gold_price.requests.get")
+    def test_status_unknown_raises_source_error(self, mock_get):
+        """未知狀態保守視為可重試失敗，不得寫入帳本。"""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "date": "2026-03-19",
+            "status": "who_knows",
+            "data": [],
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        with self.assertRaises(SourceError):
+            self.uploader.crawl_data("2026-03-19")
+
+    @patch("data_upload.gold_price.requests.get")
+    def test_legacy_error_without_status_raises(self, mock_get):
+        """舊版格式（無 status 只有 error）一律視為失敗，不再靠訊息字串判非交易日。"""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "date": "2026-03-19",
+            "error": "無法取得任何黃金價格資料（查詢日期：2026-03-19）",
         }
         mock_resp.raise_for_status = MagicMock()
         mock_get.return_value = mock_resp

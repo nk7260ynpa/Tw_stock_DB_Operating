@@ -47,6 +47,7 @@ from data_upload.gold_price import GoldPriceUploader
 from data_upload.bitcoin_price import BitcoinPriceUploader
 from data_upload.currency_price import CurrencyPriceUploader
 from data_upload.indices_price import IndicesPriceUploader
+from data_upload import special_info_common
 from retry_queue import RetryQueue, is_network_error, check_network_available
 from routers import db_conn
 
@@ -130,6 +131,15 @@ REQUEUE_EXHAUSTED_TIME = "06:30"
 # SPECIAL_INFO 缺漏自我修復掃描窗（天數）：遠大於各商品排程的「過去 7 天」
 # 回補窗，足以自癒管線停擺數週造成的缺漏。
 SPECIAL_INFO_BACKFILL_DAYS = 30
+
+# SPECIAL_INFO 排程補抓時要一併重驗的孤兒帳本天數。
+#
+# 「帳本有列、價格表 0 列」的孤兒有兩種：合法的非交易日標記，以及誤標。
+# 誤標一旦寫入，find_missing_dates 就永遠不會再把該日列為候選，只能靠人工
+# deep 重驗才救得回來——2026-08 的孤兒就是這樣累積的。故日常排程也清一小段
+# 近期窗並重驗：窗口取小（不是整個 30 天）是為了不要每天重問幾十個早已確認
+# 的非交易日，7 天足以在誤標當週自癒。
+SPECIAL_INFO_REVERIFY_DAYS = 7
 
 # 新聞排程回溯時數：四來源新聞排程於 21:16~21:22 抓取，回溯窗須涵蓋「昨日整天到
 # 現在」。設為 48 小時（爬蟲支援 1~72），可補回偶發漏抓一日；重複抓取的記錄由各
@@ -2121,6 +2131,54 @@ def settled_end_date(now=None):
     return (base - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
+def _set_job_date(job_id, date_str):
+    """更新任務目前處理中的日期（供 UI 進度顯示與失敗時的重試標記）。
+
+    Args:
+        job_id (str): 任務 ID。
+        date_str (str): 目前處理的日期（YYYY-MM-DD）。
+    """
+    with jobs_lock:
+        upload_jobs[job_id]["date"] = date_str
+
+
+def _finish_price_job(job_id, task_type, label, total_records, failures):
+    """收尾行情上傳任務：更新狀態並把逐日失敗排入重試佇列。
+
+    來源端失敗（`SourceError`）已在 `upload_date_range` 逐日隔離，不會中斷
+    整個區間，故這裡可能同時有「已寫入的筆數」與「失敗的日期」。有失敗時
+    狀態記為 `completed_with_errors`，避免部分成功被讀成全數成功——這正是
+    舊版「失敗被記成當日無資料」能長期無人察覺的原因之一。
+
+    Args:
+        job_id (str): 任務 ID。
+        task_type (str): 重試佇列任務類型（如 "oil_price"）。
+        label (str): 商品中文名稱，供 log 使用。
+        total_records (int): 成功寫入的總筆數。
+        failures (list[dict]): 失敗日期清單（含 date 與 error）。
+    """
+    with jobs_lock:
+        job = upload_jobs[job_id]
+        job["status"] = "completed" if not failures else "completed_with_errors"
+        job["record_count"] = total_records
+        job["errors"] = [f"{f['date']}: {f['error']}" for f in failures]
+        job["finished_at"] = datetime.now().isoformat()
+
+    if failures and retry_queue is not None:
+        for failure in failures:
+            retry_queue.add(
+                task_type,
+                {"date": failure["date"]},
+                failure["error"],
+                created_by_job_id=job_id,
+            )
+
+    logger.info(
+        "%s任務完成 %s（共 %d 筆，失敗 %d 天）",
+        label, job_id, total_records, len(failures),
+    )
+
+
 def run_oil_price_scheduled():
     """排程觸發的原油價格上傳（過去 7 天補抓，上界為昨日）。"""
     job_id = str(uuid.uuid4())[:8]
@@ -2159,7 +2217,9 @@ def run_oil_price_scheduled():
 def run_oil_price_upload_job(job_id, start_date, end_date):
     """執行原油價格上傳任務（背景執行緒）。
 
-    支援日期範圍上傳，依序處理每一天的資料。
+    支援日期範圍上傳，依序處理每一天的資料。單日的來源端失敗（SourceError）
+    只跳過該日並排入重試佇列，不中斷整個區間；連不上爬蟲或回傳格式異常才
+    中止整批（見 special_info_common.upload_date_range）。
 
     Args:
         job_id (str): 任務 ID。
@@ -2172,29 +2232,14 @@ def run_oil_price_upload_job(job_id, start_date, end_date):
     try:
         with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
             uploader = OilPriceUploader(conn, CRAWLERHOST)
+            outcome = special_info_common.upload_date_range(
+                uploader, start_date, end_date,
+                on_date=lambda d: _set_job_date(job_id, d),
+            )
 
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-
-            total_records = 0
-            current = start_dt
-
-            while current <= end_dt:
-                date_str = current.strftime("%Y-%m-%d")
-                with jobs_lock:
-                    upload_jobs[job_id]["date"] = date_str
-
-                result = uploader.upload(date_str)
-                total_records += result["record_count"]
-                current += timedelta(days=1)
-
-        with jobs_lock:
-            upload_jobs[job_id]["status"] = "completed"
-            upload_jobs[job_id]["record_count"] = total_records
-            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-        logger.info(
-            "原油價格任務完成 %s（共 %d 筆）",
-            job_id, total_records,
+        _finish_price_job(
+            job_id, "oil_price", "原油價格",
+            outcome["record_count"], outcome["failures"],
         )
 
     except CrawlError as e:
@@ -2257,7 +2302,9 @@ def run_gold_price_scheduled():
 def run_gold_price_upload_job(job_id, start_date, end_date):
     """執行黃金價格上傳任務（背景執行緒）。
 
-    支援日期範圍上傳，依序處理每一天的資料。
+    支援日期範圍上傳，依序處理每一天的資料。單日的來源端失敗（SourceError）
+    只跳過該日並排入重試佇列，不中斷整個區間；連不上爬蟲或回傳格式異常才
+    中止整批（見 special_info_common.upload_date_range）。
 
     Args:
         job_id (str): 任務 ID。
@@ -2270,29 +2317,14 @@ def run_gold_price_upload_job(job_id, start_date, end_date):
     try:
         with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
             uploader = GoldPriceUploader(conn, CRAWLERHOST)
+            outcome = special_info_common.upload_date_range(
+                uploader, start_date, end_date,
+                on_date=lambda d: _set_job_date(job_id, d),
+            )
 
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-
-            total_records = 0
-            current = start_dt
-
-            while current <= end_dt:
-                date_str = current.strftime("%Y-%m-%d")
-                with jobs_lock:
-                    upload_jobs[job_id]["date"] = date_str
-
-                result = uploader.upload(date_str)
-                total_records += result["record_count"]
-                current += timedelta(days=1)
-
-        with jobs_lock:
-            upload_jobs[job_id]["status"] = "completed"
-            upload_jobs[job_id]["record_count"] = total_records
-            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-        logger.info(
-            "黃金價格任務完成 %s（共 %d 筆）",
-            job_id, total_records,
+        _finish_price_job(
+            job_id, "gold_price", "黃金價格",
+            outcome["record_count"], outcome["failures"],
         )
 
     except CrawlError as e:
@@ -2355,7 +2387,9 @@ def run_bitcoin_price_scheduled():
 def run_bitcoin_price_upload_job(job_id, start_date, end_date):
     """執行比特幣價格上傳任務（背景執行緒）。
 
-    支援日期範圍上傳，依序處理每一天的資料。
+    支援日期範圍上傳，依序處理每一天的資料。單日的來源端失敗（SourceError）
+    只跳過該日並排入重試佇列，不中斷整個區間；連不上爬蟲或回傳格式異常才
+    中止整批（見 special_info_common.upload_date_range）。
 
     Args:
         job_id (str): 任務 ID。
@@ -2368,29 +2402,14 @@ def run_bitcoin_price_upload_job(job_id, start_date, end_date):
     try:
         with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
             uploader = BitcoinPriceUploader(conn, CRAWLERHOST)
+            outcome = special_info_common.upload_date_range(
+                uploader, start_date, end_date,
+                on_date=lambda d: _set_job_date(job_id, d),
+            )
 
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-
-            total_records = 0
-            current = start_dt
-
-            while current <= end_dt:
-                date_str = current.strftime("%Y-%m-%d")
-                with jobs_lock:
-                    upload_jobs[job_id]["date"] = date_str
-
-                result = uploader.upload(date_str)
-                total_records += result["record_count"]
-                current += timedelta(days=1)
-
-        with jobs_lock:
-            upload_jobs[job_id]["status"] = "completed"
-            upload_jobs[job_id]["record_count"] = total_records
-            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-        logger.info(
-            "比特幣價格任務完成 %s（共 %d 筆）",
-            job_id, total_records,
+        _finish_price_job(
+            job_id, "bitcoin_price", "比特幣價格",
+            outcome["record_count"], outcome["failures"],
         )
 
     except CrawlError as e:
@@ -2453,7 +2472,9 @@ def run_currency_price_scheduled():
 def run_currency_price_upload_job(job_id, start_date, end_date):
     """執行匯率上傳任務（背景執行緒）。
 
-    支援日期範圍上傳，依序處理每一天的資料。
+    支援日期範圍上傳，依序處理每一天的資料。單日的來源端失敗（SourceError）
+    只跳過該日並排入重試佇列，不中斷整個區間；連不上爬蟲或回傳格式異常才
+    中止整批（見 special_info_common.upload_date_range）。
 
     Args:
         job_id (str): 任務 ID。
@@ -2466,29 +2487,14 @@ def run_currency_price_upload_job(job_id, start_date, end_date):
     try:
         with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
             uploader = CurrencyPriceUploader(conn, CRAWLERHOST)
+            outcome = special_info_common.upload_date_range(
+                uploader, start_date, end_date,
+                on_date=lambda d: _set_job_date(job_id, d),
+            )
 
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-
-            total_records = 0
-            current = start_dt
-
-            while current <= end_dt:
-                date_str = current.strftime("%Y-%m-%d")
-                with jobs_lock:
-                    upload_jobs[job_id]["date"] = date_str
-
-                result = uploader.upload(date_str)
-                total_records += result["record_count"]
-                current += timedelta(days=1)
-
-        with jobs_lock:
-            upload_jobs[job_id]["status"] = "completed"
-            upload_jobs[job_id]["record_count"] = total_records
-            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-        logger.info(
-            "匯率任務完成 %s（共 %d 筆）",
-            job_id, total_records,
+        _finish_price_job(
+            job_id, "currency_price", "匯率",
+            outcome["record_count"], outcome["failures"],
         )
 
     except CrawlError as e:
@@ -2551,7 +2557,9 @@ def run_indices_price_scheduled():
 def run_indices_price_upload_job(job_id, start_date, end_date):
     """執行股市指數價格上傳任務（背景執行緒）。
 
-    支援日期範圍上傳，依序處理每一天的資料。
+    支援日期範圍上傳，依序處理每一天的資料。單日的來源端失敗（SourceError）
+    只跳過該日並排入重試佇列，不中斷整個區間；連不上爬蟲或回傳格式異常才
+    中止整批（見 special_info_common.upload_date_range）。
 
     Args:
         job_id (str): 任務 ID。
@@ -2564,29 +2572,14 @@ def run_indices_price_upload_job(job_id, start_date, end_date):
     try:
         with db_conn(HOST, USER, PASSWORD, "SPECIAL_INFO") as conn:
             uploader = IndicesPriceUploader(conn, CRAWLERHOST)
+            outcome = special_info_common.upload_date_range(
+                uploader, start_date, end_date,
+                on_date=lambda d: _set_job_date(job_id, d),
+            )
 
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-
-            total_records = 0
-            current = start_dt
-
-            while current <= end_dt:
-                date_str = current.strftime("%Y-%m-%d")
-                with jobs_lock:
-                    upload_jobs[job_id]["date"] = date_str
-
-                result = uploader.upload(date_str)
-                total_records += result["record_count"]
-                current += timedelta(days=1)
-
-        with jobs_lock:
-            upload_jobs[job_id]["status"] = "completed"
-            upload_jobs[job_id]["record_count"] = total_records
-            upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
-        logger.info(
-            "股市指數價格任務完成 %s（共 %d 筆）",
-            job_id, total_records,
+        _finish_price_job(
+            job_id, "indices_price", "股市指數價格",
+            outcome["record_count"], outcome["failures"],
         )
 
     except CrawlError as e:
@@ -2616,6 +2609,8 @@ def run_special_info_backfill_scheduled():
 
     掃描基準日固定為昨日：21:27 執行時當日日 K 尚未定案，若讓補抓把「今日」
     也當成候選，會把半根 K 寫進價格表並記帳而永久凍結（見 settled_end_date）。
+
+    同時重驗最近 SPECIAL_INFO_REVERIFY_DAYS 天的孤兒帳本，讓誤標在當週自癒。
     """
     job_id = str(uuid.uuid4())[:8]
     now = datetime.now().isoformat()
@@ -2638,16 +2633,19 @@ def run_special_info_backfill_scheduled():
 
     job_queue.enqueue(
         job_id, run_special_info_backfill_job,
-        (job_id, SPECIAL_INFO_BACKFILL_DAYS, False, end_date),
+        (job_id, SPECIAL_INFO_BACKFILL_DAYS, False, end_date,
+         SPECIAL_INFO_REVERIFY_DAYS),
     )
     logger.info(
-        "SPECIAL_INFO 缺漏自我修復任務已建立 %s（近 %d 天，至 %s）",
+        "SPECIAL_INFO 缺漏自我修復任務已建立 %s（近 %d 天，至 %s，重驗近 %d 天）",
         job_id, SPECIAL_INFO_BACKFILL_DAYS, end_date,
+        SPECIAL_INFO_REVERIFY_DAYS,
     )
 
 
 def run_special_info_backfill_job(
     job_id, days=SPECIAL_INFO_BACKFILL_DAYS, deep=False, today=None,
+    reverify_days=0,
 ):
     """執行 SPECIAL_INFO 缺漏自我修復偵測補抓任務（背景執行緒）。
 
@@ -2662,6 +2660,9 @@ def run_special_info_backfill_job(
             日常排程用 False，人工修復歷史缺漏用 True。
         today (str | None): 掃描基準日（含），預設當日；排程固定傳昨日，
             避免把尚未定案的當日日 K 寫死（見 settled_end_date）。
+        reverify_days (int): deep=False 時要清除孤兒帳本並重驗的天數，
+            預設 0（不清）；排程固定傳 SPECIAL_INFO_REVERIFY_DAYS，讓誤標的
+            帳本在當週自癒，不必等人工 deep 重驗。
     """
     with jobs_lock:
         upload_jobs[job_id]["status"] = "running"
@@ -2676,6 +2677,7 @@ def run_special_info_backfill_job(
                 uploader = uploader_cls(conn, CRAWLERHOST)
                 summary = uploader.backfill_missing(
                     days=days, today=today, deep=deep,
+                    reverify_days=reverify_days,
                 )
                 total_records += summary["records"]
                 summaries.append(summary)
