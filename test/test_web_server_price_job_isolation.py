@@ -149,6 +149,52 @@ class TestScheduledBackfillReverify(unittest.TestCase):
             days=30, today="2026-08-17", deep=False, reverify_days=7
         )
 
+    def _run_backfill_with_summary(self, job_id, summary):
+        """以指定摘要跑一次補抓作業，回傳作業狀態字典。"""
+        uploader = MagicMock()
+        uploader.backfill_missing.return_value = summary
+        web_server.upload_jobs[job_id] = {
+            "job_id": job_id, "status": "queued", "record_count": 0,
+            "summary": [], "errors": [],
+        }
+        try:
+            with patch.object(web_server, "db_conn"), \
+                    patch.object(web_server, "retry_queue", None), \
+                    patch.object(
+                        web_server, "SPECIAL_INFO_ASSETS",
+                        [("oil_price", lambda conn, host: uploader)]):
+                web_server.run_special_info_backfill_job(job_id, days=30)
+            return dict(web_server.upload_jobs[job_id])
+        finally:
+            web_server.upload_jobs.pop(job_id, None)
+
+    def test_crawl_errors_surface_as_completed_with_errors(self):
+        """個別日期格式異常須看得見，且不得被讀成全數成功或全數失敗。"""
+        summary = {
+            "asset": "測試商品", "scanned": 2, "filled": 1,
+            "filled_dates": ["2026-08-16"], "non_trading": 0,
+            "still_pending": 0, "records": 2, "orphans_cleared": 0,
+            "network_errors": [], "crawl_errors": ["2026-08-17"],
+        }
+        job = self._run_backfill_with_summary("j-ce", summary)
+
+        self.assertEqual(job["status"], "completed_with_errors")
+        self.assertEqual(len(job["errors"]), 1)
+        self.assertIn("2026-08-17", job["errors"][0])
+
+    def test_clean_summary_completes(self):
+        """無任何失敗時維持 completed。"""
+        summary = {
+            "asset": "測試商品", "scanned": 1, "filled": 1,
+            "filled_dates": ["2026-08-16"], "non_trading": 0,
+            "still_pending": 0, "records": 2, "orphans_cleared": 0,
+            "network_errors": [], "crawl_errors": [],
+        }
+        job = self._run_backfill_with_summary("j-ok", summary)
+
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["errors"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

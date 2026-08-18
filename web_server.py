@@ -2651,7 +2651,9 @@ def run_special_info_backfill_job(
 
     對 5 個商品各自掃描近 N 天缺漏並以「問爬蟲」為交易日唯一真相回補。
     冪等、可重跑。逐商品建立獨立連線；某商品失敗不影響其他商品。
-    掃描過程中遇 NetworkError 的日期改交由 retry_queue 後續重試。
+    掃描過程中遇 NetworkError 的日期改交由 retry_queue 後續重試；
+    CrawlError（格式／型別異常）重試無用，改列入 errors 讓管理介面看得見，
+    任務狀態記為 completed_with_errors（其餘商品／日期仍已補齊）。
 
     Args:
         job_id (str): 任務 ID。
@@ -2670,6 +2672,7 @@ def run_special_info_backfill_job(
     total_records = 0
     summaries = []
     errors = []
+    date_errors = []
 
     for task_type, uploader_cls in SPECIAL_INFO_ASSETS:
         try:
@@ -2691,17 +2694,29 @@ def run_special_info_backfill_job(
                             "缺漏自我修復網路失敗",
                             created_by_job_id=job_id,
                         )
+                # 格式／型別異常重試多半無用，但必須看得見，否則等同靜默吞掉。
+                for date_str in summary.get("crawl_errors", []):
+                    date_errors.append(f"{task_type} {date_str}: 爬蟲回傳格式異常")
         except Exception as e:  # noqa: BLE001 逐商品隔離，避免單一失敗中斷全部
             logger.error(
                 "SPECIAL_INFO 缺漏自我修復 %s 失敗：%s", task_type, e
             )
             errors.append(f"{task_type}: {e}")
 
+    if errors:
+        # 整個商品掛掉（如連不上 DB）：整體視為失敗。
+        status = "failed"
+    elif date_errors:
+        # 只有個別日期格式異常：其餘商品／日期都已補齊，不應讀成全數失敗。
+        status = "completed_with_errors"
+    else:
+        status = "completed"
+
     with jobs_lock:
-        upload_jobs[job_id]["status"] = "completed" if not errors else "failed"
+        upload_jobs[job_id]["status"] = status
         upload_jobs[job_id]["record_count"] = total_records
         upload_jobs[job_id]["summary"] = summaries
-        upload_jobs[job_id]["errors"] = errors
+        upload_jobs[job_id]["errors"] = errors + date_errors
         upload_jobs[job_id]["finished_at"] = datetime.now().isoformat()
 
     logger.info(
