@@ -197,6 +197,23 @@ _SUPERSEDED_IN_WINDOW_DEFAULTS = {
 }
 
 
+# 排程時間字串的合法格式（HH:MM，24 小時制）。schedule 套件的 .at() 只吃這種格式，
+# 其餘值（None、數字、"sunday 07:33"）會讓排程註冊當場拋例外而使服務起不來。
+_TIME_PATTERN = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def _is_valid_time(value):
+    """判斷值是否為合法的 HH:MM 時間字串。
+
+    Args:
+        value: 待檢查的值（任意型別）。
+
+    Returns:
+        bool: 為合法 HH:MM 字串時回傳 True。
+    """
+    return isinstance(value, str) and bool(_TIME_PATTERN.match(value))
+
+
 def _in_crawl_window(time_str):
     """判斷 HH:MM 是否落在爬蟲集中時間窗 07:30~08:00（含端點）內。
 
@@ -391,7 +408,17 @@ def _save_config_best_effort(config, purpose):
 
 
 def _normalize_config(config, default):
-    """補齊缺漏欄位並執行 version-gated 的一次性遷移。
+    """補齊缺漏欄位、修復型別不符的欄位，並執行 version-gated 的一次性遷移。
+
+    設定檔可能被人工編輯壞（`"tdcc_schedule": null`、`"ctee_schedule": 5`、
+    `"schedule_time": "sunday"`），這些值一路傳到 `setup_schedule` 才爆炸的話，
+    在 `--restart always` 下就是重啟迴圈。故此處做**與版本無關**的形狀正規化：
+    凡型別或格式不符預期者一律換成預設值並記 warning，讓服務照樣起得來，同時
+    保留同一份設定中其餘正常的使用者自訂。
+
+    形狀不符者**不寫回**設定檔，保留使用者原檔供人工檢視（每次啟動會再記一次
+    warning 提醒）；只有一次性遷移（TDCC 舊格式、爬蟲時間窗）才寫回，且統一在
+    正規化全部完成後寫一次，避免半套結果落地。
 
     Args:
         config (dict): 讀入的既有設定（就地修改）。
@@ -399,68 +426,69 @@ def _normalize_config(config, default):
 
     Returns:
         dict: 正規化後的設定。
-
-    Raises:
-        TypeError: 設定內容第二層型別不符預期（例如 tdcc_schedule 為 null／數字）。
-        ValueError: 設定內容雖為 JSON 物件但語意上不可用。
     """
-    # 向後相容：舊 config 可能沒有 tdcc_schedule
-    if "tdcc_schedule" not in config:
-        config["tdcc_schedule"] = default["tdcc_schedule"]
-    # 向後相容：舊格式含 day 欄位，遷移為新格式（僅保留 time）
-    elif "day" in config["tdcc_schedule"]:
-        config["tdcc_schedule"] = {
-            "time": config["tdcc_schedule"].get("time", "07:33"),
-        }
-        _save_config_best_effort(
-            config, "TDCC 排程設定從週排程遷移為每日排程")
-    # 向後相容：舊 config 可能沒有 ctee_schedule
-    if "ctee_schedule" not in config:
-        config["ctee_schedule"] = default["ctee_schedule"]
-    # 向後相容：舊 config 可能沒有 cnyes_schedule
-    if "cnyes_schedule" not in config:
-        config["cnyes_schedule"] = default["cnyes_schedule"]
-    # 向後相容：舊 config 可能沒有 ptt_schedule
-    if "ptt_schedule" not in config:
-        config["ptt_schedule"] = default["ptt_schedule"]
-    # 向後相容：舊 config 可能沒有 moneyudn_schedule
-    if "moneyudn_schedule" not in config:
-        config["moneyudn_schedule"] = default["moneyudn_schedule"]
-    # 向後相容：舊 config 可能沒有 yt_transcript_schedule
-    if "yt_transcript_schedule" not in config:
-        config["yt_transcript_schedule"] = default["yt_transcript_schedule"]
-    # 向後相容：舊 config 可能沒有 oil_price_schedule
-    if "oil_price_schedule" not in config:
-        config["oil_price_schedule"] = default["oil_price_schedule"]
-    # 向後相容：舊 config 可能沒有 gold_price_schedule
-    if "gold_price_schedule" not in config:
-        config["gold_price_schedule"] = default["gold_price_schedule"]
-    # 向後相容：舊 config 可能沒有 bitcoin_price_schedule
-    if "bitcoin_price_schedule" not in config:
-        config["bitcoin_price_schedule"] = default["bitcoin_price_schedule"]
-    # 向後相容：舊 config 可能沒有 currency_price_schedule
-    if "currency_price_schedule" not in config:
-        config["currency_price_schedule"] = default["currency_price_schedule"]
-    # 向後相容：舊 config 可能沒有 indices_price_schedule
-    if "indices_price_schedule" not in config:
-        config["indices_price_schedule"] = default["indices_price_schedule"]
-    # 向後相容：舊 config 可能沒有 special_info_backfill_schedule
-    if "special_info_backfill_schedule" not in config:
-        config["special_info_backfill_schedule"] = (
-            default["special_info_backfill_schedule"]
+    write_back_reasons = []
+
+    # 向後相容：舊格式的 tdcc_schedule 含 day 欄位，遷移為新格式（僅保留 time）。
+    # 需先確認確實是 dict，否則 "day" in "sunday" 之類會誤判並在下一行拋
+    # AttributeError（字串／list 沒有 .get）。
+    tdcc = config.get("tdcc_schedule")
+    if isinstance(tdcc, dict) and "day" in tdcc:
+        config["tdcc_schedule"] = {"time": tdcc.get("time", "07:33")}
+        write_back_reasons.append("TDCC 排程設定從週排程遷移為每日排程")
+        logger.info("已將 TDCC 排程設定從週排程遷移為每日排程。")
+
+    # 形狀正規化：缺鍵靜默補上（舊版設定沒有新欄位屬正常），型別／格式錯則
+    # 換成預設值並記 warning（那是壞掉的設定，使用者需要知道）。
+    repaired = []
+    for key, default_value in default.items():
+        if key == "config_version":
+            continue
+        if isinstance(default_value, dict):
+            # {"time": "HH:MM"} 結構的具名排程
+            entry = config.get(key)
+            if key not in config:
+                config[key] = dict(default_value)
+            elif not isinstance(entry, dict) or not _is_valid_time(
+                    entry.get("time")):
+                config[key] = dict(default_value)
+                repaired.append(key)
+        else:
+            # 目前 default 內的頂層純量僅有 schedule_time（HH:MM 字串）
+            if key not in config:
+                config[key] = default_value
+            elif not _is_valid_time(config[key]):
+                config[key] = default_value
+                repaired.append(key)
+
+    # config_version 缺漏（舊版設定本來就沒有）或無法判讀時一律視同最舊版本，
+    # 讓一次性遷移有機會補跑；直接拿字串和 CONFIG_VERSION 比大小會拋 TypeError。
+    version = config.get("config_version", 1)
+    if isinstance(version, bool) or not isinstance(version, int):
+        version = 1
+        repaired.append("config_version")
+    config["config_version"] = version
+
+    if repaired:
+        logger.warning(
+            "設定檔 %s 中下列欄位格式不符，本輪改用預設值（原檔保留未修改，"
+            "請人工確認）：%s", CONFIG_PATH, "、".join(repaired),
         )
+
     # 一次性遷移（version-gated）：把落在 07:30~08:00 窗外的爬蟲排程收斂到
     # 新預設並寫回，讓部署重啟後持久化的舊時段自動更新；bump 版本後不再重跑，
     # 保留使用者日後經 Web 介面所做的窗內自訂。
-    if config.get("config_version", 1) < CONFIG_VERSION:
+    if config["config_version"] < CONFIG_VERSION:
         migrated = _migrate_crawl_schedule_window(config, default)
         config["config_version"] = CONFIG_VERSION
-        _save_config_best_effort(
-            config, "爬蟲抓取排程一次性遷移至 07:30~08:00 時間窗")
+        write_back_reasons.append("爬蟲抓取排程一次性遷移至 07:30~08:00 時間窗")
         if migrated:
             logger.info(
                 "已將舊時段的爬蟲抓取排程一次性遷移至 07:30~08:00 時間窗。"
             )
+
+    if write_back_reasons:
+        _save_config_best_effort(config, "、".join(write_back_reasons))
     return config
 
 
@@ -532,10 +560,11 @@ def load_config():
     if config is not None:
         try:
             return _normalize_config(config, default)
-        except (TypeError, ValueError, RecursionError) as exc:
-            # 頂層是物件、但第二層型別錯（如 "tdcc_schedule": null、
-            # "config_version": "3"）同樣算內容毀損：不隔離的話每次 load_config 都
-            # 會拋例外，--restart always 下就是重啟迴圈。處置與頂層毀損一致。
+        except (AttributeError, KeyError, TypeError, ValueError,
+                RecursionError) as exc:
+            # 保險絲：_normalize_config 已把已知的型別／格式錯就地修復，走到這裡
+            # 代表出現預期外的結構問題。不攔的話每次 load_config 都會拋例外，
+            # --restart always 下就是重啟迴圈，故處置與頂層毀損一致（隔離 + 預設值）。
             logger.error("設定檔 %s 內容不合預期：%s", CONFIG_PATH, exc)
             quarantine_corrupt_config()
     return default

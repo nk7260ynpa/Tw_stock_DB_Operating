@@ -202,11 +202,13 @@ bash docker/build.sh
 # 透過 run.sh 啟動
 ./run.sh
 
-# 或背景啟動
+# 或背景啟動（設定目錄務必一併掛載，否則排程自訂會隨容器消失，
+# 見「設定持久化」）
 docker run -d --name tw_stock_db_operating \
   --network db_network \
   -p 8080:8080 \
   -v $(pwd)/logs:/workspace/logs \
+  -v $(pwd)/config:/workspace/config \
   nk7260ynpa/tw_stock_db_operating:latest
 ```
 
@@ -491,13 +493,19 @@ CTEE 來源僅保留約 3 天，等不起。
   - 內容毀損（`ValueError`：JSON 壞掉、非 UTF-8、頂層不是 JSON 物件）→ 改名為
     `config.json.corrupt` 隔離（保留現場供人工檢視），記 error，接著再給舊設定一次
     搬遷機會，都沒有才退回程式碼預設值。服務不會因為一個壞掉的設定檔卡在重啟迴圈。
-  - **第二層型別錯也算毀損**：頂層雖是 JSON 物件，但像 `"tdcc_schedule": null`、
-    `"config_version": "3"` 這種內容會讓欄位補齊／版本比較拋 `TypeError`。若不處理，
-    每次 `load_config` 都會拋例外，在 `--restart always` 下就是重啟迴圈，處置因此與
-    頂層毀損一致（隔離 → 退回預設值）。
+- **欄位型別／格式錯就地修復（不隔離整份設定）**：頂層雖是 JSON 物件，但像
+  `"tdcc_schedule": null`、`"ctee_schedule": 5`、`"schedule_time": "sunday"` 這種值一路
+  傳到 `setup_schedule` 才爆炸的話，在 `--restart always` 下同樣是重啟迴圈。故
+  `_normalize_config` 做**與版本無關**的形狀正規化：缺鍵靜默補上預設（舊版設定沒有新
+  欄位屬正常），型別或 `HH:MM` 格式不符者換成預設值並記 warning，同一份設定中其餘正常
+  的自訂則保留。修復結果**不寫回**檔案（保留使用者原檔供人工檢視，每次啟動會再警告一
+  次）。`config_version` 無法判讀時視同最舊版本，讓一次性遷移有機會補跑。
+  `load_config` 另留一道保險絲：正規化仍拋出預期外例外（`AttributeError`、`KeyError`、
+  `TypeError`、`ValueError`、`RecursionError`）時，處置與頂層毀損一致（隔離 → 預設值）。
 - **設定寫回失敗不擋啟動**：一次性遷移（TDCC 週排程改每日、爬蟲時間窗收斂）需把結果
   寫回設定檔，但設定目錄唯讀／磁碟滿時不該讓服務起不來。寫回採 best-effort：失敗只記
-  error，本輪仍以**記憶體內已遷移**的設定繼續執行，下次啟動會再試一次寫回。
+  error，本輪仍以**記憶體內已遷移**的設定繼續執行，下次啟動會再試一次寫回。寫回統一在
+  正規化全部完成後執行一次，避免半套結果落地。
 - 守門測試在 `test/test_config_persistence.py`：包含「`CONFIG_PATH` 不得位於
   `LOG_DIR` 之下」與「`run.sh` 與 CI deploy 掛載到容器內同一設定路徑」的結構性檢查
   （後者斷言的是**掛載效果**而非變數名稱），有人改回舊做法就會紅燈。

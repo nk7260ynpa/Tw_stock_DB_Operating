@@ -268,22 +268,80 @@ class TestConfigWriteDurability(ConfigPathTestCase):
         self.assertNotEqual(names[0], names[1],
                             f"每次寫入的暫存檔名不可相同：{names}")
 
-    def test_second_level_type_error_is_quarantined(self):
-        """頂層是物件、但第二層型別錯也算毀損（否則照樣卡重啟迴圈）。"""
-        for payload in ({"tdcc_schedule": None},
-                        {"tdcc_schedule": 5},
-                        {"config_version": "3"}):
+    def test_bad_field_types_are_repaired_to_defaults(self):
+        """第二層型別／格式錯須就地換成預設值，而非讓服務卡在重啟迴圈。
+
+        這些值一路傳到 setup_schedule 才爆炸的話，--restart always 下就是重啟
+        迴圈；修復而非隔離則能保住同一份設定中其餘正常的使用者自訂。
+        """
+        cases = (
+            ({"tdcc_schedule": None}, "tdcc_schedule"),
+            ({"tdcc_schedule": 5}, "tdcc_schedule"),
+            ({"tdcc_schedule": "sunday 07:33"}, "tdcc_schedule"),
+            ({"tdcc_schedule": ["day"]}, "tdcc_schedule"),
+            ({"tdcc_schedule": {"time": 5}}, "tdcc_schedule"),
+            ({"ctee_schedule": {"time": "26:99"}}, "ctee_schedule"),
+            ({"schedule_time": None}, "schedule_time"),
+            ({"schedule_time": "sunday"}, "schedule_time"),
+            ({"config_version": "3"}, "config_version"),
+        )
+        corrupt = self.config_path.with_name("config.json.corrupt")
+        for payload, broken_key in cases:
             with self.subTest(payload=payload):
-                corrupt = self.config_path.with_name("config.json.corrupt")
-                if corrupt.exists():
-                    corrupt.unlink()
                 self.write_current(payload)
 
-                with self.assertLogs("web_server", level="ERROR"):
+                with self.assertLogs("web_server", level="WARNING") as captured:
                     config = web_server.load_config()
 
                 self.assertEqual(config["schedule_time"], "07:30")
-                self.assertTrue(corrupt.exists(), "第二層型別錯應被隔離。")
+                self.assertEqual(config["tdcc_schedule"], {"time": "07:33"})
+                self.assertEqual(config["config_version"],
+                                 web_server.CONFIG_VERSION)
+                self.assertIn(broken_key, "\n".join(captured.output))
+                self.assertFalse(corrupt.exists(),
+                                 "格式錯應就地修復，不該隔離整份設定。")
+
+    def test_repair_keeps_other_user_settings(self):
+        """修復壞欄位時，同一份設定中其餘合法的自訂必須保留。"""
+        self.write_current({
+            "config_version": web_server.CONFIG_VERSION,
+            "schedule_time": "07:31",
+            "tdcc_schedule": None,
+            "ctee_schedule": {"time": "07:47"},
+        })
+
+        with self.assertLogs("web_server", level="WARNING"):
+            config = web_server.load_config()
+
+        self.assertEqual(config["schedule_time"], "07:31")
+        self.assertEqual(config["ctee_schedule"], {"time": "07:47"})
+        self.assertEqual(config["tdcc_schedule"], {"time": "07:33"})
+
+    def test_version_2_config_with_missing_keys_starts(self):
+        """已是新版本號但欄位殘缺時仍須補齊（形狀正規化不受 version gate 拘束）。"""
+        self.write_current({"config_version": web_server.CONFIG_VERSION})
+
+        config = web_server.load_config()
+
+        self.assertEqual(config["schedule_time"], "07:30")
+        for key in web_server.CRAWL_SCHEDULE_KEYS:
+            self.assertIsInstance(config[key], dict)
+            self.assertRegex(config[key]["time"], r"^\d{2}:\d{2}$")
+
+    def test_unexpected_normalize_failure_is_quarantined(self):
+        """保險絲：正規化仍拋出預期外例外時，隔離毀損檔並退回預設值。"""
+        self.write_current({"schedule_time": "07:31"})
+
+        with patch.object(web_server, "_normalize_config",
+                          side_effect=AttributeError("預期外結構")):
+            with self.assertLogs("web_server", level="ERROR"):
+                config = web_server.load_config()
+
+        self.assertEqual(config["schedule_time"], "07:30")
+        self.assertTrue(
+            self.config_path.with_name("config.json.corrupt").exists(),
+            "預期外例外應隔離設定檔，避免卡在重啟迴圈。",
+        )
 
     def test_write_back_failure_does_not_break_startup(self):
         """一次性遷移寫回失敗時，服務仍須以記憶體內的設定繼續啟動。"""
